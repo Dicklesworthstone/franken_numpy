@@ -1537,6 +1537,66 @@ impl PyNdArray {
         }
     }
 
+    fn extract_reduction_axis_arg(
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Option<isize>, Option<Vec<isize>>)> {
+        let Some(ax) = axis else {
+            return Ok((None, None));
+        };
+        if ax.is_none() {
+            return Ok((None, None));
+        }
+        if let Ok(single) = ax.extract::<isize>() {
+            return Ok((Some(single), None));
+        }
+        if let Ok(axes) = ax.extract::<Vec<isize>>() {
+            return Ok((None, Some(axes)));
+        }
+        Err(PyTypeError::new_err(
+            "axis must be None, an integer, or a tuple of integers",
+        ))
+    }
+
+    fn array_with_optional_dtype<'a>(
+        &'a self,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<std::borrow::Cow<'a, UFuncArray>> {
+        let Some(dt_obj) = dtype else {
+            return Ok(std::borrow::Cow::Borrowed(&self.array));
+        };
+        if dt_obj.is_none() {
+            return Ok(std::borrow::Cow::Borrowed(&self.array));
+        }
+        let target = PyDType::resolve_spec(Some(dt_obj))?;
+        if target == self.array.dtype() {
+            return Ok(std::borrow::Cow::Borrowed(&self.array));
+        }
+        let storage = self.array.to_storage().map_err(map_ufunc_error)?;
+        let casted = UFuncArray::from_storage_with_dtype(
+            self.array.shape().to_vec(),
+            storage,
+            target,
+        )
+        .map_err(map_ufunc_error)?;
+        Ok(std::borrow::Cow::Owned(casted))
+    }
+
+    fn reshape_for_keepdims(&self, out: UFuncArray, axis: Option<isize>) -> PyResult<UFuncArray> {
+        let kept_shape: Vec<isize> = match axis {
+            None => vec![1isize; self.array.ndim()],
+            Some(ax) => {
+                let ndim = self.array.ndim() as isize;
+                let norm = if ax < 0 { ax + ndim } else { ax } as usize;
+                let mut sh: Vec<isize> = self.array.shape().iter().map(|&d| d as isize).collect();
+                if norm < sh.len() {
+                    sh[norm] = 1;
+                }
+                sh
+            }
+        };
+        out.reshape(&kept_shape).map_err(map_ufunc_error)
+    }
+
     fn resolve_flat_index(&self, indices: &[isize]) -> PyResult<usize> {
         let shape = self.array.shape();
         if indices.len() != shape.len() {
@@ -2204,75 +2264,180 @@ impl PyNdArray {
         self.apply_binary(py, other, BinaryOp::GreaterEqual)
     }
 
-    #[pyo3(signature = (axis=None, keepdims=false))]
+    #[pyo3(signature = (axis=None, dtype=None, keepdims=false, initial=None, r#where=None))]
     fn sum<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
+        dtype: Option<&Bound<'py, PyAny>>,
         keepdims: bool,
+        initial: Option<f64>,
+        r#where: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_sum(axis, keepdims)
-            .map_err(map_ufunc_error)?;
+        let src = self.array_with_optional_dtype(dtype)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let out = if let Some(where_obj) = r#where
+            && !where_obj.is_none()
+        {
+            if multi_axes.is_some() {
+                return Err(PyValueError::new_err(
+                    "PyNdArray.sum(where=...) currently supports axis=None or a single integer axis",
+                ));
+            }
+            let mask = Self::coerce_any_to_ufunc_array(py, where_obj, Some(DType::Bool), None)?;
+            let mut reduced = src
+                .reduce_sum_where(&mask, single_axis, keepdims)
+                .map_err(map_ufunc_error)?;
+            if let Some(init) = initial {
+                let init_arr =
+                    UFuncArray::scalar(init, reduced.dtype());
+                reduced = reduced
+                    .elementwise_binary(&init_arr, BinaryOp::Add)
+                    .map_err(map_ufunc_error)?;
+            }
+            reduced
+        } else if let Some(axes) = multi_axes {
+            let mut reduced = src
+                .reduce_sum_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)?;
+            if let Some(init) = initial {
+                let init_arr = UFuncArray::scalar(init, reduced.dtype());
+                reduced = reduced
+                    .elementwise_binary(&init_arr, BinaryOp::Add)
+                    .map_err(map_ufunc_error)?;
+            }
+            reduced
+        } else if let Some(init) = initial {
+            src.reduce_sum_initial(single_axis, keepdims, init)
+                .map_err(map_ufunc_error)?
+        } else {
+            src.reduce_sum(single_axis, keepdims)
+                .map_err(map_ufunc_error)?
+        };
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
-    #[pyo3(signature = (axis=None, keepdims=false))]
+    #[pyo3(signature = (axis=None, dtype=None, keepdims=false, initial=None))]
     fn prod<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
+        dtype: Option<&Bound<'py, PyAny>>,
         keepdims: bool,
+        initial: Option<f64>,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_prod(axis, keepdims)
-            .map_err(map_ufunc_error)?;
+        let src = self.array_with_optional_dtype(dtype)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let out = if let Some(axes) = multi_axes {
+            let mut reduced = src
+                .reduce_prod_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)?;
+            if let Some(init) = initial {
+                let init_arr = UFuncArray::scalar(init, reduced.dtype());
+                reduced = reduced
+                    .elementwise_binary(&init_arr, BinaryOp::Mul)
+                    .map_err(map_ufunc_error)?;
+            }
+            reduced
+        } else if let Some(init) = initial {
+            src.reduce_prod_initial(single_axis, keepdims, init)
+                .map_err(map_ufunc_error)?
+        } else {
+            src.reduce_prod(single_axis, keepdims)
+                .map_err(map_ufunc_error)?
+        };
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
-    #[pyo3(signature = (axis=None, keepdims=false))]
+    #[pyo3(signature = (axis=None, dtype=None, keepdims=false))]
     fn mean<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
+        dtype: Option<&Bound<'py, PyAny>>,
         keepdims: bool,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_mean(axis, keepdims)
-            .map_err(map_ufunc_error)?;
+        let src = self.array_with_optional_dtype(dtype)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let mut out = if let Some(axes) = multi_axes {
+            src.reduce_mean_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)?
+        } else {
+            src.reduce_mean(single_axis, keepdims)
+                .map_err(map_ufunc_error)?
+        };
+        if let Some(dt_obj) = dtype
+            && !dt_obj.is_none()
+        {
+            let target = PyDType::resolve_spec(Some(dt_obj))?;
+            if out.dtype() != target {
+                let storage = out.to_storage().map_err(map_ufunc_error)?;
+                out = UFuncArray::from_storage_with_dtype(out.shape().to_vec(), storage, target)
+                    .map_err(map_ufunc_error)?;
+            }
+        }
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
-    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    #[pyo3(signature = (axis=None, dtype=None, ddof=0, keepdims=false))]
     fn var<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
+        dtype: Option<&Bound<'py, PyAny>>,
         ddof: usize,
         keepdims: bool,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_var(axis, keepdims, ddof)
-            .map_err(map_ufunc_error)?;
+        let src = self.array_with_optional_dtype(dtype)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let mut out = if let Some(axes) = multi_axes {
+            src.reduce_var_axes(&axes, keepdims, ddof)
+                .map_err(map_ufunc_error)?
+        } else {
+            src.reduce_var(single_axis, keepdims, ddof)
+                .map_err(map_ufunc_error)?
+        };
+        if let Some(dt_obj) = dtype
+            && !dt_obj.is_none()
+        {
+            let target = PyDType::resolve_spec(Some(dt_obj))?;
+            if out.dtype() != target {
+                let storage = out.to_storage().map_err(map_ufunc_error)?;
+                out = UFuncArray::from_storage_with_dtype(out.shape().to_vec(), storage, target)
+                    .map_err(map_ufunc_error)?;
+            }
+        }
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
-    #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
+    #[pyo3(signature = (axis=None, dtype=None, ddof=0, keepdims=false))]
     fn std<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
+        dtype: Option<&Bound<'py, PyAny>>,
         ddof: usize,
         keepdims: bool,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_std(axis, keepdims, ddof)
-            .map_err(map_ufunc_error)?;
+        let src = self.array_with_optional_dtype(dtype)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let mut out = if let Some(axes) = multi_axes {
+            src.reduce_std_axes(&axes, keepdims, ddof)
+                .map_err(map_ufunc_error)?
+        } else {
+            src.reduce_std(single_axis, keepdims, ddof)
+                .map_err(map_ufunc_error)?
+        };
+        if let Some(dt_obj) = dtype
+            && !dt_obj.is_none()
+        {
+            let target = PyDType::resolve_spec(Some(dt_obj))?;
+            if out.dtype() != target {
+                let storage = out.to_storage().map_err(map_ufunc_error)?;
+                out = UFuncArray::from_storage_with_dtype(out.shape().to_vec(), storage, target)
+                    .map_err(map_ufunc_error)?;
+            }
+        }
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
@@ -2280,13 +2445,19 @@ impl PyNdArray {
     fn min<'py>(
         &self,
         py: Python<'py>,
-        axis: Option<isize>,
+        axis: Option<&Bound<'py, PyAny>>,
         keepdims: bool,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_min(axis, keepdims)
-            .map_err(map_ufunc_error)?;
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let out = if let Some(axes) = multi_axes {
+            self.array
+                .reduce_min_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)?
+        } else {
+            self.array
+                .reduce_min(single_axis, keepdims)
+                .map_err(map_ufunc_error)?
+        };
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
@@ -2294,13 +2465,33 @@ impl PyNdArray {
     fn max<'py>(
         &self,
         py: Python<'py>,
+        axis: Option<&Bound<'py, PyAny>>,
+        keepdims: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let (single_axis, multi_axes) = Self::extract_reduction_axis_arg(axis)?;
+        let out = if let Some(axes) = multi_axes {
+            self.array
+                .reduce_max_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)?
+        } else {
+            self.array
+                .reduce_max(single_axis, keepdims)
+                .map_err(map_ufunc_error)?
+        };
+        Self::wrap_reduction_output(py, out, keepdims)
+    }
+
+    #[pyo3(signature = (axis=None, keepdims=false))]
+    fn ptp<'py>(
+        &self,
+        py: Python<'py>,
         axis: Option<isize>,
         keepdims: bool,
     ) -> PyResult<Py<PyAny>> {
-        let out = self
-            .array
-            .reduce_max(axis, keepdims)
-            .map_err(map_ufunc_error)?;
+        let mut out = self.array.ptp(axis).map_err(map_ufunc_error)?;
+        if keepdims {
+            out = self.reshape_for_keepdims(out, axis)?;
+        }
         Self::wrap_reduction_output(py, out, keepdims)
     }
 
@@ -2325,20 +2516,7 @@ impl PyNdArray {
     ) -> PyResult<Py<PyAny>> {
         let mut out = self.array.all(axis).map_err(map_ufunc_error)?;
         if keepdims {
-            let kept_shape: Vec<isize> = match axis {
-                None => vec![1isize; self.array.ndim()],
-                Some(ax) => {
-                    let ndim = self.array.ndim() as isize;
-                    let norm = if ax < 0 { ax + ndim } else { ax } as usize;
-                    let mut sh: Vec<isize> =
-                        self.array.shape().iter().map(|&d| d as isize).collect();
-                    if norm < sh.len() {
-                        sh[norm] = 1;
-                    }
-                    sh
-                }
-            };
-            out = out.reshape(&kept_shape).map_err(map_ufunc_error)?;
+            out = self.reshape_for_keepdims(out, axis)?;
         }
         Self::wrap_reduction_output(py, out, keepdims)
     }
@@ -2352,20 +2530,7 @@ impl PyNdArray {
     ) -> PyResult<Py<PyAny>> {
         let mut out = self.array.any(axis).map_err(map_ufunc_error)?;
         if keepdims {
-            let kept_shape: Vec<isize> = match axis {
-                None => vec![1isize; self.array.ndim()],
-                Some(ax) => {
-                    let ndim = self.array.ndim() as isize;
-                    let norm = if ax < 0 { ax + ndim } else { ax } as usize;
-                    let mut sh: Vec<isize> =
-                        self.array.shape().iter().map(|&d| d as isize).collect();
-                    if norm < sh.len() {
-                        sh[norm] = 1;
-                    }
-                    sh
-                }
-            };
-            out = out.reshape(&kept_shape).map_err(map_ufunc_error)?;
+            out = self.reshape_for_keepdims(out, axis)?;
         }
         Self::wrap_reduction_output(py, out, keepdims)
     }
@@ -2380,15 +2545,37 @@ impl PyNdArray {
         Self::from_ufunc_array(self.array.round_to(decimals))
     }
 
-    #[pyo3(signature = (axis=None))]
-    fn cumsum(&self, axis: Option<isize>) -> PyResult<Self> {
-        let out = self.array.cumsum(axis).map_err(map_ufunc_error)?;
+    #[pyo3(signature = (axis=None, dtype=None))]
+    fn cumsum(&self, axis: Option<isize>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let src = self.array_with_optional_dtype(dtype)?;
+        let mut out = src.cumsum(axis).map_err(map_ufunc_error)?;
+        if let Some(dt_obj) = dtype
+            && !dt_obj.is_none()
+        {
+            let target = PyDType::resolve_spec(Some(dt_obj))?;
+            if out.dtype() != target {
+                let storage = out.to_storage().map_err(map_ufunc_error)?;
+                out = UFuncArray::from_storage_with_dtype(out.shape().to_vec(), storage, target)
+                    .map_err(map_ufunc_error)?;
+            }
+        }
         Self::from_ufunc_array(out)
     }
 
-    #[pyo3(signature = (axis=None))]
-    fn cumprod(&self, axis: Option<isize>) -> PyResult<Self> {
-        let out = self.array.cumprod(axis).map_err(map_ufunc_error)?;
+    #[pyo3(signature = (axis=None, dtype=None))]
+    fn cumprod(&self, axis: Option<isize>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let src = self.array_with_optional_dtype(dtype)?;
+        let mut out = src.cumprod(axis).map_err(map_ufunc_error)?;
+        if let Some(dt_obj) = dtype
+            && !dt_obj.is_none()
+        {
+            let target = PyDType::resolve_spec(Some(dt_obj))?;
+            if out.dtype() != target {
+                let storage = out.to_storage().map_err(map_ufunc_error)?;
+                out = UFuncArray::from_storage_with_dtype(out.shape().to_vec(), storage, target)
+                    .map_err(map_ufunc_error)?;
+            }
+        }
         Self::from_ufunc_array(out)
     }
 
@@ -2402,6 +2589,127 @@ impl PyNdArray {
     fn argsort(&self, axis: Option<isize>, kind: Option<&str>) -> PyResult<Self> {
         let out = self.array.argsort(axis, kind).map_err(map_ufunc_error)?;
         Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (offset=0, axis1=0, axis2=1))]
+    fn diagonal(&self, offset: i64, axis1: isize, axis2: isize) -> PyResult<Self> {
+        let out = self
+            .array
+            .diagonal(offset, axis1, axis2)
+            .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (offset=0, axis1=0, axis2=1, dtype=None))]
+    fn trace<'py>(
+        &self,
+        py: Python<'py>,
+        offset: i64,
+        axis1: isize,
+        axis2: isize,
+        dtype: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let src = self.array_with_optional_dtype(dtype)?;
+        let diag = src
+            .diagonal(offset, axis1, axis2)
+            .map_err(map_ufunc_error)?;
+        let out = diag.reduce_sum(Some(-1), false).map_err(map_ufunc_error)?;
+        Self::wrap_reduction_output(py, out, false)
+    }
+
+    #[pyo3(signature = (repeats, axis=None))]
+    fn repeat(&self, repeats: usize, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.repeat(repeats, axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (indices, axis=None))]
+    fn take<'py>(
+        &self,
+        py: Python<'py>,
+        indices: &Bound<'py, PyAny>,
+        axis: Option<isize>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Ok(single) = indices.extract::<i64>() {
+            let out = self
+                .array
+                .take(&[single], axis)
+                .map_err(map_ufunc_error)?;
+            if axis.is_none() {
+                let scalar = Self::from_ufunc_array(out)?;
+                return Ok(scalar.element_to_pyobject(py, 0)?.unbind());
+            }
+            return Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any());
+        }
+        let idx_vec = indices.extract::<Vec<i64>>()?;
+        let out = self
+            .array
+            .take(&idx_vec, axis)
+            .map_err(map_ufunc_error)?;
+        Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any())
+    }
+
+    #[pyo3(signature = (v, side="left"))]
+    fn searchsorted<'py>(
+        &self,
+        py: Python<'py>,
+        v: &Bound<'py, PyAny>,
+        side: &str,
+    ) -> PyResult<Py<PyAny>> {
+        if let Ok(scalar) = v.extract::<f64>() {
+            let needle =
+                UFuncArray::new(vec![1], vec![scalar], self.array.dtype()).map_err(map_ufunc_error)?;
+            let out = self
+                .array
+                .searchsorted(&needle, Some(side), None)
+                .map_err(map_ufunc_error)?;
+            let idx = out.values()[0] as i64;
+            return Ok(idx.into_pyobject(py)?.into_any().unbind());
+        }
+        let needles = Self::coerce_any_to_ufunc_array(py, v, None, None)?;
+        let out = self
+            .array
+            .searchsorted(&needles, Some(side), None)
+            .map_err(map_ufunc_error)?;
+        Ok(Py::new(py, Self::from_ufunc_array(out)?)?.into_any())
+    }
+
+    fn swapaxes(&self, axis1: isize, axis2: isize) -> PyResult<Self> {
+        let out = self.array.swapaxes(axis1, axis2).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn moveaxis(&self, source: isize, destination: isize) -> PyResult<Self> {
+        let out = self
+            .array
+            .moveaxis(source, destination)
+            .map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (shift, axis=None))]
+    fn roll(&self, shift: isize, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.roll(shift, axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn flip(&self, axis: Option<isize>) -> PyResult<Self> {
+        let out = self.array.flip(axis).map_err(map_ufunc_error)?;
+        Self::from_ufunc_array(out)
+    }
+
+    fn conj(&self) -> PyResult<Self> {
+        if self.array.dtype().is_complex() {
+            let out = self.array.conj().map_err(map_ufunc_error)?;
+            Self::from_ufunc_array(out)
+        } else {
+            Ok(self.clone())
+        }
+    }
+
+    fn conjugate(&self) -> PyResult<Self> {
+        self.conj()
     }
 
     /// NEP 13 `__array_ufunc__` protocol executed in pure Rust over [`UFuncArray`].
@@ -2422,20 +2730,48 @@ impl PyNdArray {
             let arr = Self::from_ufunc_array(Self::coerce_any_to_ufunc_array(
                 py, &arg0, None, None,
             )?)?;
-            let axis = kwargs
-                .and_then(|kw| kw.get_item("axis").ok().flatten())
-                .and_then(|v| v.extract::<isize>().ok());
+            let axis_obj = kwargs.and_then(|kw| kw.get_item("axis").ok().flatten());
+            let dtype_obj = kwargs.and_then(|kw| kw.get_item("dtype").ok().flatten());
+            let initial = kwargs
+                .and_then(|kw| kw.get_item("initial").ok().flatten())
+                .and_then(|v| v.extract::<f64>().ok());
+            let where_obj = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
             let keepdims = kwargs
                 .and_then(|kw| kw.get_item("keepdims").ok().flatten())
                 .and_then(|v| v.extract::<bool>().ok())
                 .unwrap_or(false);
+            let single_axis = axis_obj.as_ref().and_then(|v| v.extract::<isize>().ok());
             return match ufunc_name {
-                "add" => arr.sum(py, axis, keepdims),
-                "multiply" => arr.prod(py, axis, keepdims),
-                "minimum" | "fmin" => arr.min(py, axis, keepdims),
-                "maximum" | "fmax" => arr.max(py, axis, keepdims),
-                "logical_and" => arr.all(py, axis, keepdims),
-                "logical_or" => arr.any(py, axis, keepdims),
+                "add" => arr.sum(
+                    py,
+                    axis_obj.as_ref(),
+                    dtype_obj.as_ref(),
+                    keepdims,
+                    initial,
+                    where_obj.as_ref(),
+                ),
+                "multiply" => arr.prod(py, axis_obj.as_ref(), dtype_obj.as_ref(), keepdims, initial),
+                "minimum" | "fmin" => arr.min(py, axis_obj.as_ref(), keepdims),
+                "maximum" | "fmax" => arr.max(py, axis_obj.as_ref(), keepdims),
+                "logical_and" => arr.all(py, single_axis, keepdims),
+                "logical_or" => arr.any(py, single_axis, keepdims),
+                _ => Ok(py.NotImplemented()),
+            };
+        }
+
+        if method == "accumulate" && inputs.len() == 1 {
+            let arg0 = inputs.get_item(0)?;
+            let arr = Self::from_ufunc_array(Self::coerce_any_to_ufunc_array(
+                py, &arg0, None, None,
+            )?)?;
+            let axis = kwargs
+                .and_then(|kw| kw.get_item("axis").ok().flatten())
+                .and_then(|v| v.extract::<isize>().ok())
+                .or(Some(0));
+            let dtype_obj = kwargs.and_then(|kw| kw.get_item("dtype").ok().flatten());
+            return match ufunc_name {
+                "add" => Ok(Py::new(py, arr.cumsum(axis, dtype_obj.as_ref())?)?.into_any()),
+                "multiply" => Ok(Py::new(py, arr.cumprod(axis, dtype_obj.as_ref())?)?.into_any()),
                 _ => Ok(py.NotImplemented()),
             };
         }
@@ -2500,16 +2836,21 @@ impl PyNdArray {
     ) -> PyResult<Py<PyAny>> {
         let name_obj = func.getattr(intern!(py, "__name__"))?;
         let fn_name = name_obj.extract::<&str>()?;
-        let axis = kwargs
+        let axis_obj = kwargs
             .and_then(|kw| kw.get_item("axis").ok().flatten())
-            .and_then(|v| v.extract::<isize>().ok())
             .or_else(|| {
                 if args.len() >= 2 {
-                    args.get_item(1).ok()?.extract::<isize>().ok()
+                    args.get_item(1).ok()
                 } else {
                     None
                 }
             });
+        let axis = axis_obj.as_ref().and_then(|v| v.extract::<isize>().ok());
+        let dtype_obj = kwargs.and_then(|kw| kw.get_item("dtype").ok().flatten());
+        let initial = kwargs
+            .and_then(|kw| kw.get_item("initial").ok().flatten())
+            .and_then(|v| v.extract::<f64>().ok());
+        let where_obj = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
         let keepdims = kwargs
             .and_then(|kw| kw.get_item("keepdims").ok().flatten())
             .and_then(|v| v.extract::<bool>().ok())
@@ -2520,13 +2861,21 @@ impl PyNdArray {
             .unwrap_or(0);
 
         match fn_name {
-            "sum" => self.sum(py, axis, keepdims),
-            "prod" => self.prod(py, axis, keepdims),
-            "mean" => self.mean(py, axis, keepdims),
-            "var" => self.var(py, axis, ddof, keepdims),
-            "std" => self.std(py, axis, ddof, keepdims),
-            "min" | "amin" => self.min(py, axis, keepdims),
-            "max" | "amax" => self.max(py, axis, keepdims),
+            "sum" => self.sum(
+                py,
+                axis_obj.as_ref(),
+                dtype_obj.as_ref(),
+                keepdims,
+                initial,
+                where_obj.as_ref(),
+            ),
+            "prod" => self.prod(py, axis_obj.as_ref(), dtype_obj.as_ref(), keepdims, initial),
+            "mean" => self.mean(py, axis_obj.as_ref(), dtype_obj.as_ref(), keepdims),
+            "var" => self.var(py, axis_obj.as_ref(), dtype_obj.as_ref(), ddof, keepdims),
+            "std" => self.std(py, axis_obj.as_ref(), dtype_obj.as_ref(), ddof, keepdims),
+            "min" | "amin" => self.min(py, axis_obj.as_ref(), keepdims),
+            "max" | "amax" => self.max(py, axis_obj.as_ref(), keepdims),
+            "ptp" => self.ptp(py, axis, keepdims),
             "argmin" => self.argmin(py, axis),
             "argmax" => self.argmax(py, axis),
             "all" => self.all(py, axis, keepdims),
@@ -2556,10 +2905,122 @@ impl PyNdArray {
                 let ax = axis.ok_or_else(|| PyTypeError::new_err("expand_dims() missing axis"))?;
                 Ok(Py::new(py, self.expand_dims(ax)?)?.into_any())
             }
-            "cumsum" => Ok(Py::new(py, self.cumsum(axis)?)?.into_any()),
-            "cumprod" => Ok(Py::new(py, self.cumprod(axis)?)?.into_any()),
+            "cumsum" | "cumulative_sum" => {
+                Ok(Py::new(py, self.cumsum(axis, dtype_obj.as_ref())?)?.into_any())
+            }
+            "cumprod" | "cumulative_prod" => {
+                Ok(Py::new(py, self.cumprod(axis, dtype_obj.as_ref())?)?.into_any())
+            }
             "sort" => Ok(Py::new(py, self.sort(axis.or(Some(-1)), None)?)?.into_any()),
             "argsort" => Ok(Py::new(py, self.argsort(axis.or(Some(-1)), None)?)?.into_any()),
+            "diagonal" => {
+                let offset = kwargs
+                    .and_then(|kw| kw.get_item("offset").ok().flatten())
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .or_else(|| args.get_item(1).ok()?.extract::<i64>().ok())
+                    .unwrap_or(0);
+                let axis1 = kwargs
+                    .and_then(|kw| kw.get_item("axis1").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .unwrap_or(0);
+                let axis2 = kwargs
+                    .and_then(|kw| kw.get_item("axis2").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .unwrap_or(1);
+                Ok(Py::new(py, self.diagonal(offset, axis1, axis2)?)?.into_any())
+            }
+            "trace" => {
+                let offset = kwargs
+                    .and_then(|kw| kw.get_item("offset").ok().flatten())
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .or_else(|| args.get_item(1).ok()?.extract::<i64>().ok())
+                    .unwrap_or(0);
+                let axis1 = kwargs
+                    .and_then(|kw| kw.get_item("axis1").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .unwrap_or(0);
+                let axis2 = kwargs
+                    .and_then(|kw| kw.get_item("axis2").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .unwrap_or(1);
+                self.trace(py, offset, axis1, axis2, dtype_obj.as_ref())
+            }
+            "flip" => Ok(Py::new(py, self.flip(axis)?)?.into_any()),
+            "roll" => {
+                let shift = args
+                    .get_item(1)
+                    .ok()
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .or_else(|| {
+                        kwargs
+                            .and_then(|kw| kw.get_item("shift").ok().flatten())
+                            .and_then(|v| v.extract::<isize>().ok())
+                    })
+                    .ok_or_else(|| PyTypeError::new_err("roll() missing shift argument"))?;
+                let roll_axis = kwargs
+                    .and_then(|kw| kw.get_item("axis").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .or_else(|| args.get_item(2).ok()?.extract::<isize>().ok());
+                Ok(Py::new(py, self.roll(shift, roll_axis)?)?.into_any())
+            }
+            "swapaxes" if args.len() >= 3 => {
+                let ax1 = args.get_item(1)?.extract::<isize>()?;
+                let ax2 = args.get_item(2)?.extract::<isize>()?;
+                Ok(Py::new(py, self.swapaxes(ax1, ax2)?)?.into_any())
+            }
+            "moveaxis" if args.len() >= 3 => {
+                let src = args.get_item(1)?.extract::<isize>()?;
+                let dst = args.get_item(2)?.extract::<isize>()?;
+                Ok(Py::new(py, self.moveaxis(src, dst)?)?.into_any())
+            }
+            "repeat" => {
+                let repeats = args
+                    .get_item(1)
+                    .ok()
+                    .and_then(|v| v.extract::<usize>().ok())
+                    .or_else(|| {
+                        kwargs
+                            .and_then(|kw| kw.get_item("repeats").ok().flatten())
+                            .and_then(|v| v.extract::<usize>().ok())
+                    })
+                    .ok_or_else(|| PyTypeError::new_err("repeat() missing repeats argument"))?;
+                let rep_axis = kwargs
+                    .and_then(|kw| kw.get_item("axis").ok().flatten())
+                    .and_then(|v| v.extract::<isize>().ok())
+                    .or_else(|| args.get_item(2).ok()?.extract::<isize>().ok());
+                Ok(Py::new(py, self.repeat(repeats, rep_axis)?)?.into_any())
+            }
+            "clip" => {
+                let a_min = args
+                    .get_item(1)
+                    .ok()
+                    .and_then(|v| v.extract::<Option<f64>>().ok())
+                    .flatten()
+                    .or_else(|| {
+                        kwargs
+                            .and_then(|kw| kw.get_item("a_min").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok())
+                    });
+                let a_max = args
+                    .get_item(2)
+                    .ok()
+                    .and_then(|v| v.extract::<Option<f64>>().ok())
+                    .flatten()
+                    .or_else(|| {
+                        kwargs
+                            .and_then(|kw| kw.get_item("a_max").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok())
+                    });
+                Ok(Py::new(py, self.clip(a_min, a_max)?)?.into_any())
+            }
+            "round" | "around" => {
+                let decimals = kwargs
+                    .and_then(|kw| kw.get_item("decimals").ok().flatten())
+                    .and_then(|v| v.extract::<i32>().ok())
+                    .or_else(|| args.get_item(1).ok()?.extract::<i32>().ok())
+                    .unwrap_or(0);
+                Ok(Py::new(py, self.round(decimals)?)?.into_any())
+            }
             "dot" if args.len() == 2 => {
                 let rhs = args.get_item(1)?;
                 Ok(Py::new(py, self.dot(py, &rhs)?)?.into_any())
@@ -206619,9 +207080,34 @@ assert c.tolist() == [[11.0, 12.0, 13.0], [14.0, 15.0, 16.0]]
 assert a.sum() == 21.0
 assert a.sum(axis=0).tolist() == [5.0, 7.0, 9.0]
 assert a.sum(axis=1, keepdims=True).shape == (2, 1)
+assert a.sum(axis=(0, 1)) == 21.0
+assert a.sum(initial=10.0) == 31.0
+assert a.sum(where=a > 3.0) == 15.0
+assert a.prod(axis=(0, 1)) == 720.0
+assert a.prod(initial=2.0) == 1440.0
 assert a.mean() == 3.5
+assert a.mean(axis=(0, 1)) == 3.5
 assert a.min() == 1.0
+assert a.min(axis=(0, 1)) == 1.0
 assert a.max() == 6.0
+assert a.max(axis=(0, 1)) == 6.0
+assert a.ptp() == 5.0
+assert a.ptp(axis=1).tolist() == [2.0, 2.0]
+assert a.ptp(axis=1, keepdims=True).shape == (2, 1)
+assert a.cumsum(dtype="int64").dtype == "int64"
+assert a.cumprod(dtype="int64").tolist() == [1, 2, 6, 24, 120, 720]
+assert a.diagonal().tolist() == [1.0, 5.0]
+assert a.trace() == 6.0
+assert a.swapaxes(0, 1).shape == (3, 2)
+assert a.moveaxis(0, 1).shape == (3, 2)
+assert a.flip(axis=1).tolist() == [[3.0, 2.0, 1.0], [6.0, 5.0, 4.0]]
+assert a.roll(1, axis=1).tolist() == [[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]]
+assert a.repeat(2, axis=0).shape == (4, 3)
+assert a.take([0, 5]).tolist() == [1.0, 6.0]
+assert a.take(4) == 5.0
+assert a.reshape(-1).searchsorted(3.5) == 3
+assert a.reshape(-1).searchsorted([1.0, 4.5]).tolist() == [0, 4]
+assert a.conj().tolist() == a.tolist()
 assert a.argmin() == 0
 assert a.argmax() == 5
 assert a.T.shape == (3, 2)
@@ -206666,9 +207152,19 @@ assert added.tolist() == [[2.0, 5.0, 10.0], [17.0, 26.0, 37.0]]
 red = np.add.reduce(a, axis=1)
 assert isinstance(red, fnp.PyNdArray)
 assert red.tolist() == [14.0, 77.0]
+assert np.add.reduce(a, axis=(0, 1)) == 91.0
+acc = np.add.accumulate(a, axis=1)
+assert isinstance(acc, fnp.PyNdArray)
+assert acc.tolist() == [[1.0, 5.0, 14.0], [16.0, 41.0, 77.0]]
 
 # NEP 18 __array_function__
 assert np.sum(a) == 91.0
+assert np.sum(a, axis=(0, 1)) == 91.0
+assert np.sum(a, initial=9.0) == 100.0
+assert np.ptp(a) == 35.0
+assert np.trace(a) == 26.0
+assert np.diagonal(a).tolist() == [1.0, 25.0]
+assert np.flip(a, axis=1).tolist() == [[9.0, 4.0, 1.0], [36.0, 25.0, 16.0]]
 s0 = np.sum(a, axis=0)
 assert isinstance(s0, fnp.PyNdArray)
 assert s0.tolist() == [17.0, 29.0, 45.0]

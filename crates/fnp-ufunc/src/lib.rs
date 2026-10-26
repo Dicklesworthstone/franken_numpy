@@ -8316,10 +8316,10 @@ impl UFuncArray {
         let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
-                let sum = if out_dtype == DType::F32 {
-                    reduce_sum_values_f32(&self.values)
-                } else {
-                    reduce_sum_values(&self.values)
+                let sum = match out_dtype {
+                    DType::F16 => reduce_sum_values_f16(&self.values),
+                    DType::F32 => reduce_sum_values_f32(&self.values),
+                    _ => reduce_sum_values(&self.values),
                 };
                 let out_sidecar = source_sidecar.as_ref().map(|s| match s {
                     IntegerSidecar::I64(v) => {
@@ -8348,15 +8348,31 @@ impl UFuncArray {
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
-                if out_dtype == DType::F32 {
-                    reduce_sum_axis_contiguous_f32(
-                        &self.values,
-                        &self.shape,
-                        axis,
-                        &mut out_values,
-                    );
-                } else {
-                    reduce_sum_axis_contiguous(&self.values, &self.shape, axis, &mut out_values);
+                match out_dtype {
+                    DType::F16 => {
+                        reduce_sum_axis_contiguous_f16(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                    }
+                    DType::F32 => {
+                        reduce_sum_axis_contiguous_f32(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                    }
+                    _ => {
+                        reduce_sum_axis_contiguous(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                    }
                 }
 
                 let out_sidecar = source_sidecar.as_ref().map(|s| {
@@ -8736,6 +8752,12 @@ impl UFuncArray {
                 }
                 result.values = sidecar.iter().map(|&v| v as f64).collect();
             }
+            (_, DType::F16) => {
+                let initial = f16::from_f64(initial);
+                for v in &mut result.values {
+                    *v = f16::from_f32(initial.to_f32() + f16::from_f64(*v).to_f32()).to_f64();
+                }
+            }
             (_, DType::F32) => {
                 let initial = initial as f32;
                 for v in &mut result.values {
@@ -8777,6 +8799,12 @@ impl UFuncArray {
                 }
                 result.values = sidecar.iter().map(|&v| v as f64).collect();
             }
+            (_, DType::F16) => {
+                let initial = f16::from_f64(initial);
+                for v in &mut result.values {
+                    *v = f16::from_f32(initial.to_f32() * f16::from_f64(*v).to_f32()).to_f64();
+                }
+            }
             (_, DType::F32) => {
                 let initial = initial as f32;
                 for v in &mut result.values {
@@ -8803,15 +8831,21 @@ impl UFuncArray {
         let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
-                let prod: f64 = if out_dtype == DType::F32 {
-                    f64::from(
+                let prod: f64 = match out_dtype {
+                    DType::F16 => f16::from_f32(
+                        self.values
+                            .iter()
+                            .copied()
+                            .fold(1.0f32, |acc, v| acc * f16::from_f64(v).to_f32()),
+                    )
+                    .to_f64(),
+                    DType::F32 => f64::from(
                         self.values
                             .iter()
                             .copied()
                             .fold(1.0f32, |acc, v| acc * (v as f32)),
-                    )
-                } else {
-                    self.values.iter().copied().product()
+                    ),
+                    _ => self.values.iter().copied().product(),
                 };
                 let out_sidecar = if self.values.is_empty() {
                     source_sidecar.as_ref().map(|s| match s {
@@ -8847,21 +8881,32 @@ impl UFuncArray {
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![1.0f64; out_count];
-                if out_dtype == DType::F32 {
-                    reduce_prod_axis_contiguous_f32(
-                        &self.values,
-                        &self.shape,
-                        axis,
-                        &mut out_values,
-                    );
-                } else {
-                    reduce_fold_axis_contiguous(
-                        &self.values,
-                        &self.shape,
-                        axis,
-                        &mut out_values,
-                        |acc, v| acc * v,
-                    );
+                match out_dtype {
+                    DType::F16 => {
+                        reduce_prod_axis_contiguous_f16(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                    }
+                    DType::F32 => {
+                        reduce_prod_axis_contiguous_f32(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                        );
+                    }
+                    _ => {
+                        reduce_fold_axis_contiguous(
+                            &self.values,
+                            &self.shape,
+                            axis,
+                            &mut out_values,
+                            |acc, v| acc * v,
+                        );
+                    }
                 }
 
                 let out_sidecar = source_sidecar.as_ref().map(|s| {
@@ -9275,6 +9320,11 @@ impl UFuncArray {
                 Some(IntegerSidecar::U64(values)) => {
                     values.iter().map(|&value| value as f64).collect()
                 }
+                None if out_dtype == DType::F16 => self
+                    .values
+                    .iter()
+                    .map(|&value| f16::from_f32(0.0f32 + f16::from_f64(value).to_f32()).to_f64())
+                    .collect(),
                 None if out_dtype == DType::F32 => self
                     .values
                     .iter()
@@ -9317,6 +9367,11 @@ impl UFuncArray {
                 Some(IntegerSidecar::U64(values)) => {
                     values.iter().map(|&value| value as f64).collect()
                 }
+                None if out_dtype == DType::F16 => self
+                    .values
+                    .iter()
+                    .map(|&value| f16::from_f64(value).to_f64())
+                    .collect(),
                 None if out_dtype == DType::F32 => self
                     .values
                     .iter()
@@ -9574,10 +9629,49 @@ impl UFuncArray {
                 }
             };
         }
+        if self.dtype == DType::F16 {
+            return match axis {
+                None => {
+                    let mut acc = f16::from_f32(-0.0f32);
+                    let values: Vec<f64> = self
+                        .values
+                        .iter()
+                        .map(|&v| {
+                            acc = f16::from_f32(acc.to_f32() + f16::from_f64(v).to_f32());
+                            acc.to_f64()
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let values_f16: Vec<f16> =
+                        self.values.iter().map(|&v| f16::from_f64(v)).collect();
+                    let out_f16 = cumulate_axis_f16(
+                        &values_f16,
+                        &self.shape,
+                        axis,
+                        f16::from_f32(-0.0f32),
+                        |acc, v| f16::from_f32(acc.to_f32() + v.to_f32()),
+                    )?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_f16.into_iter().map(f16::to_f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+            };
+        }
         if self.dtype == DType::F32 {
             return match axis {
                 None => {
-                    let mut acc = 0.0f32;
+                    let mut acc = -0.0f32;
                     let values: Vec<f64> = self
                         .values
                         .iter()
@@ -9597,7 +9691,7 @@ impl UFuncArray {
                     let axis = normalize_axis(axis, self.shape.len())?;
                     let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
                     let out_f32 =
-                        cumulate_axis_f32(&values_f32, &self.shape, axis, 0.0f32, |acc, v| {
+                        cumulate_axis_f32(&values_f32, &self.shape, axis, -0.0f32, |acc, v| {
                             acc + v
                         })?;
                     Ok(Self {
@@ -9612,7 +9706,7 @@ impl UFuncArray {
         match axis {
             None => {
                 // Flatten and cumsum
-                let mut acc = 0.0;
+                let mut acc = -0.0;
                 let values: Vec<f64> = self
                     .values
                     .iter()
@@ -9630,7 +9724,7 @@ impl UFuncArray {
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
-                cumulate_axis(&self.values, &self.shape, axis, 0.0, |acc, v| acc + v).map(
+                cumulate_axis(&self.values, &self.shape, axis, -0.0, |acc, v| acc + v).map(
                     |values| Self {
                         shape: self.shape.clone(),
                         values,
@@ -9708,6 +9802,45 @@ impl UFuncArray {
                         values: out_sidecar.iter().map(|&v| v as f64).collect(),
                         dtype: out_dtype,
                         integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+            };
+        }
+        if self.dtype == DType::F16 {
+            return match axis {
+                None => {
+                    let mut acc = f16::from_f32(1.0f32);
+                    let values: Vec<f64> = self
+                        .values
+                        .iter()
+                        .map(|&v| {
+                            acc = f16::from_f32(acc.to_f32() * f16::from_f64(v).to_f32());
+                            acc.to_f64()
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let values_f16: Vec<f16> =
+                        self.values.iter().map(|&v| f16::from_f64(v)).collect();
+                    let out_f16 = cumulate_axis_f16(
+                        &values_f16,
+                        &self.shape,
+                        axis,
+                        f16::from_f32(1.0f32),
+                        |acc, v| f16::from_f32(acc.to_f32() * v.to_f32()),
+                    )?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_f16.into_iter().map(f16::to_f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: None,
                     })
                 }
             };
@@ -26832,7 +26965,7 @@ impl UFuncArray {
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_sum(axis, keepdims);
         }
-        if self.dtype == DType::F32 {
+        if matches!(self.dtype, DType::F16 | DType::F32) {
             return self.nan_filtered_fill(0.0).reduce_sum(axis, keepdims);
         }
         match axis {
@@ -32821,6 +32954,65 @@ fn reduce_sum_strided_f32(values: &[f64], start: usize, step: usize, len: usize)
     f64::from(finalize_sum_f32(sum))
 }
 
+/// NumPy's contiguous `float16` (`HALF`) pairwise summation tree (`loops_utils.h.src`):
+/// promotes each `f16` leaf to `f32`, sums via the 8-lane, 128-leaf, 8-aligned `f32`
+/// pairwise tree, and rounds back to `f16` once at the top of the lane (`HALF_add`).
+fn pairwise_sum_f16_values(values: &[f64]) -> f32 {
+    let n = values.len();
+    if n == 0 {
+        return 0.0f32;
+    }
+    if n < 8 {
+        let mut res = -0.0f32;
+        for &value in values {
+            res += f16::from_f64(value).to_f32();
+        }
+        return res;
+    }
+    if n <= 128 {
+        let mut r = [
+            f16::from_f64(values[0]).to_f32(),
+            f16::from_f64(values[1]).to_f32(),
+            f16::from_f64(values[2]).to_f32(),
+            f16::from_f64(values[3]).to_f32(),
+            f16::from_f64(values[4]).to_f32(),
+            f16::from_f64(values[5]).to_f32(),
+            f16::from_f64(values[6]).to_f32(),
+            f16::from_f64(values[7]).to_f32(),
+        ];
+        let mut i = 8;
+        while i + 8 <= n {
+            for (k, acc) in r.iter_mut().enumerate() {
+                *acc += f16::from_f64(values[i + k]).to_f32();
+            }
+            i += 8;
+        }
+        let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+        while i < n {
+            res += f16::from_f64(values[i]).to_f32();
+            i += 1;
+        }
+        return res;
+    }
+    let mut split = n / 2;
+    split -= split % 8;
+    pairwise_sum_f16_values(&values[..split]) + pairwise_sum_f16_values(&values[split..])
+}
+
+fn reduce_sum_values_f16(values: &[f64]) -> f64 {
+    f16::from_f32(finalize_sum_f32(pairwise_sum_f16_values(values))).to_f64()
+}
+
+fn reduce_sum_strided_f16(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
+    let mut sum = f16::from_f32(0.0f32);
+    let mut offset = start;
+    for _ in 0..len {
+        sum = f16::from_f32(sum.to_f32() + f16::from_f64(values[offset]).to_f32());
+        offset += step;
+    }
+    sum.to_f64()
+}
+
 fn reduce_sum_lane_for_dtype(
     values: &[f64],
     base: usize,
@@ -32828,14 +33020,22 @@ fn reduce_sum_lane_for_dtype(
     axis_len: usize,
     out_dtype: DType,
 ) -> f64 {
-    if out_dtype == DType::F32 {
-        if inner == 1 {
-            reduce_sum_values_f32(&values[base..base + axis_len])
-        } else {
-            reduce_sum_strided_f32(values, base, inner, axis_len)
+    match out_dtype {
+        DType::F16 => {
+            if inner == 1 {
+                reduce_sum_values_f16(&values[base..base + axis_len])
+            } else {
+                reduce_sum_strided_f16(values, base, inner, axis_len)
+            }
         }
-    } else {
-        reduce_sum_strided(values, base, inner, axis_len)
+        DType::F32 => {
+            if inner == 1 {
+                reduce_sum_values_f32(&values[base..base + axis_len])
+            } else {
+                reduce_sum_strided_f32(values, base, inner, axis_len)
+            }
+        }
+        _ => reduce_sum_strided(values, base, inner, axis_len),
     }
 }
 
@@ -33420,6 +33620,60 @@ fn reduce_sum_axis_contiguous_f32(
         for inner_idx in 0..inner {
             out_values[out_flat] =
                 reduce_sum_strided_f32(values, base + inner_idx, inner, axis_len);
+            out_flat += 1;
+        }
+    }
+}
+
+fn reduce_sum_axis_contiguous_f16(
+    values: &[f64],
+    shape: &[usize],
+    axis: usize,
+    out_values: &mut [f64],
+) {
+    debug_assert!(axis < shape.len());
+    if out_values.is_empty() {
+        return;
+    }
+
+    let axis_len = shape[axis];
+    if axis_len == 0 {
+        return;
+    }
+
+    let inner = shape[axis + 1..].iter().copied().product::<usize>();
+    let outer = shape[..axis].iter().copied().product::<usize>();
+
+    if inner == 1 {
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        *slot = reduce_sum_values_f16(row);
+                    }
+                });
+        } else {
+            for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                *slot = reduce_sum_values_f16(chunk);
+            }
+        }
+        return;
+    }
+
+    let mut out_flat = 0usize;
+    for outer_idx in 0..outer {
+        let base = outer_idx * axis_len * inner;
+        for inner_idx in 0..inner {
+            out_values[out_flat] =
+                reduce_sum_strided_f16(values, base + inner_idx, inner, axis_len);
             out_flat += 1;
         }
     }
@@ -34649,6 +34903,74 @@ fn reduce_prod_axis_contiguous_f32(
     }
 }
 
+fn reduce_prod_axis_contiguous_f16(
+    values: &[f64],
+    shape: &[usize],
+    axis: usize,
+    out_values: &mut [f64],
+) {
+    debug_assert!(axis < shape.len());
+    if out_values.is_empty() {
+        return;
+    }
+
+    let axis_len = shape[axis];
+    if axis_len == 0 {
+        return;
+    }
+
+    let inner = shape[axis + 1..].iter().copied().product::<usize>();
+    let outer = shape[..axis].iter().copied().product::<usize>();
+
+    if inner == 1 {
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        let mut acc = 1.0f32;
+                        for &value in row {
+                            acc *= f16::from_f64(value).to_f32();
+                        }
+                        *slot = f16::from_f32(acc).to_f64();
+                    }
+                });
+        } else {
+            for (slot, row) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                let mut acc = 1.0f32;
+                for &value in row {
+                    acc *= f16::from_f64(value).to_f32();
+                }
+                *slot = f16::from_f32(acc).to_f64();
+            }
+        }
+        return;
+    }
+
+    let mut out_flat = 0usize;
+    for outer_idx in 0..outer {
+        let base = outer_idx * axis_len * inner;
+        for inner_idx in 0..inner {
+            let mut offset = base + inner_idx;
+            let mut acc = f16::from_f64(values[offset]);
+            offset += inner;
+            for _ in 1..axis_len {
+                acc = f16::from_f32(acc.to_f32() * f16::from_f64(values[offset]).to_f32());
+                offset += inner;
+            }
+            out_values[out_flat] = acc.to_f64();
+            out_flat += 1;
+        }
+    }
+}
+
 /// Register-blocked portable-SIMD min (`MAX=false`) or max (`MAX=true`) reduction
 /// over a NON-LAST axis (`inner > 1`) of f64 data. This is the reduction analogue
 /// of the per-axis ptp fast path: `reduce_fold_axis_contiguous` walks each output
@@ -34874,6 +35196,77 @@ fn cumulate_axis_f32(
 
     let block = axis_len * inner;
     let process_block = |(out_block, in_block): (&mut [f32], &[f32])| {
+        for c in 0..inner {
+            out_block[c] = fold(identity, in_block[c]);
+        }
+        for a in 1..axis_len {
+            let (done, todo) = out_block.split_at_mut(a * inner);
+            let prev_row = &done[(a - 1) * inner..a * inner];
+            let curr_row = &mut todo[..inner];
+            let in_row = &in_block[a * inner..a * inner + inner];
+            for c in 0..inner {
+                curr_row[c] = fold(prev_row[c], in_row[c]);
+            }
+        }
+    };
+    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(values.par_chunks(block))
+            .for_each(process_block);
+    } else {
+        out.chunks_mut(block)
+            .zip(values.chunks(block))
+            .for_each(process_block);
+    }
+
+    Ok(out)
+}
+
+fn cumulate_axis_f16(
+    values: &[f16],
+    shape: &[usize],
+    axis: usize,
+    identity: f16,
+    fold: impl Fn(f16, f16) -> f16 + Sync,
+) -> Result<Vec<f16>, UFuncError> {
+    debug_assert!(axis < shape.len());
+    let total = element_count(shape).map_err(UFuncError::Shape)?;
+    let axis_len = shape[axis];
+    if axis_len == 0 || total == 0 {
+        return Ok(vec![f16::from_f32(0.0f32); total]);
+    }
+    if axis_len == 1 {
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
+    }
+
+    let mut out = vec![f16::from_f32(0.0f32); total];
+    let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
+    let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
+
+    if inner == 1 {
+        let scan_lane = |(out_lane, in_lane): (&mut [f16], &[f16])| {
+            let mut acc = identity;
+            for (out_slot, &value) in out_lane.iter_mut().zip(in_lane.iter()) {
+                acc = fold(acc, value);
+                *out_slot = acc;
+            }
+        };
+        const CUM_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+        if outer >= 2 && total >= CUM_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(axis_len)
+                .zip(values.par_chunks(axis_len))
+                .for_each(scan_lane);
+        } else {
+            out.chunks_mut(axis_len)
+                .zip(values.chunks(axis_len))
+                .for_each(scan_lane);
+        }
+        return Ok(out);
+    }
+
+    let block = axis_len * inner;
+    let process_block = |(out_block, in_block): (&mut [f16], &[f16])| {
         for c in 0..inner {
             out_block[c] = fold(identity, in_block[c]);
         }
@@ -86877,6 +87270,278 @@ print(json.dumps(rows))
         assert_eq!(
             f32_ptp.ptp(Some(1)).unwrap().to_storage().unwrap(),
             ArrayStorage::F32(vec![f32::INFINITY, f32::INFINITY])
+        );
+    }
+
+    #[test]
+    fn reduce_sum_prod_and_cumulate_f16_match_live_numpy() {
+        // 1. Contiguous f16 sum promotes leaves to f32 in the 8-lane pairwise tree and rounds once,
+        //    whereas strided f16 sum (inner > 1) rounds to f16 at every addition step.
+        //    In float16, 2048.0 has ULP = 2.0, so 2048.0 + 1.0 rounds to 2048.0 in f16,
+        //    but in f32 2048.0 + 1.0 = 2049.0 exactly.
+        let mut row0 = Vec::with_capacity(8);
+        row0.push(f16::from_f32(2048.0));
+        row0.extend(std::iter::repeat_n(f16::from_f32(1.0), 6));
+        row0.push(f16::from_f32(-2048.0));
+        let mut vals_2x8 = row0.clone();
+        vals_2x8.extend_from_slice(&row0);
+        let arr_2x8 =
+            UFuncArray::from_storage(vec![2, 8], ArrayStorage::F16(vals_2x8.clone())).unwrap();
+        // Contiguous axis=1 (inner == 1) and axis=None: f32 pairwise accumulator keeps the 6 ones -> 6.0
+        assert_eq!(
+            arr_2x8
+                .reduce_sum(Some(1), false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(6.0), f16::from_f32(6.0)])
+        );
+        assert_eq!(
+            arr_2x8
+                .reduce_sum(None, false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(12.0)])
+        );
+        // Transpose to (8, 2) and reduce along axis=0 (inner == 2 > 1):
+        // strided HALF_add rounds each step to f16: 2048 + 1 -> 2048 six times, then - 2048 -> 0.0!
+        let mut vals_8x2 = Vec::with_capacity(16);
+        for &v in &row0 {
+            vals_8x2.push(v);
+            vals_8x2.push(v);
+        }
+        let arr_8x2 = UFuncArray::from_storage(vec![8, 2], ArrayStorage::F16(vals_8x2)).unwrap();
+        assert_eq!(
+            arr_8x2
+                .reduce_sum(Some(0), false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(0.0), f16::from_f32(0.0)])
+        );
+        // Parallel partition plan on both axis=1 (inner==1) and axis=0 (inner>1) matches reduce_sum
+        let par_cfg = crate::ParallelPartitionConfig {
+            worker_count: 2,
+            min_elements_per_chunk: 1,
+        };
+        assert_eq!(
+            arr_2x8
+                .reduce_sum_parallel(Some(1), false, par_cfg)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(6.0), f16::from_f32(6.0)])
+        );
+        assert_eq!(
+            arr_8x2
+                .reduce_sum_parallel(Some(0), false, par_cfg)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(0.0), f16::from_f32(0.0)])
+        );
+
+        // 2. Contiguous f16 prod accumulates in f32 and converts once at the end of the lane,
+        //    whereas strided f16 prod (inner > 1) and cumprod round to f16 at every step.
+        //    400.0 * 400.0 = 160_000.0 overflows f16 (MAX = 65_504) to inf,
+        //    so [400.0, 400.0, 0.25] is 40_000.0 in contiguous prod, but inf in strided prod & cumprod!
+        let prod_lane = [
+            f16::from_f32(400.0),
+            f16::from_f32(400.0),
+            f16::from_f32(0.25),
+        ];
+        let prod_1d =
+            UFuncArray::from_storage(vec![3], ArrayStorage::F16(prod_lane.to_vec())).unwrap();
+        assert_eq!(
+            prod_1d
+                .reduce_prod(None, false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(40_000.0)])
+        );
+        assert_eq!(
+            prod_1d.cumprod(None).unwrap().to_storage().unwrap(),
+            ArrayStorage::F16(vec![f16::from_f32(400.0), f16::INFINITY, f16::INFINITY,])
+        );
+        let prod_3x2 = UFuncArray::from_storage(
+            vec![3, 2],
+            ArrayStorage::F16(vec![
+                prod_lane[0],
+                prod_lane[0],
+                prod_lane[1],
+                prod_lane[1],
+                prod_lane[2],
+                prod_lane[2],
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            prod_3x2
+                .reduce_prod(Some(0), false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::F16(vec![f16::INFINITY, f16::INFINITY])
+        );
+
+        // 3. -0.0 signbit preservation in cumsum element 0 across F16, F32, F64
+        let neg_zero_f16 = UFuncArray::from_storage(
+            vec![1, 2],
+            ArrayStorage::F16(vec![f16::from_f32(-0.0), f16::from_f32(0.0)]),
+        )
+        .unwrap();
+        for axis in [None, Some(0), Some(1)] {
+            let cs = neg_zero_f16.cumsum(axis).unwrap();
+            let ArrayStorage::F16(bits) = cs.to_storage().unwrap() else {
+                panic!("expected F16");
+            };
+            assert_eq!(bits[0].to_bits(), f16::from_f32(-0.0).to_bits());
+            assert_eq!(bits[1].to_bits(), f16::from_f32(0.0).to_bits());
+        }
+
+        // 4. Bit-exact differential sweep against live NumPy across contiguous, strided, and cumulations
+        use std::io::Write;
+        use std::process::Stdio;
+        #[derive(serde::Serialize)]
+        struct Case {
+            id: usize,
+            op: &'static str,
+            shape: Vec<usize>,
+            axis: Option<isize>,
+            bits: Vec<u16>,
+            got_bits: Vec<u16>,
+        }
+        let mut seed = 0x517c_c1b7_2722_0a95_u64;
+        let mut next_f16 = || -> f16 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let r = ((seed >> 40) as f32 / (1u32 << 24) as f32) * 4.0 - 2.0;
+            f16::from_f32(r)
+        };
+        let extract_u16_bits = |arr: UFuncArray| -> Vec<u16> {
+            match arr.to_storage().unwrap() {
+                ArrayStorage::F16(v) => v.into_iter().map(f16::to_bits).collect(),
+                other => panic!("expected F16 storage, got {other:?}"),
+            }
+        };
+        let mut cases = Vec::new();
+        let mut id = 0usize;
+        for n in [0usize, 1, 7, 8, 9, 15, 16, 17, 127, 128, 129, 255, 256] {
+            let vals: Vec<f16> = (0..n).map(|_| next_f16()).collect();
+            let bits: Vec<u16> = vals.iter().copied().map(f16::to_bits).collect();
+            let arr = UFuncArray::from_storage(vec![n], ArrayStorage::F16(vals)).unwrap();
+            cases.push(Case {
+                id,
+                op: "sum",
+                shape: vec![n],
+                axis: None,
+                bits: bits.clone(),
+                got_bits: extract_u16_bits(arr.reduce_sum(None, false).unwrap()),
+            });
+            id += 1;
+            cases.push(Case {
+                id,
+                op: "prod",
+                shape: vec![n],
+                axis: None,
+                bits: bits.clone(),
+                got_bits: extract_u16_bits(arr.reduce_prod(None, false).unwrap()),
+            });
+            id += 1;
+            cases.push(Case {
+                id,
+                op: "cumsum",
+                shape: vec![n],
+                axis: None,
+                bits: bits.clone(),
+                got_bits: extract_u16_bits(arr.cumsum(None).unwrap()),
+            });
+            id += 1;
+            cases.push(Case {
+                id,
+                op: "cumprod",
+                shape: vec![n],
+                axis: None,
+                bits,
+                got_bits: extract_u16_bits(arr.cumprod(None).unwrap()),
+            });
+            id += 1;
+        }
+        for shape in [vec![9, 3], vec![3, 17], vec![4, 5, 1]] {
+            let total: usize = shape.iter().product();
+            let vals: Vec<f16> = (0..total).map(|_| next_f16()).collect();
+            let bits: Vec<u16> = vals.iter().copied().map(f16::to_bits).collect();
+            let arr = UFuncArray::from_storage(shape.clone(), ArrayStorage::F16(vals)).unwrap();
+            for axis in 0..shape.len() {
+                let ax = Some(axis as isize);
+                for (op, got) in [
+                    ("sum", arr.reduce_sum(ax, false).unwrap()),
+                    ("prod", arr.reduce_prod(ax, false).unwrap()),
+                    ("cumsum", arr.cumsum(ax).unwrap()),
+                    ("cumprod", arr.cumprod(ax).unwrap()),
+                ] {
+                    cases.push(Case {
+                        id,
+                        op,
+                        shape: shape.clone(),
+                        axis: ax,
+                        bits: bits.clone(),
+                        got_bits: extract_u16_bits(got),
+                    });
+                    id += 1;
+                }
+            }
+        }
+        let script = r#"
+import json, sys, numpy as np
+cases = json.load(sys.stdin)
+mismatches = []
+for c in cases:
+    raw = np.array(c["bits"], dtype=np.uint16).view(np.float16).reshape(c["shape"])
+    op = c["op"]
+    ax = c["axis"]
+    if op == "sum":
+        res = np.sum(raw, axis=ax, dtype=np.float16)
+    elif op == "prod":
+        res = np.prod(raw, axis=ax, dtype=np.float16)
+    elif op == "cumsum":
+        res = np.cumsum(raw, axis=ax, dtype=np.float16)
+    elif op == "cumprod":
+        res = np.cumprod(raw, axis=ax, dtype=np.float16)
+    want = np.asarray(res, dtype=np.float16).reshape(-1).view(np.uint16).tolist()
+    if want != c["got_bits"]:
+        mismatches.append({"id": c["id"], "op": op, "shape": c["shape"], "axis": ax, "want": want, "got": c["got_bits"]})
+print(json.dumps(mismatches))
+"#;
+        let payload = serde_json::to_vec(&cases).unwrap();
+        let mut child = Command::new(crate::default_frompyfunc_python_interpreter())
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn python3");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(&payload)
+            .expect("write payload");
+        let output = child.wait_with_output().expect("wait python3");
+        assert!(
+            output.status.success(),
+            "python stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mismatches: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse mismatches");
+        assert_eq!(
+            mismatches,
+            serde_json::json!([]),
+            "mismatches: {mismatches}"
         );
     }
 }
