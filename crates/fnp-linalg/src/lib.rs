@@ -7659,6 +7659,74 @@ pub fn multi_dot(
     Ok((result, rows, cols))
 }
 
+/// Divide a Schur back-substitution value by a (possibly nearly singular)
+/// complex pivot. Scaling the pivot avoids squaring very large or small values.
+fn schur_divide(rhs: (f64, f64), pivot: (f64, f64), pivot_floor: f64) -> (f64, f64) {
+    let magnitude = pivot.0.abs().max(pivot.1.abs());
+    let (re, im) = if magnitude == 0.0 {
+        (1.0, 0.0)
+    } else {
+        (pivot.0 / magnitude, pivot.1 / magnitude)
+    };
+    let scale = magnitude.max(pivot_floor);
+    let denominator = re * re + im * im;
+    let rhs_re = rhs.0 / scale;
+    let rhs_im = rhs.1 / scale;
+    (
+        (rhs_re * re + rhs_im * im) / denominator,
+        (rhs_im * re - rhs_re * im) / denominator,
+    )
+}
+
+/// Solve one shifted 2x2 Schur block with complete pivoting. Both equations
+/// must be solved together: its nonzero subdiagonal couples the two unknowns.
+fn schur_solve_2x2(
+    mut matrix: [[(f64, f64); 2]; 2],
+    mut rhs: [(f64, f64); 2],
+    pivot_floor: f64,
+) -> [(f64, f64); 2] {
+    let mut pivot_row = 0;
+    let mut pivot_col = 0;
+    let mut largest = 0.0;
+    for (row, entries) in matrix.iter().enumerate() {
+        for (col, &(re, im)) in entries.iter().enumerate() {
+            let magnitude = re.abs().max(im.abs());
+            if magnitude > largest {
+                largest = magnitude;
+                pivot_row = row;
+                pivot_col = col;
+            }
+        }
+    }
+    if pivot_row != 0 {
+        matrix.swap(0, 1);
+        rhs.swap(0, 1);
+    }
+    if pivot_col != 0 {
+        for row in &mut matrix {
+            row.swap(0, 1);
+        }
+    }
+
+    let factor = schur_divide(matrix[1][0], matrix[0][0], pivot_floor);
+    let product = cmul(factor.0, factor.1, matrix[0][1].0, matrix[0][1].1);
+    let trailing_pivot = (matrix[1][1].0 - product.0, matrix[1][1].1 - product.1);
+    let product = cmul(factor.0, factor.1, rhs[0].0, rhs[0].1);
+    let trailing_rhs = (rhs[1].0 - product.0, rhs[1].1 - product.1);
+    let second = schur_divide(trailing_rhs, trailing_pivot, pivot_floor);
+    let product = cmul(matrix[0][1].0, matrix[0][1].1, second.0, second.1);
+    let first = schur_divide(
+        (rhs[0].0 - product.0, rhs[0].1 - product.1),
+        matrix[0][0],
+        pivot_floor,
+    );
+    if pivot_col == 0 {
+        [first, second]
+    } else {
+        [second, first]
+    }
+}
+
 /// Eigenvalues AND eigenvectors of a general (non-symmetric) matrix (np.linalg.eig).
 ///
 /// Returns `(eigenvalues, eigenvectors)` where:
@@ -7686,133 +7754,131 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
     // Extract eigenvalues from quasi-upper-triangular Schur form
     let eigenvalues = extract_schur_eigenvalues(&h, n);
 
-    // Scale-relative thresholds for block detection and denominator checks.
+    // Keep block detection consistent with extract_schur_eigenvalues. Scale the
+    // shifted systems separately so back-substitution does not square entries
+    // in the original matrix's units or overflow when forming their products.
     let h_norm = matrix_inf_norm(&h, n).max(f64::MIN_POSITIVE);
     let block_eps = f64::EPSILON * h_norm;
-    let denom_eps = f64::EPSILON * h_norm;
-    let denom_sq_eps = denom_eps * denom_eps;
+    let scale = h.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let scale = if scale == 0.0 { 1.0 } else { scale };
+    let scaled_h: Vec<f64> = h.iter().map(|value| value / scale).collect();
+    let pivot_floor = f64::EPSILON * matrix_inf_norm(&scaled_h, n).max(1.0);
 
     // Build eigenvectors of T via back-substitution, then transform by Z.
-    // For each eigenvalue λ, solve (T - λI)x = 0 by back-substitution on the
-    // quasi-upper-triangular Schur form, then compute v = Z * x.
-    let mut vr_re = vec![0.0; n * n]; // eigenvectors of T in columns (real part)
-    let mut vr_im = vec![0.0; n * n]; // eigenvectors of T in columns (imag part)
-
+    // Walk complete Schur blocks, for both real and complex eigenvalues. A
+    // scalar row-by-row solve drops one equation whenever an earlier complex
+    // pair contributes a 2x2 block and produces incorrect eigenvectors.
+    let mut eigvecs = vec![0.0; 2 * n * n];
     let mut col = 0;
     while col < n {
-        if col + 1 < n && h[(col + 1) * n + col].abs() > block_eps {
-            // 2x2 block → complex conjugate eigenvalue pair
-            let lam_re = eigenvalues[2 * col];
-            let lam_im = eigenvalues[2 * col + 1];
-
-            // Start with unit vector at block position
-            vr_re[col * n + col] = 1.0;
-            vr_im[col * n + col] = 0.0;
-            // Second component of the 2x2 Schur block eigenvector
-            let a11 = h[col * n + col];
-            let a12 = h[col * n + (col + 1)];
-            // (a11 - λ)*x1 + a12*x2 = 0, x1=1 → x2 = -(a11-λ)/a12
-            let denom = a12;
-            if denom.abs() > denom_eps {
-                vr_re[(col + 1) * n + col] = -(a11 - lam_re) / denom;
-                vr_im[(col + 1) * n + col] = lam_im / denom;
+        let lam_re = eigenvalues[2 * col] / scale;
+        let lam_im = eigenvalues[2 * col + 1] / scale;
+        let paired = col + 1 < n && h[(col + 1) * n + col].abs() > block_eps;
+        let end = col + if paired { 2 } else { 1 };
+        let mut vr_re = vec![0.0; n];
+        let mut vr_im = vec![0.0; n];
+        if paired {
+            let upper = scaled_h[col * n + col + 1];
+            let lower = scaled_h[(col + 1) * n + col];
+            // Choose the larger offdiagonal as the divisor, keeping the initial
+            // eigenvector bounded even when the block is strongly unbalanced.
+            if upper.abs() >= lower.abs() {
+                vr_re[col] = 1.0;
+                vr_re[col + 1] = (lam_re - scaled_h[col * n + col]) / upper;
+                vr_im[col + 1] = lam_im / upper;
+            } else {
+                vr_re[col + 1] = 1.0;
+                vr_re[col] = (lam_re - scaled_h[(col + 1) * n + col + 1]) / lower;
+                vr_im[col] = lam_im / lower;
             }
-
-            // Back-substitute through rows above the block
-            for j in (0..col).rev() {
-                // Check if row j is part of a 2x2 block
-                if j > 0 && h[j * n + (j - 1)].abs() > block_eps {
-                    continue; // handled as part of the 2x2 block starting at j-1
-                }
-                // 1x1 row: solve (T[j,j] - λ)*x[j] = -sum_{k=j+1..col+2} T[j,k]*x[k]
-                let mut sum_re = 0.0;
-                let mut sum_im = 0.0;
-                for k in (j + 1)..=(col + 1).min(n - 1) {
-                    sum_re += h[j * n + k] * vr_re[k * n + col] - 0.0 * vr_im[k * n + col];
-                    sum_im += h[j * n + k] * vr_im[k * n + col];
-                }
-                let d_re = h[j * n + j] - lam_re;
-                let d_im = -lam_im;
-                let d_sq = d_re * d_re + d_im * d_im;
-                if d_sq > denom_sq_eps {
-                    // x[j] = -sum / (T[j,j]-λ), complex division
-                    vr_re[j * n + col] = -(sum_re * d_re + sum_im * d_im) / d_sq;
-                    vr_im[j * n + col] = -(sum_im * d_re - sum_re * d_im) / d_sq;
-                }
-            }
-            // Conjugate eigenvector for the second eigenvalue
-            for row in 0..n {
-                vr_re[row * n + (col + 1)] = vr_re[row * n + col];
-                vr_im[row * n + (col + 1)] = -vr_im[row * n + col];
-            }
-            col += 2;
         } else {
-            // 1x1 block → real eigenvalue
-            let lam = eigenvalues[2 * col];
-            vr_re[col * n + col] = 1.0;
-            // Back-substitute: for j = col-1 down to 0
-            for j in (0..col).rev() {
-                // Check if row j is part of a 2x2 block
-                if j > 0 && h[j * n + (j - 1)].abs() > block_eps {
-                    continue; // handled as 2x2 block
-                }
-                let mut sum = 0.0;
-                for k in (j + 1)..=col {
-                    sum += h[j * n + k] * vr_re[k * n + col];
-                }
-                let denom = h[j * n + j] - lam;
-                if denom.abs() > denom_eps {
-                    vr_re[j * n + col] = -sum / denom;
-                } else {
-                    // Near-singular: use sign-preserving epsilon to avoid sign flip
-                    let safe_denom = if denom >= 0.0 { denom_eps } else { -denom_eps };
-                    vr_re[j * n + col] = -sum / safe_denom;
+            vr_re[col] = 1.0;
+        }
+
+        let mut unsolved = col;
+        while unsolved > 0 {
+            let bottom = unsolved - 1;
+            let is_block = bottom > 0 && h[bottom * n + bottom - 1].abs() > block_eps;
+            let top = if is_block { bottom - 1 } else { bottom };
+            let mut rhs = [(0.0, 0.0); 2];
+            for row in top..=bottom {
+                for k in (bottom + 1)..end {
+                    rhs[row - top].0 -= scaled_h[row * n + k] * vr_re[k];
+                    rhs[row - top].1 -= scaled_h[row * n + k] * vr_im[k];
                 }
             }
-            col += 1;
-        }
-    }
+            if is_block {
+                let solved = schur_solve_2x2(
+                    [
+                        [
+                            (scaled_h[top * n + top] - lam_re, -lam_im),
+                            (scaled_h[top * n + bottom], 0.0),
+                        ],
+                        [
+                            (scaled_h[bottom * n + top], 0.0),
+                            (scaled_h[bottom * n + bottom] - lam_re, -lam_im),
+                        ],
+                    ],
+                    rhs,
+                    pivot_floor,
+                );
+                for (row, &(re, im)) in (top..=bottom).zip(&solved) {
+                    vr_re[row] = re;
+                    vr_im[row] = im;
+                }
+            } else {
+                (vr_re[top], vr_im[top]) = schur_divide(
+                    rhs[0],
+                    (scaled_h[top * n + top] - lam_re, -lam_im),
+                    pivot_floor,
+                );
+            }
 
-    // Transform: V = Z * VR (apply Schur vectors)
-    let mut eigvecs_re = vec![0.0; n * n];
-    let mut eigvecs_im = vec![0.0; n * n];
-    for j in 0..n {
+            // An eigenvector can be scaled arbitrarily. Bound it after every
+            // block so a chain of nearly singular solves cannot overflow before
+            // the final normalization.
+            let largest = vr_re[top..end]
+                .iter()
+                .chain(&vr_im[top..end])
+                .map(|value| value.abs())
+                .fold(1.0, f64::max);
+            if largest > 1.0 {
+                for value in vr_re[top..end].iter_mut().chain(&mut vr_im[top..end]) {
+                    *value /= largest;
+                }
+            }
+            unsolved = top;
+        }
+
+        // Transform by the orthogonal Schur vectors, storing each column in the
+        // public interleaved column-major format.
         for i in 0..n {
             let mut re = 0.0;
             let mut im = 0.0;
-            for k in 0..n {
-                re += z[i * n + k] * vr_re[k * n + j];
-                im += z[i * n + k] * vr_im[k * n + j];
+            for k in 0..end {
+                re += z[i * n + k] * vr_re[k];
+                im += z[i * n + k] * vr_im[k];
             }
-            eigvecs_re[i * n + j] = re;
-            eigvecs_im[i * n + j] = im;
+            eigvecs[2 * (col * n + i)] = re;
+            eigvecs[2 * (col * n + i) + 1] = im;
         }
-    }
-
-    // Normalize each eigenvector column
-    for j in 0..n {
-        let mut norm_sq = 0.0;
-        for i in 0..n {
-            let re = eigvecs_re[i * n + j];
-            let im = eigvecs_im[i * n + j];
-            norm_sq += re * re + im * im;
+        let column = &mut eigvecs[2 * col * n..2 * (col + 1) * n];
+        let norm = column
+            .iter()
+            .fold(0.0_f64, |norm, value| norm.hypot(*value));
+        if !norm.is_finite() || norm == 0.0 {
+            return Err(LinAlgError::SpectralConvergenceFailed);
         }
-        let norm = norm_sq.sqrt();
-        if norm > f64::MIN_POSITIVE {
-            for i in 0..n {
-                eigvecs_re[i * n + j] /= norm;
-                eigvecs_im[i * n + j] /= norm;
+        for value in column {
+            *value /= norm;
+        }
+        if paired {
+            for row in 0..n {
+                eigvecs[2 * ((col + 1) * n + row)] = eigvecs[2 * (col * n + row)];
+                eigvecs[2 * ((col + 1) * n + row) + 1] = -eigvecs[2 * (col * n + row) + 1];
             }
         }
-    }
-
-    // Interleave into output format: [re(v[0,0]), im(v[0,0]), re(v[1,0]), im(v[1,0]), ...]
-    let mut eigvecs = Vec::with_capacity(2 * n * n);
-    for j in 0..n {
-        for i in 0..n {
-            eigvecs.push(eigvecs_re[i * n + j]);
-            eigvecs.push(eigvecs_im[i * n + j]);
-        }
+        col = end;
     }
 
     Ok((eigenvalues, eigvecs))
@@ -16623,6 +16689,151 @@ print(",".join(f"{float(z.real)!r}:{float(z.imag)!r}" for z in w))
                 residual < 1e-8 * a_norm,
                 "eigpair {j}: λ=({lam_re},{lam_im}), residual={residual}"
             );
+        }
+    }
+
+    fn coupled_schur_eigenvector_matrices() -> Vec<(usize, Vec<f64>)> {
+        let mixed = vec![0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 2.0];
+        let multiple_pairs = vec![
+            0.0, -2.0, 1.0, 0.5, 2.0, 2.0, 0.0, 0.3, 1.0, -1.0, 0.0, 0.0, 3.0, -1.0, 0.75, 0.0,
+            0.0, 1.0, 3.0, 1.25, 0.0, 0.0, 0.0, 0.0, 5.0,
+        ];
+        // These two blocks exercise column and row pivoting, respectively.
+        let large_upper = vec![0.0, -4.0, 1.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.5];
+        let large_lower = vec![0.0, -1.0, 1.0, 4.0, 0.0, 2.0, 0.0, 0.0, 0.5];
+        vec![
+            (3, mixed),
+            (5, multiple_pairs),
+            (3, large_upper),
+            (3, large_lower),
+        ]
+    }
+
+    fn assert_eig_nxn_full_residuals(a: &[f64], n: usize) {
+        let (eigenvalues, eigenvectors) = eig_nxn_full(a, n).expect("eigendecomposition");
+        assert_eq!(eigenvalues.len(), 2 * n);
+        assert_eq!(eigenvectors.len(), 2 * n * n);
+        assert!(eigenvalues.iter().all(|value| value.is_finite()));
+        assert!(eigenvectors.iter().all(|value| value.is_finite()));
+        let scale = a.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        for col in 0..n {
+            let lambda = (
+                eigenvalues[2 * col] / scale,
+                eigenvalues[2 * col + 1] / scale,
+            );
+            let vector = &eigenvectors[2 * col * n..2 * (col + 1) * n];
+            let norm = vector
+                .iter()
+                .fold(0.0_f64, |norm, value| norm.hypot(*value));
+            assert!((norm - 1.0).abs() < 1e-12, "column {col}: norm {norm}");
+            let mut residual = 0.0_f64;
+            for row in 0..n {
+                let mut av = (0.0, 0.0);
+                for k in 0..n {
+                    av.0 += (a[row * n + k] / scale) * vector[2 * k];
+                    av.1 += (a[row * n + k] / scale) * vector[2 * k + 1];
+                }
+                let lv = cmul(lambda.0, lambda.1, vector[2 * row], vector[2 * row + 1]);
+                residual = residual.hypot(av.0 - lv.0).hypot(av.1 - lv.1);
+            }
+            assert!(
+                residual < 1e-10 * n as f64,
+                "column {col}: scaled eigenvalue {lambda:?}, relative residual {residual}"
+            );
+        }
+    }
+
+    #[test]
+    fn eig_nxn_full_coupled_schur_blocks_have_small_residuals() {
+        // The real eigenvector in the first case previously had residual
+        // 1.3416407864998738: its leading 2x2 block was treated as scalar rows.
+        for (n, matrix) in coupled_schur_eigenvector_matrices() {
+            for scale in [1e-100, 1.0, 1e100] {
+                let scaled: Vec<f64> = matrix.iter().map(|value| value * scale).collect();
+                assert_eig_nxn_full_residuals(&scaled, n);
+            }
+        }
+    }
+
+    #[test]
+    fn eig_nxn_full_coupled_blocks_survive_orthogonal_similarity() {
+        // A dense matrix with two distinct complex pairs. This exercises the
+        // transformation back from Schur vectors, not just an already reduced T.
+        let t = [
+            0.0, -2.0, 1.0, 0.5, 2.0, 0.0, 0.3, 1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, 1.0, 3.0,
+        ];
+        let n = 4;
+        let q = [
+            0.5, -0.5, -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, -0.5, -0.5,
+            0.5,
+        ];
+        let qt = mat_mul_flat(&q, &t, n);
+        let a = mat_mul_flat(&qt, &q, n);
+        assert_eig_nxn_full_residuals(&a, n);
+    }
+
+    #[test]
+    fn eig_nxn_full_nearly_singular_coupled_blocks_remain_finite() {
+        // Repeated complex pairs form a defective block-triangular matrix.
+        // Eigenvectors need not be independent, but must remain normalized and
+        // satisfy the eigen-equation within the perturbation-sized pivot floor.
+        let a = [
+            0.0, -1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        assert_eig_nxn_full_residuals(&a, 4);
+    }
+
+    #[test]
+    fn eig_nxn_full_coupled_blocks_match_numpy_eigenvectors() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+a = np.array(json.loads(sys.argv[2]), dtype=np.float64).reshape(n, n)
+w_parts = np.array(json.loads(sys.argv[3]), dtype=np.float64).reshape(n, 2)
+v_parts = np.array(json.loads(sys.argv[4]), dtype=np.float64).reshape(n, n, 2)
+w = w_parts[:, 0] + 1j * w_parts[:, 1]
+v = (v_parts[:, :, 0] + 1j * v_parts[:, :, 1]).T
+reference_w, reference_v = np.linalg.eig(a)
+remaining = set(range(n))
+scale = np.max(np.abs(a))
+for col in range(n):
+    reference_col = min(remaining, key=lambda k: abs(w[col] / scale - reference_w[k] / scale))
+    remaining.remove(reference_col)
+    np.testing.assert_allclose(w[col] / scale, reference_w[reference_col] / scale,
+                               rtol=1e-10, atol=1e-12)
+    # Eigenvectors can differ by an arbitrary unit complex phase.
+    expected = reference_v[:, reference_col]
+    phase = np.vdot(expected, v[:, col])
+    np.testing.assert_allclose(abs(phase), 1.0, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(v[:, col], phase * expected, rtol=1e-10, atol=1e-12)
+"#;
+        for (n, matrix) in coupled_schur_eigenvector_matrices() {
+            for scale in [1e-100, 1.0, 1e100] {
+                let scaled: Vec<f64> = matrix.iter().map(|value| value * scale).collect();
+                let (eigenvalues, eigenvectors) =
+                    eig_nxn_full(&scaled, n).expect("eig oracle input");
+                let output = Command::new(oracle_python_bin())
+                    .arg("-c")
+                    .arg(script)
+                    .arg(n.to_string())
+                    .arg(format!("{scaled:?}"))
+                    .arg(format!("{eigenvalues:?}"))
+                    .arg(format!("{eigenvectors:?}"))
+                    .output()
+                    .expect("NumPy eigenvector oracle should run");
+                assert!(
+                    output.status.success(),
+                    "n={n}, scale={scale}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
     }
 
