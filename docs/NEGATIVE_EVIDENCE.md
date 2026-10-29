@@ -79505,3 +79505,34 @@ between the scan and the scatter) needs this defence; it must then cost under th
 same-process A/B - e.g. one fused scan-and-scatter into a Rust-owned buffer copied out afterwards -
 not a per-element clamp.
 AGENT_NAME=SandyOriole.
+
+## 2026-10-28 - SHIP: union1d decides a float64 concatenation first and gives numpy the small ones (TealKnoll's f25cb35e1, re-measured on main) - f8+f8 1,024 1.51x numpy -> 1.03x, i8+f8 1,024 1.64x -> 1.03x
+worker=thinkstation1 (taskset -c 37, governor powersave) harness=bench_union1d.py (scratch; one build per process, fnp and numpy interleaved per round with an A/A null of fnp against itself, 31 rounds x 50 calls, medians; runs alternated before/after/before/after), numpy 2.4.3, python 3.14.3
+
+**Campaign result class:** maintenance-self-speedup (a loss closed to parity by routing; not a win)
+
+The lever was measured on 2026-10-07 and never landed; it survived only in the swept
+franken_numpy-TealKnoll-rc0923 worktree (bead deadlock-audit-jcixj). On main 0ce8c59ca the loss
+band still stood: a float64 union1d went through six dtype probes that can only decline a float64
+pair before fnp's unique of numpy's concatenation, and below ~16,384 elements that route is slower
+than numpy. Now a float64 pair, or a float64 operand beside a builtin bool / int / float one (it
+concatenates to float64), is decided first, and below `UNION1D_F64_NUMPY_BELOW` (16,384 elements
+in all) it is numpy's call.
+
+| fnp / numpy (A/A null), two runs each | before (main 0ce8c59ca) | after |
+|---|---|---|
+| f8+f8 1,024 / 4,096 / 8,192 each | 1.51x / 1.19x / 1.08x | 1.02-1.03x / 1.01x / 1.02-1.03x |
+| f8+f8 16,384 each | 0.45x | 0.43-0.44x |
+| i8+f8 1,024 / 4,096 each | 1.63-1.64x / 1.26x | 1.03-1.04x / 1.01-1.02x |
+| f4+f8 1,024 / 4,096 each | 1.36x / 1.12-1.13x | 1.03-1.04x / 1.01x |
+
+bench_elf_sha256=aff92f68c363f497fc9e6ce61e8d1759d524b99ea9b5996f71d9bb3ace8b412f (before: main 0ce8c59ca, release cdylib built by rch on hz2)
+bench_elf_sha256=f8f287ec226d6f0163d88e36248a7d9411b6060053e3fb41b203d09dcbd5a98b (after, release cdylib built by rch on vmi1227854)
+A/A null: fnp against itself in the same rounds, 0.980-1.012 across all 32 cells.
+PARITY: float64_union1d_is_unique_of_the_concatenation_and_matches_numpy (conformance_setops):
+type, dtype, shape, bytes and warnings over 169 cells (f8|f8, i8|f8, f8|i8, f4|f8, bool|f8, u8|f8,
+f2|f8, i4|f8, c16|f8, f4|f4, i8|i4 at 10-40,000 elements; NaN, both zero signs, 2-D, strided,
+F-ordered, a list, a matrix, empty operands): 0 differ before and after.
+RETRY PREDICATE: below the floor the residual 1-4% is the cost of the delegation itself; a win
+there needs a float64 unique faster than numpy's sort (e.g. a radix on the order key), not routing.
+AGENT_NAME=TealWolf (lever by TealKnoll).

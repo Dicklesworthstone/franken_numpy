@@ -1358,3 +1358,72 @@ result = f"{cells} {bad[:8]}"
         Ok(())
     });
 }
+
+/// A union1d whose concatenation is float64 - two float64 operands, or float64 beside a builtin
+/// bool / int / float one - is fnp's unique of numpy's concatenation, numpy's own definition, and
+/// below 16,384 elements in all numpy's call. Every result stays numpy's across NaN, both zero
+/// signs, 2-D / strided / F-ordered operands, lists, a matrix, empty operands and the dtype pairs
+/// around it (float32 | float32, int64 | int32, complex128 | float64).
+#[test]
+fn float64_union1d_is_unique_of_the_concatenation_and_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module)?;
+        ns.set_item("np", &numpy)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                r#"
+import warnings
+def outcome(fn, *a, **k):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            r = fn(*a, **k); x = np.asarray(r)
+            res = ("ok", type(r).__name__, x.dtype.str, x.shape, x.tobytes())
+        except Exception as e:
+            res = ("raise", type(e).__name__, str(e))
+    return res + (tuple(sorted((x.category.__name__, str(x.message)) for x in w)),)
+rng = np.random.default_rng(20261007)
+def make(dt, n):
+    if dt == "?":
+        return rng.random(n) < 0.5
+    if dt[0] in "iu":
+        return rng.integers(0, 1000, n).astype(dt)
+    if dt[0] == "c":
+        return (rng.standard_normal(n) + 1j).astype(dt)
+    v = np.round(rng.standard_normal(n) * 50, 1).astype(dt)
+    v[::97] = np.nan
+    v[::89] = -0.0
+    v[::83] = 0.0
+    return v
+cells, bad = 0, []
+for d1, d2 in (("f8", "f8"), ("i8", "f8"), ("f8", "i8"), ("f4", "f8"), ("?", "f8"), ("u8", "f8"),
+               ("f2", "f8"), ("i4", "f8"), ("c16", "f8"), ("f4", "f4"), ("i8", "i4")):
+    for n in (10, 600, 3000, 9000, 40000):
+        a, b = make(d1, n), make(d2, n // 2 + 1)
+        for x, y in ((a, b), (a.reshape(-1, 1)[:n - n % 2].reshape(2, -1) if n % 2 == 0 else a, b),
+                     (a[::2], b)):
+            cells += 1
+            if outcome(fnp.union1d, x, y) != outcome(np.union1d, x, y):
+                bad.append((d1, d2, n, x.shape))
+f = np.asfortranarray(make("f8", 6000).reshape(60, 100))
+matrix = np.matrix(make("f8", 100).reshape(10, 10))
+for x, y in ((f, make("f8", 100)), (list(make("f8", 3000)), make("f8", 5000)),
+             (matrix, make("f8", 9000)), (make("f8", 0), make("f8", 0))):
+    cells += 1
+    if outcome(fnp.union1d, x, y) != outcome(np.union1d, x, y):
+        bad.append(("misc", type(x).__name__))
+result = f"{cells} {bad[:8]}"
+"#
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let result: String = ns
+            .get_item("result")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing result"))?
+            .extract()?;
+        assert_eq!(result, "169 []");
+        Ok(())
+    });
+}
