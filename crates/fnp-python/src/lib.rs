@@ -2713,7 +2713,7 @@ impl PyNdArray {
     #[pyo3(signature = (axis=None, keepdims=false))]
     fn nansum(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
         let out = self.array.nansum(axis, keepdims).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, keepdims=false))]
@@ -2722,7 +2722,7 @@ impl PyNdArray {
             .array
             .nanprod(axis, keepdims)
             .map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, keepdims=false))]
@@ -2731,7 +2731,7 @@ impl PyNdArray {
             .array
             .nanmean(axis, keepdims)
             .map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
@@ -2746,7 +2746,7 @@ impl PyNdArray {
             .array
             .nanvar(axis, keepdims, ddof)
             .map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, ddof=0, keepdims=false))]
@@ -2761,31 +2761,31 @@ impl PyNdArray {
             .array
             .nanstd(axis, keepdims, ddof)
             .map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, keepdims=false))]
     fn nanmin(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
         let out = self.array.nanmin(axis, keepdims).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None, keepdims=false))]
     fn nanmax(&self, py: Python<'_>, axis: Option<isize>, keepdims: bool) -> PyResult<Py<PyAny>> {
         let out = self.array.nanmax(axis, keepdims).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, keepdims)
     }
 
     #[pyo3(signature = (axis=None))]
     fn nanargmin(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.nanargmin(axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (axis=None))]
     fn nanargmax(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.nanargmax(axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (axis=None))]
@@ -2803,37 +2803,37 @@ impl PyNdArray {
     #[pyo3(signature = (axis=None))]
     fn median(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.median(axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (axis=None))]
     fn nanmedian(&self, py: Python<'_>, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.nanmedian(axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (q, axis=None))]
     fn percentile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.percentile(q, axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (q, axis=None))]
     fn quantile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.quantile(q, axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (q, axis=None))]
     fn nanpercentile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.nanpercentile(q, axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     #[pyo3(signature = (q, axis=None))]
     fn nanquantile(&self, py: Python<'_>, q: f64, axis: Option<isize>) -> PyResult<Py<PyAny>> {
         let out = self.array.nanquantile(q, axis).map_err(map_ufunc_error)?;
-        Self::ufunc_array_to_scalar_or_ndarray(py, out)
+        Self::wrap_reduction_output(py, out, false)
     }
 
     fn conj(&self) -> PyResult<Self> {
