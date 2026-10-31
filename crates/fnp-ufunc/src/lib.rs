@@ -2721,8 +2721,8 @@ fn validate_fixed_binary_signature(
 }
 
 /// Sidecar for preserving exact integer values when the f64 payload is only a
-/// bridge representation. Arithmetic operations clear the sidecar since
-/// computed results go through the f64 path.
+/// bridge representation. Integer arithmetic retains exact results here when
+/// the result cannot be represented losslessly by that bridge.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IntegerSidecar {
     I64(Vec<i64>),
@@ -2765,6 +2765,84 @@ impl IntegerSidecar {
             Self::I64(v) => v.contains(&0),
             Self::U64(v) => v.contains(&0),
         }
+    }
+}
+
+/// Exact arithmetic shared by integer and boolean product/contraction APIs.
+/// Signed operands are interpreted modulo 2^64 during accumulation. Reducing
+/// to the promoted integer width at the end is equivalent to wrapping every
+/// intermediate multiply/add in that width, without an intervening f64 cast.
+struct IntegerContraction {
+    lhs: IntegerSidecar,
+    rhs: IntegerSidecar,
+    dtype: DType,
+}
+
+impl IntegerContraction {
+    fn new(lhs: &UFuncArray, rhs: &UFuncArray, context: &str) -> Result<Option<Self>, UFuncError> {
+        let dtype = promote(lhs.dtype, rhs.dtype);
+        if !dtype.is_integer() && dtype != DType::Bool {
+            return Ok(None);
+        }
+        let lhs = lhs.synthesized_integer_sidecar(context)?.ok_or_else(|| {
+            UFuncError::Msg(format!(
+                "{context}: integer contraction requires integer operands"
+            ))
+        })?;
+        let rhs = rhs.synthesized_integer_sidecar(context)?.ok_or_else(|| {
+            UFuncError::Msg(format!(
+                "{context}: integer contraction requires integer operands"
+            ))
+        })?;
+        Ok(Some(Self { lhs, rhs, dtype }))
+    }
+
+    fn dot(
+        &self,
+        lhs_start: usize,
+        lhs_step: usize,
+        rhs_start: usize,
+        rhs_step: usize,
+        len: usize,
+    ) -> u64 {
+        let mut sum = 0_u64;
+        for k in 0..len {
+            let lhs = self.lhs.get_u64(lhs_start + k * lhs_step);
+            let rhs = self.rhs.get_u64(rhs_start + k * rhs_step);
+            if self.dtype == DType::Bool {
+                if lhs != 0 && rhs != 0 {
+                    return 1;
+                }
+            } else {
+                sum = sum.wrapping_add(lhs.wrapping_mul(rhs));
+            }
+        }
+        sum
+    }
+
+    fn matmul(&self, starts: [usize; 2], dims: [usize; 3], out: &mut [u64]) {
+        let [m, k, n] = dims;
+        for i in 0..m {
+            for j in 0..n {
+                out[i * n + j] = self.dot(starts[0] + i * k, 1, starts[1] + j, n, k);
+            }
+        }
+    }
+
+    fn finish(self, shape: Vec<usize>, values: Vec<u64>) -> Result<UFuncArray, UFuncError> {
+        let storage = match self.dtype {
+            DType::Bool => ArrayStorage::Bool(values.into_iter().map(|v| v != 0).collect()),
+            DType::I8 => ArrayStorage::I8(values.into_iter().map(|v| v as i8).collect()),
+            DType::I16 => ArrayStorage::I16(values.into_iter().map(|v| v as i16).collect()),
+            DType::I32 => ArrayStorage::I32(values.into_iter().map(|v| v as i32).collect()),
+            DType::I64 => ArrayStorage::I64(values.into_iter().map(|v| v as i64).collect()),
+            DType::U8 => ArrayStorage::U8(values.into_iter().map(|v| v as u8).collect()),
+            DType::U16 => ArrayStorage::U16(values.into_iter().map(|v| v as u16).collect()),
+            DType::U32 => ArrayStorage::U32(values.into_iter().map(|v| v as u32).collect()),
+            DType::U64 => ArrayStorage::U64(values),
+            _ => unreachable!("IntegerContraction only admits integer and boolean dtypes"),
+        };
+        UFuncArray::from_storage(shape, storage)
     }
 }
 
@@ -5428,9 +5506,8 @@ impl UFuncArray {
     /// widens bool/int8/int16/int32 → int64 and uint8/16/32 → uint64 and wraps the
     /// accumulator on overflow.
     ///
-    /// Unlike [`synthesized_integer_sidecar`] (which only covers the canonical
-    /// I64/U64 storage and returns `None` for narrow ints), this also synthesizes
-    /// for the narrow integer dtypes: their f64 `values` are exact integers within
+    /// Like [`Self::synthesized_integer_sidecar`], this also synthesizes for the
+    /// narrow integer dtypes: their f64 `values` are exact integers within
     /// range, so casting to i64/u64 is lossless and lets the reduction be carried
     /// EXACTLY with two's-complement wraparound. Without it a narrow-int product
     /// (which overflows almost immediately — e.g. three int32 values) was computed
@@ -14402,6 +14479,22 @@ impl UFuncArray {
 
         if ld == 0 || rd == 0 {
             // Scalar multiplication
+            if let Some(integer) = IntegerContraction::new(self, rhs, "dot")? {
+                let shape = if ld == 0 { &rhs.shape } else { &self.shape };
+                let count = element_count(shape).map_err(UFuncError::Shape)?;
+                let values = (0..count)
+                    .map(|i| {
+                        integer.dot(
+                            if ld == 0 { 0 } else { i },
+                            1,
+                            if rd == 0 { 0 } else { i },
+                            1,
+                            1,
+                        )
+                    })
+                    .collect();
+                return integer.finish(shape.clone(), values);
+            }
             return self.elementwise_binary(rhs, BinaryOp::Mul);
         }
 
@@ -14412,6 +14505,10 @@ impl UFuncArray {
                     "dot: shapes ({},) and ({},) not aligned",
                     self.shape[0], rhs.shape[0]
                 )));
+            }
+            if let Some(integer) = IntegerContraction::new(self, rhs, "dot")? {
+                let value = integer.dot(0, 1, 0, 1, self.shape[0]);
+                return integer.finish(Vec::new(), vec![value]);
             }
             let sum: f64 = self
                 .values
@@ -14434,6 +14531,12 @@ impl UFuncArray {
             }
             let out_shape = self.shape[..ld - 1].to_vec();
             let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+            if let Some(integer) = IntegerContraction::new(self, rhs, "dot")? {
+                let values = (0..out_count)
+                    .map(|i| integer.dot(i * k, 1, 0, 1, k))
+                    .collect();
+                return integer.finish(out_shape, values);
+            }
             let mut out_values = vec![0.0f64; out_count];
 
             for (i, out_value) in out_values.iter_mut().enumerate() {
@@ -14473,13 +14576,33 @@ impl UFuncArray {
         out_shape.push(b_last_dim);
 
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-        let mut out_values = vec![0.0f64; out_count];
 
         let a_batch_count: usize =
             fnp_ndarray::element_count(a_batch_shape).map_err(UFuncError::Shape)?;
         let b_prefix_count: usize =
             fnp_ndarray::element_count(b_prefix_shape).map_err(UFuncError::Shape)?;
-        let b_matrix_size = k * b_last_dim;
+        let b_matrix_size = k
+            .checked_mul(b_last_dim)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+
+        if let Some(integer) = IntegerContraction::new(self, rhs, "dot")? {
+            let mut values = vec![0; out_count];
+            if out_count != 0 {
+                for i in 0..a_batch_count {
+                    for j in 0..b_prefix_count {
+                        let start = (i * b_prefix_count + j) * b_last_dim;
+                        integer.matmul(
+                            [i * k, j * b_matrix_size],
+                            [1, k, b_last_dim],
+                            &mut values[start..start + b_last_dim],
+                        );
+                    }
+                }
+            }
+            return integer.finish(out_shape, values);
+        }
+
+        let mut out_values = vec![0.0f64; out_count];
 
         if b_prefix_count == 1 {
             // Every A row multiplies the same (k x b_last_dim) B matrix, i.e. this
@@ -14564,11 +14687,60 @@ impl UFuncArray {
         out_shape.push(n);
 
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-        let mut out_values = vec![0.0f64; out_count];
+        let a_matrix_size = m
+            .checked_mul(k)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let b_matrix_size = k
+            .checked_mul(n)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let out_matrix_size = m
+            .checked_mul(n)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
 
-        let a_matrix_size = m * k;
-        let b_matrix_size = k * n;
-        let out_matrix_size = m * n;
+        let mut final_shape = out_shape;
+        if a_is_1d {
+            final_shape.remove(final_shape.len() - 2);
+        }
+        if b_is_1d {
+            final_shape.pop();
+        }
+
+        if let Some(integer) = IntegerContraction::new(self, rhs, "matmul")? {
+            let mut values = vec![0; out_count];
+            if out_count != 0 {
+                let a_strides = contiguous_strides_elems(a_batch);
+                let b_strides = contiguous_strides_elems(b_batch);
+                let a_steps = aligned_broadcast_axis_steps(out_batch.len(), a_batch, &a_strides);
+                let b_steps = aligned_broadcast_axis_steps(out_batch.len(), b_batch, &b_strides);
+                let mut coords = vec![0; out_batch.len()];
+                let (mut a_flat, mut b_flat) = (0, 0);
+                let batch_count = element_count(&out_batch).map_err(UFuncError::Shape)?;
+                for batch in 0..batch_count {
+                    let start = batch * out_matrix_size;
+                    integer.matmul(
+                        [a_flat * a_matrix_size, b_flat * b_matrix_size],
+                        [m, k, n],
+                        &mut values[start..start + out_matrix_size],
+                    );
+                    if batch + 1 < batch_count {
+                        for axis in (0..out_batch.len()).rev() {
+                            coords[axis] += 1;
+                            a_flat += a_steps[axis];
+                            b_flat += b_steps[axis];
+                            if coords[axis] < out_batch[axis] {
+                                break;
+                            }
+                            coords[axis] = 0;
+                            a_flat -= a_steps[axis] * out_batch[axis];
+                            b_flat -= b_steps[axis] * out_batch[axis];
+                        }
+                    }
+                }
+            }
+            return integer.finish(final_shape, values);
+        }
+
+        let mut out_values = vec![0.0f64; out_count];
 
         if out_batch.is_empty() {
             matmul_accumulate(
@@ -14623,18 +14795,6 @@ impl UFuncArray {
             }
         }
 
-        let mut final_shape = out_shape;
-        if a_is_1d && b_is_1d {
-            // (K,) @ (K,) -> () scalar
-            final_shape = out_batch; // which is empty if both were 1D
-        } else if a_is_1d {
-            // (K,) @ (K, N) -> (N,)
-            final_shape.remove(final_shape.len() - 2);
-        } else if b_is_1d {
-            // (M, K) @ (K,) -> (M,)
-            final_shape.pop();
-        }
-
         let dtype = promote(self.dtype, rhs.dtype);
         Ok(Self {
             shape: final_shape,
@@ -14655,6 +14815,13 @@ impl UFuncArray {
         let m = a.len();
         let n = b.len();
         let dtype = promote(self.dtype, rhs.dtype);
+        let out_count = element_count(&[m, n]).map_err(UFuncError::Shape)?;
+        if let Some(integer) = IntegerContraction::new(self, rhs, "outer")? {
+            let values = (0..out_count)
+                .map(|flat| integer.dot(flat / n, 1, flat % n, 1, 1))
+                .collect();
+            return integer.finish(vec![m, n], values);
+        }
         // Each output row i is the independent rank-1 product a[i] * b[..], so a
         // parallel map over rows is bit-identical to the serial nested loop (each
         // cell is the single product a[i]*b[j] written once). The serial path keeps
@@ -14662,10 +14829,10 @@ impl UFuncArray {
         const OUTER_PARALLEL_MIN_ELEMS: usize = 1 << 15;
         if m >= 2
             && n >= 1
-            && m * n >= OUTER_PARALLEL_MIN_ELEMS
+            && out_count >= OUTER_PARALLEL_MIN_ELEMS
             && rayon::current_num_threads() >= 2
         {
-            let mut values = vec![0.0f64; m * n];
+            let mut values = vec![0.0f64; out_count];
             values.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
                 let ai = a[i];
                 for (slot, &bj) in row.iter_mut().zip(b.iter()) {
@@ -14679,7 +14846,7 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        let mut values = Vec::with_capacity(m * n);
+        let mut values = Vec::with_capacity(out_count);
         for &ai in a {
             for &bj in b {
                 values.push(ai * bj);
@@ -14700,7 +14867,7 @@ impl UFuncArray {
     /// Result shape is `a.shape[:-1] + b.shape[:-1]`.
     pub fn inner(&self, rhs: &Self) -> Result<Self, UFuncError> {
         if self.shape.is_empty() || rhs.shape.is_empty() {
-            return self.elementwise_binary(rhs, BinaryOp::Mul);
+            return self.dot(rhs);
         }
 
         let a_last = self.shape[self.shape.len() - 1];
@@ -14730,6 +14897,20 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
         let dtype = promote(self.dtype, rhs.dtype);
+        if let Some(integer) = IntegerContraction::new(self, rhs, "inner")? {
+            let values = (0..out_count)
+                .map(|flat| {
+                    integer.dot(
+                        (flat / b_batch_count) * contract_len,
+                        1,
+                        (flat % b_batch_count) * contract_len,
+                        1,
+                        contract_len,
+                    )
+                })
+                .collect();
+            return integer.finish(out_shape, values);
+        }
         const INNER_PARALLEL_MIN_FLOPS: usize = 1 << 18;
         let work = a_batch_count
             .saturating_mul(b_batch_count)
@@ -15019,6 +15200,16 @@ impl UFuncArray {
             fnp_ndarray::element_count(&self.shape[..a_ndim - axes]).map_err(UFuncError::Shape)?;
         let b_outer: usize =
             fnp_ndarray::element_count(&other.shape[axes..]).map_err(UFuncError::Shape)?;
+        let mut out_shape: Vec<usize> = self.shape[..a_ndim - axes].to_vec();
+        out_shape.extend_from_slice(&other.shape[axes..]);
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        if let Some(integer) = IntegerContraction::new(self, other, "tensordot")? {
+            let mut values = vec![0; out_count];
+            if out_count != 0 {
+                integer.matmul([0, 0], [a_outer, contract_size, b_outer], &mut values);
+            }
+            return integer.finish(out_shape, values);
+        }
         // After flattening the contracted axes, tensordot is exactly the GEMM
         // (a_outer × contract_size) @ (contract_size × b_outer): `self.values` is
         // the row-major LHS and `other.values` the row-major RHS. Route it through
@@ -15027,7 +15218,7 @@ impl UFuncArray {
         // down each column with stride b_outer. Every output cell still
         // accumulates k=0..contract_size in ascending order, so the result is
         // bit-for-bit identical to the naive sum.
-        let mut values = vec![0.0; a_outer * b_outer];
+        let mut values = vec![0.0; out_count];
         matmul_accumulate(
             &self.values,
             &other.values,
@@ -15036,11 +15227,6 @@ impl UFuncArray {
             b_outer,
             &mut values,
         );
-        let mut out_shape: Vec<usize> = self.shape[..a_ndim - axes].to_vec();
-        out_shape.extend_from_slice(&other.shape[axes..]);
-        if out_shape.is_empty() {
-            out_shape.push(1);
-        }
         let dtype = promote(self.dtype, other.dtype);
         Ok(Self {
             shape: out_shape,
@@ -15059,6 +15245,10 @@ impl UFuncArray {
                 other.values.len()
             )));
         }
+        if let Some(integer) = IntegerContraction::new(self, other, "vdot")? {
+            let value = integer.dot(0, 1, 0, 1, self.values.len());
+            return integer.finish(Vec::new(), vec![value]);
+        }
         let sum: f64 = self
             .values
             .iter()
@@ -15072,50 +15262,84 @@ impl UFuncArray {
     /// Vector dot product along an axis (`np.linalg.vecdot`, NumPy 2.0).
     ///
     /// Computes the dot product of corresponding vectors along `axis` (default: last).
-    /// Supports batch dimensions: for inputs with shapes `(..., n)`, returns shape `(...)`.
+    /// The non-contracted dimensions broadcast independently of the vector axis.
+    /// `axis` is normalized against each input's rank, as in NumPy.
     pub fn vecdot(&self, other: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
-        if ndim == 0 || other.shape.is_empty() {
+        if self.shape.is_empty() || other.shape.is_empty() {
             return Err(UFuncError::Msg(
                 "vecdot: inputs must have at least 1 dimension".to_string(),
             ));
         }
-        if self.shape != other.shape {
+        let axis = axis.unwrap_or(-1);
+        let a_axis = normalize_axis(axis, self.shape.len())?;
+        let b_axis = normalize_axis(axis, other.shape.len())?;
+        let axis_len = self.shape[a_axis];
+        if axis_len != other.shape[b_axis] {
             return Err(UFuncError::Msg(format!(
-                "vecdot: shapes must match, got {:?} and {:?}",
-                self.shape, other.shape
+                "vecdot: contracted dimensions must match, got {} and {}",
+                axis_len, other.shape[b_axis]
             )));
         }
-        let ax = match axis {
-            Some(a) => normalize_axis(a, ndim)?,
-            None => ndim - 1,
-        };
-        let axis_len = self.shape[ax];
-        let outer: usize =
-            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize =
-            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
 
-        let mut out_shape: Vec<usize> = self.shape.clone();
-        out_shape.remove(ax);
-        let mut values = Vec::with_capacity(outer * inner);
+        // Remove only each input's core dimension. The remaining strides still
+        // refer to the original buffers, so arbitrary axes and broadcast batches
+        // need neither transposes nor fully materialized broadcast operands.
+        let mut a_batch = self.shape.clone();
+        let mut b_batch = other.shape.clone();
+        a_batch.remove(a_axis);
+        b_batch.remove(b_axis);
+        let mut a_strides = contiguous_strides_elems(&self.shape);
+        let mut b_strides = contiguous_strides_elems(&other.shape);
+        let a_core_step = a_strides.remove(a_axis);
+        let b_core_step = b_strides.remove(b_axis);
+        let out_shape = broadcast_shape(&a_batch, &b_batch).map_err(UFuncError::Shape)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let a_steps = aligned_broadcast_axis_steps(out_shape.len(), &a_batch, &a_strides);
+        let b_steps = aligned_broadcast_axis_steps(out_shape.len(), &b_batch, &b_strides);
+        let integer = IntegerContraction::new(self, other, "vecdot")?;
+        let mut exact_values = Vec::with_capacity(if integer.is_some() { out_count } else { 0 });
+        let mut values = Vec::with_capacity(if integer.is_none() { out_count } else { 0 });
+        let mut coordinates = vec![0; out_shape.len()];
+        let mut a_offset = 0;
+        let mut b_offset = 0;
 
-        for o in 0..outer {
-            for i in 0..inner {
-                let mut dot = 0.0;
+        for output_index in 0..out_count {
+            if let Some(kernel) = &integer {
+                exact_values.push(kernel.dot(
+                    a_offset,
+                    a_core_step,
+                    b_offset,
+                    b_core_step,
+                    axis_len,
+                ));
+            } else {
+                let mut value = 0.0;
                 for k in 0..axis_len {
-                    let idx = o * axis_len * inner + k * inner + i;
-                    dot += self.values[idx] * other.values[idx];
+                    value += self.values[a_offset + k * a_core_step]
+                        * other.values[b_offset + k * b_core_step];
                 }
-                values.push(dot);
+                values.push(value);
+            }
+
+            if output_index + 1 < out_count {
+                for batch_axis in (0..out_shape.len()).rev() {
+                    coordinates[batch_axis] += 1;
+                    a_offset += a_steps[batch_axis];
+                    b_offset += b_steps[batch_axis];
+                    if coordinates[batch_axis] < out_shape[batch_axis] {
+                        break;
+                    }
+                    coordinates[batch_axis] = 0;
+                    a_offset -= a_steps[batch_axis] * out_shape[batch_axis];
+                    b_offset -= b_steps[batch_axis] * out_shape[batch_axis];
+                }
             }
         }
 
-        let dtype = promote(self.dtype, other.dtype);
-        if out_shape.is_empty() {
-            Ok(Self::scalar(values[0], dtype))
+        if let Some(kernel) = integer {
+            kernel.finish(out_shape, exact_values)
         } else {
-            Self::from_values_with_dtype(out_shape, values, dtype)
+            Self::from_values_with_dtype(out_shape, values, promote(self.dtype, other.dtype))
         }
     }
 
@@ -15140,9 +15364,14 @@ impl UFuncArray {
                 "matvec: vector must have at least 1 dimension".to_string(),
             ));
         }
-        // Delegate to matmul: (..., m, n) @ (..., n) -> (..., m)
-        // matmul already handles the 1D right-hand side case correctly
-        matrix.matmul(vector)
+        if vector.shape.len() == 1 {
+            return matrix.matmul(vector);
+        }
+        // matmul treats a rank-2 RHS as a matrix, not a batch of vectors.
+        // Give every vector its own trailing column dimension before batching.
+        let mut result = matrix.matmul(&vector.expand_dims(-1)?)?;
+        result.shape.pop();
+        Ok(result)
     }
 
     /// Vector-matrix product (`np.vecmat`, NumPy 2.0+).
@@ -15166,9 +15395,14 @@ impl UFuncArray {
                 "vecmat: matrix must have at least 2 dimensions".to_string(),
             ));
         }
-        // Delegate to matmul: (..., n) @ (..., n, m) -> (..., m)
-        // matmul already handles the 1D left-hand side case correctly
-        vector.matmul(matrix)
+        if vector.shape.len() == 1 {
+            return vector.matmul(matrix);
+        }
+        // Insert a row dimension after the vector's batch axes, then remove
+        // precisely that dimension without squeezing singleton batch axes.
+        let mut result = vector.expand_dims(-2)?.matmul(matrix)?;
+        result.shape.remove(result.shape.len() - 2);
+        Ok(result)
     }
 
     /// Cross product of vectors or arrays of vectors (`np.cross`).
@@ -70023,6 +70257,7 @@ for module, prefix in families:
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.tensordot(&b, 1).unwrap();
+        assert!(r.shape().is_empty());
         assert_eq!(r.values(), &[32.0]); // 1*4+2*5+3*6=32
     }
 
@@ -87794,6 +88029,251 @@ print(json.dumps(rows))
             assert_eq!(res.dtype(), DType::F32, "{case}");
             assert_eq!(res.shape(), exp_shape, "{case}");
             assert_eq!(f32_bits(&res), exp_bits, "{case}");
+        }
+    }
+
+    #[test]
+    fn integer_contractions_preserve_exact_values_and_wrapped_compositions() {
+        let a = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::I64(vec![9_007_199_254_740_993, -9_007_199_254_740_992]),
+        )
+        .unwrap();
+        let b = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 1])).unwrap();
+        for result in [
+            a.dot(&b).unwrap(),
+            a.matmul(&b).unwrap(),
+            a.inner(&b).unwrap(),
+            a.vdot(&b).unwrap(),
+            a.tensordot(&b, 1).unwrap(),
+        ] {
+            assert!(result.shape().is_empty());
+            assert_eq!(result.to_storage().unwrap(), ArrayStorage::I64(vec![1]));
+        }
+
+        let a = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I8(vec![127, -128])).unwrap();
+        let b = UFuncArray::from_storage(vec![2, 1], ArrayStorage::I8(vec![2, -1])).unwrap();
+        for result in [
+            a.dot(&b).unwrap(),
+            a.matmul(&b).unwrap(),
+            a.tensordot(&b, 1).unwrap(),
+        ] {
+            assert_eq!(result.dtype(), DType::I8);
+            assert_eq!(result.to_storage().unwrap(), ArrayStorage::I8(vec![126]));
+            // Further arithmetic must see the wrapped result, not a stale f64
+            // accumulator that happens to cast correctly only on export.
+            assert_eq!(result.reduce_mean(None, false).unwrap().values(), &[126.0]);
+        }
+
+        let a = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![u64::MAX])).unwrap();
+        let b = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![2])).unwrap();
+        let product = a.outer(&b).unwrap();
+        assert_eq!(
+            product.to_storage().unwrap(),
+            ArrayStorage::U64(vec![u64::MAX - 1])
+        );
+        assert!(product.has_integer_sidecar());
+
+        let a = UFuncArray::from_storage(vec![2, 0], ArrayStorage::Bool(vec![])).unwrap();
+        let b = UFuncArray::from_storage(vec![0, 3], ArrayStorage::Bool(vec![])).unwrap();
+        let result = a.matmul(&b).unwrap();
+        assert_eq!(result.shape(), &[2, 3]);
+        assert_eq!(
+            result.to_storage().unwrap(),
+            ArrayStorage::Bool(vec![false; 6])
+        );
+
+        let huge_empty =
+            UFuncArray::from_storage(vec![usize::MAX, 0], ArrayStorage::I64(vec![])).unwrap();
+        let wide_empty =
+            UFuncArray::from_storage(vec![0, usize::MAX], ArrayStorage::I64(vec![])).unwrap();
+        assert!(matches!(
+            huge_empty.tensordot(&wide_empty, 1),
+            Err(UFuncError::Shape(ShapeError::Overflow))
+        ));
+        assert!(a.dot(&b.reshape(&[3, 0]).unwrap()).is_err());
+    }
+
+    #[test]
+    fn integer_contraction_family_matches_live_numpy() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        fn operand(dtype: DType, shape: &[usize], offset: usize) -> UFuncArray {
+            let count = fnp_ndarray::element_count(shape).unwrap();
+            macro_rules! patterned {
+                ($variant:ident, $values:expr) => {{
+                    let pattern = $values;
+                    ArrayStorage::$variant(
+                        (0..count)
+                            .map(|i| pattern[(i + offset) % pattern.len()])
+                            .collect(),
+                    )
+                }};
+            }
+            let storage = match dtype {
+                DType::Bool => patterned!(Bool, [true, true, false, true, false, false]),
+                DType::I8 => patterned!(I8, [i8::MAX, 2, i8::MIN, -1, 13, -7]),
+                DType::I16 => patterned!(I16, [i16::MAX, 2, i16::MIN, -1, 257, -127]),
+                DType::I32 => patterned!(I32, [i32::MAX, 2, i32::MIN, -1, 65_537, -32_767]),
+                DType::I64 => patterned!(
+                    I64,
+                    [
+                        i64::MAX,
+                        2,
+                        i64::MIN,
+                        -1,
+                        9_007_199_254_740_993,
+                        -9_007_199_254_740_995
+                    ]
+                ),
+                DType::U8 => patterned!(U8, [u8::MAX, 2, 0, 1, 128, 7]),
+                DType::U16 => patterned!(U16, [u16::MAX, 2, 0, 1, 32_768, 257]),
+                DType::U32 => patterned!(U32, [u32::MAX, 2, 0, 1, 2_147_483_648, 65_537]),
+                DType::U64 => patterned!(U64, [u64::MAX, 2, 0, 1, 9_007_199_254_740_993, 1 << 63]),
+                _ => unreachable!("test integer dtype"),
+            };
+            UFuncArray::from_storage(shape.to_vec(), storage).unwrap()
+        }
+
+        fn payload(array: &UFuncArray) -> serde_json::Value {
+            let (dtype, values) = match array.to_storage().unwrap() {
+                ArrayStorage::Bool(v) => ("bool", serde_json::json!(v)),
+                ArrayStorage::I8(v) => ("int8", serde_json::json!(v)),
+                ArrayStorage::I16(v) => ("int16", serde_json::json!(v)),
+                ArrayStorage::I32(v) => ("int32", serde_json::json!(v)),
+                ArrayStorage::I64(v) => ("int64", serde_json::json!(v)),
+                ArrayStorage::U8(v) => ("uint8", serde_json::json!(v)),
+                ArrayStorage::U16(v) => ("uint16", serde_json::json!(v)),
+                ArrayStorage::U32(v) => ("uint32", serde_json::json!(v)),
+                ArrayStorage::U64(v) => ("uint64", serde_json::json!(v)),
+                other => panic!("unexpected contraction dtype: {:?}", other.dtype()),
+            };
+            serde_json::json!({ "dtype": dtype, "shape": array.shape(), "values": values })
+        }
+
+        let dtypes = [
+            DType::Bool,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+        ];
+        let shapes: &[(&str, &[usize], &[usize], usize)] = &[
+            ("dot", &[3], &[3], 0),
+            ("dot", &[2, 3], &[3], 0),
+            ("dot", &[3], &[3, 2], 0),
+            ("dot", &[2, 3], &[3, 2], 0),
+            ("dot", &[2, 1, 3], &[2, 3, 2], 0),
+            ("dot", &[], &[2, 3], 0),
+            ("dot", &[2, 3], &[], 0),
+            ("dot", &[0], &[0], 0),
+            ("dot", &[2, 0], &[0, 3], 0),
+            ("dot", &[2, 3], &[0, 3, 2], 0),
+            ("matmul", &[3], &[3], 0),
+            ("matmul", &[2, 3], &[3], 0),
+            ("matmul", &[3], &[3, 2], 0),
+            ("matmul", &[2, 1, 2, 3], &[1, 3, 3, 2], 0),
+            ("matmul", &[1, 2, 3], &[4, 3, 2], 0),
+            ("matmul", &[2, 0], &[0, 3], 0),
+            ("matmul", &[0, 2, 3], &[1, 3, 2], 0),
+            ("inner", &[2, 3], &[4, 3], 0),
+            ("inner", &[2, 0], &[4, 0], 0),
+            ("inner", &[], &[2, 3], 0),
+            ("outer", &[2, 3], &[4], 0),
+            ("outer", &[], &[], 0),
+            ("outer", &[0, 3], &[2], 0),
+            ("tensordot", &[2, 3], &[3, 2], 1),
+            ("tensordot", &[2, 3], &[2, 3], 2),
+            ("tensordot", &[], &[2], 0),
+            ("tensordot", &[2, 0], &[0, 3], 1),
+            ("tensordot", &[2, 1, 3], &[1, 3, 2], 2),
+            ("vdot", &[2, 3], &[6], 0),
+            ("vdot", &[0, 3], &[0], 0),
+        ];
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for lhs_dtype in dtypes {
+            for rhs_dtype in dtypes {
+                let dtype = promote(lhs_dtype, rhs_dtype);
+                if !dtype.is_integer() && dtype != DType::Bool {
+                    continue;
+                }
+                for &(op, lhs_shape, rhs_shape, axes) in shapes {
+                    let a = operand(lhs_dtype, lhs_shape, 0);
+                    let b = operand(rhs_dtype, rhs_shape, 1);
+                    let result = match op {
+                        "dot" => a.dot(&b),
+                        "matmul" => a.matmul(&b),
+                        "inner" => a.inner(&b),
+                        "outer" => a.outer(&b),
+                        "tensordot" => a.tensordot(&b, axes),
+                        "vdot" => a.vdot(&b),
+                        _ => unreachable!("test contraction operation"),
+                    }
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{op} {lhs_dtype:?}{lhs_shape:?} {rhs_dtype:?}{rhs_shape:?}: {error}"
+                        )
+                    });
+                    cases.push(serde_json::json!({"op": op, "a": payload(&a), "b": payload(&b), "axes": axes}));
+                    actual.push(serde_json::json!({
+                        "result": payload(&result),
+                        "sum": payload(&result.reduce_sum(None, false).unwrap()),
+                    }));
+                }
+            }
+        }
+
+        let script = r#"
+import json, sys
+import numpy as np
+def array(item):
+    return np.array(item['values'], dtype=item['dtype']).reshape(item['shape'])
+def payload(value):
+    value = np.asarray(value)
+    return dict(dtype=str(value.dtype), shape=list(value.shape), values=value.ravel().tolist())
+results = []
+for case in json.load(sys.stdin):
+    a, b = array(case['a']), array(case['b'])
+    kwargs = dict(axes=case['axes']) if case['op'] == 'tensordot' else {}
+    result = getattr(np, case['op'])(a, b, **kwargs)
+    results.append(dict(result=payload(result), sum=payload(np.sum(result))))
+print(json.dumps(results))
+"#;
+        let mut child = Command::new(oracle_python_bin())
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("NumPy contraction oracle should spawn");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&cases).unwrap())
+            .unwrap();
+        let output = child
+            .wait_with_output()
+            .expect("NumPy contraction oracle should complete");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for ((result, expected), case) in actual.into_iter().zip(expected).zip(cases) {
+            assert_eq!(result, expected, "{case}");
         }
     }
 

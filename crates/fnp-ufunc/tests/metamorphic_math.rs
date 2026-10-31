@@ -1367,3 +1367,177 @@ fn mr_rfft_irfft_roundtrip() {
         );
     }
 }
+
+#[test]
+fn batched_vector_products_match_numpy() {
+    use serde_json::Value;
+    use std::process::Command;
+
+    // Keep the oracle's full integers in JSON; comparing f64 projections would
+    // conceal precisely the >2^53 data loss these products must not introduce.
+    let script = r#"
+import json, sys
+try:
+    import numpy as np
+except ImportError:
+    print('null')
+    sys.exit(0)
+
+cases = [
+    ('matvec', [3,4], [4], None),
+    ('matvec', [2,3,4], [2,4], None),
+    ('matvec', [1,3,4], [5,4], None),
+    ('matvec', [2,1,3,4], [5,4], None),
+    ('matvec', [3,4], [2,1,4], None),
+    ('matvec', [2,3,0], [2,0], None),
+    ('matvec', [0,3,4], [1,4], None),
+    ('vecmat', [4], [4,3], None),
+    ('vecmat', [2,4], [2,4,3], None),
+    ('vecmat', [5,4], [1,4,3], None),
+    ('vecmat', [5,4], [2,1,4,3], None),
+    ('vecmat', [2,1,4], [4,3], None),
+    ('vecmat', [2,0], [2,0,3], None),
+    ('vecmat', [1,4], [0,4,3], None),
+    ('vecdot', [4], [4], None),
+    ('vecdot', [2,4], [4], None),
+    ('vecdot', [2,1,4], [5,4], None),
+    ('vecdot', [3,4,2], [3,1,2], 0),
+    ('vecdot', [4,2], [4,1,2], 0),
+    ('vecdot', [2,3,4], [3,1], -2),
+    ('vecdot', [2,0], [1,0], None),
+    ('vecdot', [0,4], [1,4], None),
+    ('vecdot', [2,1,4], [5,4], -1),
+    # Core dimensions must match exactly; only batch dimensions broadcast.
+    ('vecdot', [2,4], [2,1], None),
+    ('vecdot', [2,4], [3,4], None),
+    ('vecdot', [2,4], [4], 1),
+    ('vecdot', [2,4], [2,4], -3),
+    ('vecdot', [], [1], None),
+    ('matvec', [4], [4], None),
+    ('matvec', [2,4], [], None),
+    ('matvec', [2,3,4], [3,4], None),
+    ('matvec', [2,3,4], [2,1], None),
+    ('vecmat', [], [4,3], None),
+    ('vecmat', [4], [4], None),
+    ('vecmat', [2,4], [3,4,3], None),
+    ('vecmat', [2,1], [2,4,3], None),
+]
+
+def operand(shape, dtype, shift):
+    if dtype == 'int64':
+        values = [2**53+1, -(2**53+3), 2**63-1, -2**63, 0, 1, -3]
+    elif dtype == 'uint64':
+        values = [2**53+1, 2**63+3, 2**64-1, 0, 1, 3]
+    elif dtype == 'bool':
+        values = [True, False, True, True, False]
+    elif dtype.startswith('uint'):
+        values = [255, 200, 1, 0, 3]
+    elif dtype.startswith('int'):
+        values = [120, -128, 1, 0, -3]
+    else:
+        values = [0.5, -2., 3., 1.5, 0., -0.5]
+    count = int(np.prod(shape, dtype=np.int64))
+    return np.array([values[(i+shift) % len(values)] for i in range(count)],
+                    dtype=dtype).reshape(shape)
+
+records = []
+for dtype in ['bool', 'int8', 'int16', 'int32', 'int64',
+              'uint8', 'uint16', 'uint32', 'uint64', 'float32', 'float64']:
+    for op, a_shape, b_shape, axis in cases:
+        a, b = operand(a_shape, dtype, 0), operand(b_shape, dtype, 2)
+        row = dict(op=op, a_shape=a_shape, b_shape=b_shape, axis=axis,
+                   dtype=dtype, a=a.ravel().tolist(), b=b.ravel().tolist())
+        try:
+            result = getattr(np, op)(a, b, **({} if axis is None else {'axis':axis}))
+            row.update(shape=list(result.shape), values=result.ravel().tolist(),
+                       result_dtype=str(result.dtype))
+        except ValueError:
+            row['error'] = True
+        records.append(row)
+print(json.dumps(records))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python)
+        .args(["-c", script])
+        .output()
+        .expect("launch the NumPy vector-product oracle");
+    assert!(
+        output.status.success(),
+        "NumPy vector-product oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records: Value = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+    if records.is_null() {
+        assert_ne!(
+            std::env::var("FNP_REQUIRE_REAL_NUMPY_ORACLE").as_deref(),
+            Ok("1"),
+            "the required NumPy oracle is unavailable"
+        );
+        eprintln!("skipping vector-product oracle: NumPy is unavailable");
+        return;
+    }
+
+    fn shape(value: &Value) -> Vec<usize> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect()
+    }
+
+    fn storage(dtype: &str, value: &Value) -> ArrayStorage {
+        let values = value.as_array().unwrap();
+        macro_rules! signed {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_i64().unwrap() as $ty).collect())
+            };
+        }
+        macro_rules! unsigned {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_u64().unwrap() as $ty).collect())
+            };
+        }
+        match dtype {
+            "bool" => ArrayStorage::Bool(values.iter().map(|v| v.as_bool().unwrap()).collect()),
+            "int8" => signed!(I8, i8),
+            "int16" => signed!(I16, i16),
+            "int32" => signed!(I32, i32),
+            "int64" => signed!(I64, i64),
+            "uint8" => unsigned!(U8, u8),
+            "uint16" => unsigned!(U16, u16),
+            "uint32" => unsigned!(U32, u32),
+            "uint64" => unsigned!(U64, u64),
+            "float32" => {
+                ArrayStorage::F32(values.iter().map(|v| v.as_f64().unwrap() as f32).collect())
+            }
+            "float64" => ArrayStorage::F64(values.iter().map(|v| v.as_f64().unwrap()).collect()),
+            _ => panic!("unexpected oracle dtype: {dtype}"),
+        }
+    }
+
+    for case in records.as_array().unwrap() {
+        let dtype = case["dtype"].as_str().unwrap();
+        let a = UFuncArray::from_storage(shape(&case["a_shape"]), storage(dtype, &case["a"]))
+            .expect("oracle lhs");
+        let b = UFuncArray::from_storage(shape(&case["b_shape"]), storage(dtype, &case["b"]))
+            .expect("oracle rhs");
+        let actual = match case["op"].as_str().unwrap() {
+            "matvec" => UFuncArray::matvec(&a, &b),
+            "vecmat" => UFuncArray::vecmat(&a, &b),
+            "vecdot" => a.vecdot(&b, case["axis"].as_i64().map(|axis| axis as isize)),
+            _ => unreachable!(),
+        };
+        if case["error"] == true {
+            assert!(actual.is_err(), "expected NumPy's rejection: {case}");
+        } else {
+            let actual = actual.unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(actual.shape(), shape(&case["shape"]), "{case}");
+            assert_eq!(
+                actual.to_storage().unwrap(),
+                storage(case["result_dtype"].as_str().unwrap(), &case["values"]),
+                "{case}"
+            );
+        }
+    }
+}
