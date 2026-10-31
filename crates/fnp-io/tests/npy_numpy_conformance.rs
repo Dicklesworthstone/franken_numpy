@@ -1,6 +1,7 @@
 use fnp_io::{
-    IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, read_npy_bytes, savez,
-    savez_compressed, write_npy_bytes,
+    IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, load_strings,
+    load_structured, parse_structured_descr, read_npy_bytes, read_npy_header_framing, save_strings,
+    save_structured, savez, savez_compressed, write_npy_bytes,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -75,6 +76,20 @@ def emit_loaded_npz(raw_hex):
             values = ",".join(f"{float(value):.17g}" for value in arr.ravel(order="C"))
             print(f"{name}_values=" + values)
 
+def emit_structured_summary(arr):
+    print("shape=" + ",".join(str(dim) for dim in arr.shape))
+    for i, name in enumerate(arr.dtype.names):
+        print(f"field_{i}_name=" + name.encode("utf-8").hex())
+        print(f"field_{i}_dtype=" + arr.dtype.fields[name][0].str)
+        print(f"field_{i}_bytes=" + arr[name].tobytes(order="C").hex())
+
+def emit_unicode_summary(arr):
+    print("dtype=" + arr.dtype.str)
+    print("shape=" + ",".join(str(dim) for dim in arr.shape))
+    print("c_payload_hex=" + arr.tobytes(order="C").hex())
+    for i, value in enumerate(arr.ravel(order="C")):
+        print(f"string_{i}=" + str(value).encode("utf-8").hex())
+
 if case == "f64_c_order":
     emit_npy(np.arange(6, dtype=np.dtype("<f8")).reshape(2, 3))
 elif case == "i16_big_endian":
@@ -135,6 +150,33 @@ elif case == "npz_deflate":
     emit_npz(True)
 elif case == "load_npz_hex":
     emit_loaded_npz(sys.argv[2])
+elif case.startswith("structured_"):
+    import numpy.lib.format as fmt
+    major = int(case.rsplit("_", 1)[1])
+    names = ("café", "naïve", "Ã©") if major < 3 else ("温度", "β", "emoji_🧮")
+    arr = np.empty((2, 3), dtype=[(names[0], "<i4"), (names[1], ">f8"), (names[2], "|S5")])
+    arr[names[0]] = np.arange(6).reshape(2, 3)
+    arr[names[1]] = np.arange(6).reshape(2, 3) * 0.5 - 1.25
+    arr[names[2]] = np.array([b"a", b"b\x00c", b"d", b"", b"efghi", b"j"]).reshape(2, 3)
+    buf = io.BytesIO()
+    fmt.write_array(buf, arr, version=(major, 0), allow_pickle=False)
+    print("npy_hex=" + buf.getvalue().hex())
+    emit_structured_summary(arr)
+elif case == "load_structured_hex":
+    emit_structured_summary(np.load(io.BytesIO(bytes.fromhex(sys.argv[2])), allow_pickle=False))
+elif case.startswith("unicode_"):
+    _, endian, order = case.split("_")
+    dtype = "<U10" if endian == "le" else ">U10"
+    values = ["a\x00b", "\x00β", "a\x00\x00b", "\x00", "", "trailing\x00", "🧮\x00€", "\x00\x00z"]
+    arr = np.array(values, dtype=dtype).reshape(2, 4)
+    if order == "f":
+        arr = np.asfortranarray(arr)
+    buf = io.BytesIO()
+    np.save(buf, arr, allow_pickle=False)
+    print("npy_hex=" + buf.getvalue().hex())
+    emit_unicode_summary(arr)
+elif case == "load_unicode_hex":
+    emit_unicode_summary(np.load(io.BytesIO(bytes.fromhex(sys.argv[2])), allow_pickle=False))
 else:
     raise AssertionError(f"unknown case {case}")
 "#;
@@ -496,6 +538,108 @@ fn numpy_written_v2_and_v3_headers_parse_with_the_right_preamble() -> Result<(),
             format!("{case}: loaded dtype"),
         )?;
         assert_close(&values, &oracle.values)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn structured_npy_headers_preserve_numpy_field_names_across_format_versions() -> Result<(), String>
+{
+    for major in [1_u8, 2, 3] {
+        let case = format!("structured_header_{major}");
+        let oracle = run_numpy_case(&case)?;
+        let bytes = hex_to_bytes(require_line(&oracle, "npy_hex")?)?;
+        let framing = read_npy_header_framing(&bytes)
+            .map_err(|err| format!("{case}: header framing: {err}"))?;
+        ensure_eq(framing.version, (major, 0), format!("{case}: version"))?;
+        let descriptor = parse_structured_descr(&framing.descr_literal)
+            .map_err(|err| format!("{case}: framed descriptor: {err}"))?;
+        let loaded =
+            load_structured(&bytes).map_err(|err| format!("{case}: structured load: {err}"))?;
+        ensure_eq(
+            loaded.shape.clone(),
+            parse_shape(require_line(&oracle, "shape")?)?,
+            format!("{case}: shape"),
+        )?;
+        ensure_eq(
+            loaded.descriptor.clone(),
+            descriptor,
+            format!("{case}: framing and structured reader agree"),
+        )?;
+        ensure_eq(loaded.descriptor.fields.len(), 3, format!("{case}: fields"))?;
+        for (index, field) in loaded.descriptor.fields.iter().enumerate() {
+            ensure_eq(
+                bytes_to_hex(field.name.as_bytes()),
+                require_line(&oracle, &format!("field_{index}_name"))?.clone(),
+                format!("{case}: field {index} name"),
+            )?;
+            ensure_eq(
+                field.dtype.descr(),
+                require_line(&oracle, &format!("field_{index}_dtype"))?.clone(),
+                format!("{case}: field {index} dtype"),
+            )?;
+            ensure_eq(
+                bytes_to_hex(&loaded.columns[index]),
+                require_line(&oracle, &format!("field_{index}_bytes"))?.clone(),
+                format!("{case}: field {index} data"),
+            )?;
+        }
+
+        let rewritten = save_structured(&loaded.shape, &loaded.descriptor, &loaded.columns)
+            .map_err(|err| format!("{case}: structured save: {err}"))?;
+        ensure_eq(
+            rewritten[6],
+            if major == 3 { 3 } else { 1 },
+            format!("{case}: writer chooses a format that represents the field names"),
+        )?;
+        let numpy_read =
+            run_numpy_case_with_extra_arg("load_structured_hex", Some(&bytes_to_hex(&rewritten)))?;
+        for (key, value) in &numpy_read {
+            ensure_eq(
+                value,
+                require_line(&oracle, key)?,
+                format!("{case}: NumPy reads Rust output: {key}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unicode_npy_values_preserve_embedded_nuls_in_both_byte_orders() -> Result<(), String> {
+    for (endian, dtype) in [
+        ("le", IOSupportedDType::Unicode(10)),
+        ("be", IOSupportedDType::UnicodeBe(10)),
+    ] {
+        for order in ["c", "f"] {
+            let case = format!("unicode_{endian}_{order}");
+            let oracle = run_numpy_case(&case)?;
+            let bytes = hex_to_bytes(require_line(&oracle, "npy_hex")?)?;
+            let (shape, strings, loaded_dtype) =
+                load_strings(&bytes).map_err(|err| format!("{case}: load: {err}"))?;
+            ensure_eq(loaded_dtype, dtype, format!("{case}: dtype"))?;
+            ensure_eq(shape.clone(), vec![2, 4], format!("{case}: shape"))?;
+            ensure_eq(strings.len(), 8, format!("{case}: value count"))?;
+            for (index, value) in strings.iter().enumerate() {
+                ensure_eq(
+                    bytes_to_hex(value.as_bytes()),
+                    require_line(&oracle, &format!("string_{index}"))?.clone(),
+                    format!("{case}: string {index}"),
+                )?;
+            }
+
+            let rewritten = save_strings(&shape, &strings, dtype)
+                .map_err(|err| format!("{case}: save: {err}"))?;
+            let numpy_read =
+                run_numpy_case_with_extra_arg("load_unicode_hex", Some(&bytes_to_hex(&rewritten)))?;
+            for (key, value) in &numpy_read {
+                ensure_eq(
+                    value,
+                    require_line(&oracle, key)?,
+                    format!("{case}: NumPy reads Rust output: {key}"),
+                )?;
+            }
+        }
     }
     Ok(())
 }

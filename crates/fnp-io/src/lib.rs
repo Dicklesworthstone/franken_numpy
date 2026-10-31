@@ -642,7 +642,7 @@ fn read_npy_header_from_file(path: &std::path::Path) -> Result<(NpyHeader, usize
     let mut header_bytes = vec![0u8; header_len];
     file.read_exact(&mut header_bytes)
         .map_err(|_| IOError::HeaderSchemaInvalid("payload truncated before end of header"))?;
-    let header = parse_header_dictionary(&header_bytes, header_len)?;
+    let header = parse_header_dictionary(&header_bytes, header_len, version)?;
     let header_offset = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
     let header_end = header_offset
         .checked_add(header_len)
@@ -868,10 +868,27 @@ fn parse_shape_field(shape_tail: &str) -> Result<Vec<usize>, IOError> {
     parse_shape_tuple(&shape_tail[..shape_end])
 }
 
-fn parse_header_dictionary(header_bytes: &[u8], header_len: usize) -> Result<NpyHeader, IOError> {
-    let dictionary = std::str::from_utf8(header_bytes).map_err(|_| {
-        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
-    })?;
+/// NPY 1.0/2.0 use Latin-1; 3.0 changes only the header encoding to UTF-8.
+/// Keep the common ASCII case borrowed, but decode every non-ASCII Latin-1 byte
+/// independently even if that byte sequence also happens to be valid UTF-8.
+fn decode_npy_header_text(header_bytes: &[u8], version: (u8, u8)) -> Result<Cow<'_, str>, IOError> {
+    match version {
+        (1, 0) | (2, 0) if !header_bytes.is_ascii() => Ok(Cow::Owned(
+            header_bytes.iter().copied().map(char::from).collect(),
+        )),
+        (1, 0) | (2, 0) | (3, 0) => std::str::from_utf8(header_bytes)
+            .map(Cow::Borrowed)
+            .map_err(|_| IOError::HeaderSchemaInvalid("version 3.0 header must be valid utf-8")),
+        _ => Err(IOError::MagicInvalid),
+    }
+}
+
+fn parse_header_dictionary(
+    header_bytes: &[u8],
+    header_len: usize,
+    version: (u8, u8),
+) -> Result<NpyHeader, IOError> {
+    let dictionary = decode_npy_header_text(header_bytes, version)?;
     let dictionary = dictionary.trim_end();
 
     let map = parse_header_dictionary_map(dictionary)?;
@@ -1030,7 +1047,7 @@ fn parse_npy_bytes_borrowed<'a>(
             "payload truncated before end of header",
         ));
     }
-    let header = parse_header_dictionary(&payload[header_offset..header_end], header_len)?;
+    let header = parse_header_dictionary(&payload[header_offset..header_end], header_len, version)?;
     let body = &payload[header_end..];
 
     enforce_pickle_policy(header.descr, allow_pickle)?;
@@ -1060,7 +1077,7 @@ pub fn read_npy_header(payload: &[u8]) -> Result<NpyHeader, IOError> {
             "payload truncated before end of header",
         ));
     }
-    parse_header_dictionary(&payload[header_offset..header_end], header_len)
+    parse_header_dictionary(&payload[header_offset..header_end], header_len, version)
 }
 
 /// The framing of an `.npy` header, validated WITHOUT requiring fnp-io to support its dtype:
@@ -1098,9 +1115,7 @@ pub fn read_npy_header_framing(payload: &[u8]) -> Result<NpyHeaderFraming, IOErr
     let header_end = header_offset
         .checked_add(header_len)
         .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
-    let dictionary = std::str::from_utf8(&payload[header_offset..header_end]).map_err(|_| {
-        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
-    })?;
+    let dictionary = decode_npy_header_text(&payload[header_offset..header_end], version)?;
     let map = parse_header_dictionary_map(dictionary.trim_end())?;
     validate_required_header_keys(&map)?;
     let field = |key: &str| {
@@ -5852,6 +5867,11 @@ pub fn memmap(
                     "write memmap requires non-empty byte footprint",
                 ));
             }
+            // Finish range validation before opening with truncate(true): a rejected
+            // offset must not destroy an existing array or create a new backing file.
+            let total_len = offset
+                .checked_add(expected_bytes)
+                .ok_or(IOError::MemmapContractViolation("file size overflowed"))?;
             // Create/truncate the file and pre-allocate it to the required size.
             let file = std::fs::OpenOptions::new()
                 .read(true)
@@ -5860,9 +5880,6 @@ pub fn memmap(
                 .truncate(true)
                 .open(path)
                 .map_err(|_| IOError::MemmapContractViolation("failed to create file"))?;
-            let total_len = offset
-                .checked_add(expected_bytes)
-                .ok_or(IOError::MemmapContractViolation("file size overflowed"))?;
             file.set_len(total_len as u64)
                 .map_err(|_| IOError::MemmapContractViolation("failed to set file length"))?;
             // Start with a zero-filled buffer (matches OS mmap behavior).
@@ -6301,10 +6318,7 @@ fn parse_structured_hex_escape(
     let end = pos
         .checked_add(digits)
         .ok_or(IOError::DTypeDescriptorInvalid)?;
-    if end > s.len() {
-        return Err(IOError::DTypeDescriptorInvalid);
-    }
-    let hex = &s[pos..end];
+    let hex = s.get(pos..end).ok_or(IOError::DTypeDescriptorInvalid)?;
     if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(IOError::DTypeDescriptorInvalid);
     }
@@ -6508,9 +6522,17 @@ pub fn save_structured(
 
     // Build NPY header manually for structured dtype
     let dict_str = encode_structured_header_dict(shape, false, descriptor);
-    let dict_bytes = dict_str.as_bytes();
-    let version = (1u8, 0u8);
-    let length_field_size = 2usize;
+    // Choose the encoding with the format version. Writing UTF-8 under a 1.0
+    // preamble makes NumPy silently reinterpret field names as Latin-1.
+    let (version, dict_bytes) = if dict_str.chars().all(|ch| u32::from(ch) <= 0xff) {
+        (
+            (1, 0),
+            dict_str.chars().map(|ch| ch as u8).collect::<Vec<_>>(),
+        )
+    } else {
+        ((3, 0), dict_str.into_bytes())
+    };
+    let length_field_size = npy_length_field_size(version)?;
     let prefix_len = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
     let base_header_len = dict_bytes.len() + 1; // +1 for trailing newline
     let padding =
@@ -6532,7 +6554,7 @@ pub fn save_structured(
         .ok_or(IOError::WriteContractViolation("total size overflow"))?;
     let mut out = Vec::with_capacity(total_size);
     write_npy_preamble(&mut out, version, header_len)?;
-    out.extend_from_slice(dict_bytes);
+    out.extend_from_slice(&dict_bytes);
     out.extend(std::iter::repeat_n(b' ', padding));
     out.push(b'\n');
     out.extend_from_slice(&payload);
@@ -6556,9 +6578,7 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     }
     let header_bytes = &data[header_offset..header_end];
 
-    let dictionary = std::str::from_utf8(header_bytes).map_err(|_| {
-        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
-    })?;
+    let dictionary = decode_npy_header_text(header_bytes, version)?;
     let dictionary = dictionary.trim_end();
     let map = parse_header_dictionary_map(dictionary)?;
     validate_required_header_keys(&map)?;
@@ -6618,16 +6638,20 @@ fn decode_bytes_element(chunk: &[u8]) -> String {
 /// NumPy `<Un` or `>Un` stores each element as `n` UCS-4 code points (4 bytes each),
 /// null-padded. Little-endian if `is_le`, big-endian otherwise.
 fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> {
-    let mut chars = Vec::with_capacity(chunk.len() / 4);
-    for code_unit in chunk.as_chunks::<4>().0 {
+    let code_units = chunk.as_chunks::<4>().0;
+    // Only trailing zero code points are padding. Embedded NULs are ordinary
+    // string data, and later code points still need validation.
+    let end = code_units
+        .iter()
+        .rposition(|unit| *unit != [0; 4])
+        .map_or(0, |pos| pos + 1);
+    let mut chars = Vec::with_capacity(end);
+    for code_unit in &code_units[..end] {
         let cp = if is_le {
             u32::from_le_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
         } else {
             u32::from_be_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
         };
-        if cp == 0 {
-            break;
-        }
         let c = char::from_u32(cp).ok_or(IOError::ReadPayloadIncomplete(
             "invalid unicode code point in string payload",
         ))?;
@@ -11392,6 +11416,21 @@ mm.flush()
     }
 
     #[test]
+    fn unicode_nul_does_not_hide_invalid_following_code_points() {
+        for dtype in [IOSupportedDType::Unicode(2), IOSupportedDType::UnicodeBe(2)] {
+            let invalid = if dtype == IOSupportedDType::Unicode(2) {
+                0x0011_0000_u32.to_le_bytes()
+            } else {
+                0x0011_0000_u32.to_be_bytes()
+            };
+            let encoded = [[0; 4], invalid].concat();
+            let err = fromfile_strings(&encoded, dtype, None)
+                .expect_err("a NUL is data, not a terminator that skips validation");
+            assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+        }
+    }
+
+    #[test]
     fn save_load_strings_bytes_roundtrip() {
         let strings = vec![
             "foo".to_string(),
@@ -11618,6 +11657,41 @@ mm.flush()
         assert_eq!(desc.fields[1].name, "tab\tstop");
         assert_eq!(desc.fields[2].name, "nul\0byte");
         assert_eq!(desc.fields[3].name, "u\u{03b2}");
+    }
+
+    #[test]
+    fn structured_descriptor_rejects_malformed_unicode_escapes_without_panicking() {
+        for literal in [
+            r"[('\x0é', '<i4')]",
+            r"[('\u000é', '<i4')]",
+            r"[('\U0000000é', '<i4')]",
+            r"[('\uD800', '<i4')]",
+            r"[('\U00110000', '<i4')]",
+            r"[('\x0', '<i4')]",
+        ] {
+            assert_eq!(
+                parse_structured_descr(literal).unwrap_err(),
+                IOError::DTypeDescriptorInvalid,
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_three_structured_headers_reject_invalid_utf8() {
+        let dictionary = b"{'descr': [('\xff', '<i4')], 'fortran_order': False, 'shape': (1,), }\n";
+        let mut bytes = Vec::new();
+        super::write_npy_preamble(&mut bytes, (3, 0), dictionary.len()).unwrap();
+        bytes.extend_from_slice(dictionary);
+        bytes.extend_from_slice(&[0; 4]);
+        assert!(matches!(
+            read_npy_header_framing(&bytes),
+            Err(IOError::HeaderSchemaInvalid(_))
+        ));
+        assert!(matches!(
+            load_structured(&bytes),
+            Err(IOError::HeaderSchemaInvalid(_))
+        ));
     }
 
     #[test]
@@ -12032,6 +12106,45 @@ mm.flush()
     }
 
     // ── Memmap (file-backed array) tests ──
+
+    #[test]
+    fn memmap_write_preflight_preserves_existing_files_on_invalid_ranges() {
+        let dir = std::env::temp_dir().join(format!("fnp_memmap_preflight_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("existing.bin");
+        let original = b"existing array data must survive a rejected mapping";
+        std::fs::write(&path, original).unwrap();
+
+        for (offset, shape) in [(usize::MAX, [1]), (0, [usize::MAX]), (0, [0])] {
+            let err = memmap(
+                &path,
+                IOSupportedDType::F64,
+                MemmapMode::Write,
+                offset,
+                &shape,
+            )
+            .expect_err("invalid mapping must fail before opening the file");
+            assert_eq!(err.reason_code(), "io_memmap_contract_violation");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                original,
+                "offset={offset}, shape={shape:?}: rejected write must preserve existing data"
+            );
+        }
+
+        let absent = dir.join("not_created.bin");
+        assert!(
+            memmap(
+                &absent,
+                IOSupportedDType::F64,
+                MemmapMode::Write,
+                usize::MAX,
+                &[1]
+            )
+            .is_err()
+        );
+        assert!(!absent.exists(), "invalid mapping must not create a file");
+    }
 
     #[test]
     fn memmap_write_mode_creates_zeroed_file() {
