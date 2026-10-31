@@ -382,15 +382,30 @@ pub fn validate_square_matrix(shape: &[usize]) -> Result<usize, LinAlgError> {
 }
 
 pub fn solve_2x2(lhs: [[f64; 2]; 2], rhs: [f64; 2]) -> Result<[f64; 2], LinAlgError> {
-    let det = lhs[0][0] * lhs[1][1] - lhs[0][1] * lhs[1][0];
-    if det == 0.0 {
-        return Err(LinAlgError::SolverSingularity);
+    // A finite, well-conditioned system can have an overflowing or underflowing
+    // determinant. Factor and substitute without forming that extra product.
+    // Only an exactly zero pivot is singular here, preserving the fixed-size
+    // API's behavior on nonsingular matrices with widely differing scales.
+    let flat = [lhs[0][0], lhs[0][1], lhs[1][0], lhs[1][1]];
+    if flat
+        .iter()
+        .chain(rhs.iter())
+        .any(|value| !value.is_finite())
+    {
+        // Preserve the closed-form API's existing IEEE NaN/Inf propagation.
+        let det = lhs[0][0] * lhs[1][1] - lhs[0][1] * lhs[1][0];
+        if det == 0.0 {
+            return Err(LinAlgError::SolverSingularity);
+        }
+        let inv_det = 1.0 / det;
+        return Ok([
+            (rhs[0] * lhs[1][1] - lhs[0][1] * rhs[1]) * inv_det,
+            (lhs[0][0] * rhs[1] - rhs[0] * lhs[1][0]) * inv_det,
+        ]);
     }
-
-    let inv_det = 1.0 / det;
-    let x0 = (rhs[0] * lhs[1][1] - lhs[0][1] * rhs[1]) * inv_det;
-    let x1 = (lhs[0][0] * rhs[1] - rhs[0] * lhs[1][0]) * inv_det;
-    Ok([x0, x1])
+    let (lu, perm, _) = lu_decompose_inner(&flat, 2, false, true)?;
+    let solved = lu_forward_back(&lu, &perm, &rhs, 2);
+    Ok([solved[0], solved[1]])
 }
 
 fn validate_finite_matrix_2x2(matrix: [[f64; 2]; 2]) -> Result<(), LinAlgError> {
@@ -433,16 +448,21 @@ pub fn slogdet_2x2(matrix: [[f64; 2]; 2]) -> Result<(f64, f64), LinAlgError> {
 }
 
 pub fn inv_2x2(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], LinAlgError> {
-    let det = det_2x2(matrix)?;
-    if det == 0.0 {
-        return Err(LinAlgError::SolverSingularity);
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    if flat.iter().any(|value| !value.is_finite()) {
+        let det = det_2x2(matrix)?;
+        if det == 0.0 {
+            return Err(LinAlgError::SolverSingularity);
+        }
+        let inv_det = 1.0 / det;
+        return Ok([
+            [matrix[1][1] * inv_det, -matrix[0][1] * inv_det],
+            [-matrix[1][0] * inv_det, matrix[0][0] * inv_det],
+        ]);
     }
-
-    let inv_det = 1.0 / det;
-    Ok([
-        [matrix[1][1] * inv_det, -matrix[0][1] * inv_det],
-        [-matrix[1][0] * inv_det, matrix[0][0] * inv_det],
-    ])
+    let (lu, perm, _) = lu_decompose_inner(&flat, 2, false, true)?;
+    let inverse = inv_from_lu_unblocked(&lu, &perm, 2);
+    Ok([[inverse[0], inverse[1]], [inverse[2], inverse[3]]])
 }
 
 /// LU decomposition with partial pivoting.  PA = LU where P is a row
@@ -1047,6 +1067,11 @@ pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError
             "solve_nxn: rhs length must equal n",
         ));
     }
+    if n == 0 || Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_nxn: input must be n*n with n > 0",
+        ));
+    }
     if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
         let sanitized = fill_diagonal_nans_with_one(a, n);
         let mut solved = solve_nxn(&sanitized, b, n)?;
@@ -1435,6 +1460,11 @@ fn slogdet_nxn_unblocked_with_scratch(
 /// Inverse of an NxN matrix via LU decomposition.  Returns n*n flat
 /// row-major.
 pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if n == 0 || Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "inv_nxn: input must be n*n with n > 0",
+        ));
+    }
     if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
         let sanitized = fill_diagonal_nans_with_one(a, n);
         let mut inverse = inv_nxn(&sanitized, n)?;
@@ -1446,7 +1476,7 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Ok(inverse);
     }
     if a.iter().any(|value| value.is_nan()) {
-        return Ok(vec![f64::NAN; n * n]);
+        return Ok(vec![f64::NAN; a.len()]);
     }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
     // For small unblocked inverses, solve against the natural identity first:

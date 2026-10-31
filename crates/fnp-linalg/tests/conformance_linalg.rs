@@ -4,8 +4,8 @@
 //! that match NumPy's np.linalg module within floating-point tolerance.
 
 use fnp_linalg::{
-    cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, qr_mxn, qr_nxn, slogdet_2x2, slogdet_nxn,
-    solve_2x2, solve_nxn, svd_mxn_full,
+    LinAlgError, cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, qr_mxn, qr_nxn, slogdet_2x2,
+    slogdet_nxn, solve_2x2, solve_nxn, svd_mxn_full,
 };
 use std::process::Command;
 
@@ -64,6 +64,35 @@ elif case == "slogdet_2x2":
 elif case == "inv_2x2":
     inv = np.linalg.inv(A_2x2)
     emit_vec("inv", inv)
+elif case == "scaled_solve_and_inverse":
+    matrices = []
+    for scale in (1e-200, 1e-100, 1.0, 1e100, 1e200):
+        for base in ([[1.0, 0.0], [0.0, 2.0]],
+                     [[2.0, 1.0], [3.0, 4.0]],
+                     [[0.0, 2.0], [1.0, 3.0]]):
+            matrices.append(np.array(base) * scale)
+    matrices.extend([
+        np.diag([1e10, 1e-10]),
+        np.diag([1e-200, 1e200]),
+        np.array([[0.0, 1e-200], [1e200, 0.0]]),
+    ])
+    x = np.array([1.5, -2.0])
+    A = np.array(matrices)
+    # Spell out the two products, matching the fixture construction in Rust.
+    b = np.array([[a[0, 0] * x[0] + a[0, 1] * x[1],
+                   a[1, 0] * x[0] + a[1, 1] * x[1]] for a in A])
+    emit_vec("solve", np.linalg.solve(A, b[..., None])[..., 0])
+    emit_vec("inverse", np.linalg.inv(A))
+    for index, scale in enumerate((1e-200, 1.0, 1e200)):
+        singular = np.array([[1.0, 2.0], [2.0, 4.0]]) * scale
+        for name, operation in (("solve", lambda: np.linalg.solve(singular, np.ones(2))),
+                                ("inv", lambda: np.linalg.inv(singular))):
+            try:
+                operation()
+            except np.linalg.LinAlgError:
+                emit_scalar(f"singular_{name}_{index}", 1)
+            else:
+                emit_scalar(f"singular_{name}_{index}", 0)
 elif case == "solve_3x3":
     x = np.linalg.solve(A_3x3, b_3)
     emit_vec("x", x)
@@ -115,7 +144,8 @@ else:
 "#;
 
 fn run_numpy_oracle(case: &str) -> std::collections::HashMap<String, Vec<f64>> {
-    let output = Command::new("python3")
+    let python = std::env::var_os("FNP_ORACLE_PYTHON").unwrap_or_else(|| "python3".into());
+    let output = Command::new(python)
         .args(["-c", NUMPY_LINALG_ORACLE, case])
         .output()
         .expect("python3 should be available");
@@ -216,6 +246,115 @@ fn conformance_inv_2x2() {
     let oracle = run_numpy_oracle("inv_2x2");
     let expected = oracle.get("inv").expect("oracle inv");
     assert_vec_close("inv_2x2", &inv_flat, expected, 1e-10, 1e-12);
+}
+
+#[test]
+fn conformance_scaled_solve_and_inverse() {
+    let oracle = run_numpy_oracle("scaled_solve_and_inverse");
+    let mut matrices = Vec::new();
+    for scale in [1e-200, 1e-100, 1.0, 1e100, 1e200] {
+        for base in [
+            [[1.0, 0.0], [0.0, 2.0]],
+            [[2.0, 1.0], [3.0, 4.0]],
+            [[0.0, 2.0], [1.0, 3.0]],
+        ] {
+            matrices.push(base.map(|row| row.map(|value| value * scale)));
+        }
+    }
+    matrices.extend([
+        [[1e10, 0.0], [0.0, 1e-10]],
+        [[1e-200, 0.0], [0.0, 1e200]],
+        [[0.0, 1e-200], [1e200, 0.0]],
+    ]);
+    let truth = [1.5, -2.0];
+    for (index, &a) in matrices.iter().enumerate() {
+        let b = a.map(|row| row[0] * truth[0] + row[1] * truth[1]);
+        let expected_solve = &oracle["solve"][index * 2..(index + 1) * 2];
+        let expected_inv = &oracle["inverse"][index * 4..(index + 1) * 4];
+
+        let solution = solve_2x2(a, b).expect("scaled fixed solve");
+        assert_vec_close("scaled fixed solve", &solution, expected_solve, 1e-12, 0.0);
+        let inverse = inv_2x2(a).expect("scaled fixed inverse");
+        let inverse_flat: Vec<f64> = inverse.into_iter().flatten().collect();
+        // No absolute tolerance: returning zero for an inverse of order 1e-200
+        // must fail just as clearly as overflowing an inverse of order 1e200.
+        assert_vec_close(
+            "scaled fixed inverse",
+            &inverse_flat,
+            expected_inv,
+            1e-12,
+            0.0,
+        );
+        for (row, a_row) in a.iter().enumerate() {
+            let reconstructed = a_row[0] * solution[0] + a_row[1] * solution[1];
+            assert_scalar_close("solve residual", reconstructed, b[row], 1e-12, 0.0);
+            for col in 0..2 {
+                let product = a_row[0] * inverse[0][col] + a_row[1] * inverse[1][col];
+                let identity = if row == col { 1.0 } else { 0.0 };
+                assert_scalar_close("inverse residual", product, identity, 0.0, 1e-12);
+            }
+        }
+    }
+
+    for (index, scale) in [1e-200, 1.0, 1e200].into_iter().enumerate() {
+        assert_eq!(oracle[&format!("singular_solve_{index}")], [1.0]);
+        assert_eq!(oracle[&format!("singular_inv_{index}")], [1.0]);
+        let a = [[scale, 2.0 * scale], [2.0 * scale, 4.0 * scale]];
+        assert_eq!(
+            solve_2x2(a, [1.0, 1.0]),
+            Err(LinAlgError::SolverSingularity)
+        );
+        assert_eq!(inv_2x2(a), Err(LinAlgError::SolverSingularity));
+    }
+}
+
+#[test]
+fn fixed_2x2_preserves_non_finite_propagation() {
+    let a = [[f64::NAN, 0.0], [0.0, 1e-200]];
+    assert!(
+        solve_2x2(a, [1.0, 1.0])
+            .expect("NaN solve")
+            .iter()
+            .all(|v| v.is_nan())
+    );
+    assert!(
+        inv_2x2(a)
+            .expect("NaN inverse")
+            .iter()
+            .flatten()
+            .all(|v| v.is_nan())
+    );
+    let solved = solve_2x2([[1.0, 0.0], [0.0, 1.0]], [f64::INFINITY, 1.0])
+        .expect("infinite RHS propagation");
+    assert_eq!(solved[0], f64::INFINITY);
+    assert!(solved[1].is_nan());
+}
+
+#[test]
+fn solve_and_inverse_reject_malformed_shapes_before_nan_handling() {
+    for (a, n) in [
+        (vec![], 0),
+        (vec![f64::NAN], 0),
+        (vec![], 2),
+        (vec![f64::NAN], 2),
+        (vec![1.0, f64::NAN], 2),
+        (vec![1.0, 0.0, 0.0], 2),
+        (vec![1.0, 0.0, 0.0, 1.0, f64::NAN], 2),
+        (vec![1.0, f64::NAN, 0.0, 1.0, 2.0], 2),
+    ] {
+        let rhs = vec![1.0; n];
+        for result in [solve_nxn(&a, &rhs, n), inv_nxn(&a, n)] {
+            let error = result.expect_err("malformed shapes must fail before examining elements");
+            assert!(matches!(error, LinAlgError::ShapeContractViolation(_)));
+            assert_eq!(error.reason_code(), "linalg_shape_contract_violation");
+        }
+    }
+    // Overflowing n*n must fail before indexing, multiplying unchecked dimensions,
+    // or allocating a NaN-filled result.
+    let error = inv_nxn(&[f64::NAN], usize::MAX).expect_err("overflowing matrix shape");
+    assert!(matches!(error, LinAlgError::ShapeContractViolation(_)));
+    let error = solve_nxn(&[f64::NAN], &[], usize::MAX).expect_err("overflowing solve shape");
+    assert!(matches!(error, LinAlgError::ShapeContractViolation(_)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
