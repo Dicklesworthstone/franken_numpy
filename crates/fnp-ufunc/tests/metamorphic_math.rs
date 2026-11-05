@@ -1561,8 +1561,7 @@ fn einsum_preserves_integer_precision_wrapping_and_boolean_reductions() {
         ArrayStorage::I64(vec![9_007_199_254_740_989])
     );
 
-    let unsigned =
-        UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX, 2])).unwrap();
+    let unsigned = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX, 2])).unwrap();
     let weights = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![2, 3])).unwrap();
     assert_eq!(
         UFuncArray::einsum("i,i->", &[&unsigned, &weights])
@@ -1799,7 +1798,11 @@ print(json.dumps(records))
                 "{case}"
             );
             assert_eq!(
-                actual.reduce_sum(None, false).unwrap().to_storage().unwrap(),
+                actual
+                    .reduce_sum(None, false)
+                    .unwrap()
+                    .to_storage()
+                    .unwrap(),
                 storage(&case["total"]),
                 "subsequent exact reduction: {case}"
             );

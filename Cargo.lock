@@ -749,6 +749,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "flate2",
+ "fnp-dtype",
  "insta",
  "sha2 0.11.0",
 ]

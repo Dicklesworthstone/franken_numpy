@@ -24865,23 +24865,21 @@ impl UFuncArray {
             }
             sum
         };
-        let values = if output_size >= 2
-            && total_iters >= (1 << 14)
-            && rayon::current_num_threads() >= 2
-        {
-            (0..output_size)
-                .into_par_iter()
-                .map_init(
-                    || vec![0; all_labels.len()],
-                    |labels, out| compute_cell(labels, out),
-                )
-                .collect()
-        } else {
-            let mut labels = vec![0; all_labels.len()];
-            (0..output_size)
-                .map(|out| compute_cell(&mut labels, out))
-                .collect()
-        };
+        let values =
+            if output_size >= 2 && total_iters >= (1 << 14) && rayon::current_num_threads() >= 2 {
+                (0..output_size)
+                    .into_par_iter()
+                    .map_init(
+                        || vec![0; all_labels.len()],
+                        |labels, out| compute_cell(labels, out),
+                    )
+                    .collect()
+            } else {
+                let mut labels = vec![0; all_labels.len()];
+                (0..output_size)
+                    .map(|out| compute_cell(&mut labels, out))
+                    .collect()
+            };
         IntegerContraction::finish_values(dtype, output_shape, values)
     }
 
@@ -24976,7 +24974,13 @@ impl UFuncArray {
                     return Ok(folded);
                 }
             }
-            return Self::einsum_integer(&input_subs, &output_labels, operands, &label_sizes, dtype);
+            return Self::einsum_integer(
+                &input_subs,
+                &output_labels,
+                operands,
+                &label_sizes,
+                dtype,
+            );
         }
 
         // Single-operand fast paths: a pure label permutation is a transpose, a repeated

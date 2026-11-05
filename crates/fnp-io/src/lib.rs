@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use bytemuck::{cast_slice, try_cast_slice};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
+use fnp_dtype::f16;
 
 pub const IO_PACKET_ID: &str = "FNP-P2C-009";
 pub const NPY_MAGIC_PREFIX: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
@@ -104,6 +105,8 @@ pub enum IOSupportedDType {
     U32Be,
     U64,
     U64Be,
+    F16,
+    F16Be,
     F32,
     F32Be,
     F64,
@@ -140,6 +143,8 @@ impl IOSupportedDType {
             Self::U32Be => ">u4".to_string(),
             Self::U64 => "<u8".to_string(),
             Self::U64Be => ">u8".to_string(),
+            Self::F16 => "<f2".to_string(),
+            Self::F16Be => ">f2".to_string(),
             Self::F32 => "<f4".to_string(),
             Self::F32Be => ">f4".to_string(),
             Self::F64 => "<f8".to_string(),
@@ -193,6 +198,10 @@ impl IOSupportedDType {
             ">u8" => Ok(Self::U64Be),
             "=u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
             "|u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
+            "<f2" => Ok(Self::F16),
+            ">f2" => Ok(Self::F16Be),
+            "=f2" => Ok(Self::native_endian(Self::F16, Self::F16Be)),
+            "|f2" => Ok(Self::native_endian(Self::F16, Self::F16Be)),
             "<f4" => Ok(Self::F32),
             ">f4" => Ok(Self::F32Be),
             "=f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
@@ -262,7 +271,7 @@ impl IOSupportedDType {
     pub fn item_size(self) -> Option<usize> {
         match self {
             Self::Bool | Self::I8 | Self::U8 => Some(1),
-            Self::I16 | Self::I16Be | Self::U16 | Self::U16Be => Some(2),
+            Self::I16 | Self::I16Be | Self::U16 | Self::U16Be | Self::F16 | Self::F16Be => Some(2),
             Self::I32 | Self::I32Be | Self::U32 | Self::U32Be | Self::F32 | Self::F32Be => Some(4),
             Self::I64
             | Self::I64Be
@@ -1085,7 +1094,7 @@ pub fn read_npy_header(payload: &[u8]) -> Result<NpyHeader, IOError> {
 /// its required keys, `fortran_order`, a `shape` of rank <= 32 whose element count does not
 /// overflow. A hardened loader runs this over untrusted bytes before numpy's parser sees them;
 /// [`read_npy_header`] additionally requires a dtype fnp-io decodes itself, which would refuse
-/// float16, datetime64 and structured files numpy writes every day.
+/// datetime64 and structured files numpy writes every day.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpyHeaderFraming {
     pub version: (u8, u8),
@@ -4675,6 +4684,12 @@ fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError>
         IOSupportedDType::U64Be => Ok(u64::from_be_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]) as f64),
+        IOSupportedDType::F16 => {
+            Ok(f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f64())
+        }
+        IOSupportedDType::F16Be => {
+            Ok(f16::from_bits(u16::from_be_bytes([chunk[0], chunk[1]])).to_f64())
+        }
         IOSupportedDType::F32 => {
             Ok(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
         }
@@ -4718,6 +4733,8 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
         IOSupportedDType::U32Be => buf.extend_from_slice(&(v as u32).to_be_bytes()),
         IOSupportedDType::U64 => buf.extend_from_slice(&(v as u64).to_le_bytes()),
         IOSupportedDType::U64Be => buf.extend_from_slice(&(v as u64).to_be_bytes()),
+        IOSupportedDType::F16 => buf.extend_from_slice(&f16::from_f64(v).to_bits().to_le_bytes()),
+        IOSupportedDType::F16Be => buf.extend_from_slice(&f16::from_f64(v).to_bits().to_be_bytes()),
         IOSupportedDType::F32 => buf.extend_from_slice(&(v as f32).to_le_bytes()),
         IOSupportedDType::F32Be => buf.extend_from_slice(&(v as f32).to_be_bytes()),
         IOSupportedDType::F64 => buf.extend_from_slice(&v.to_le_bytes()),
@@ -5466,6 +5483,12 @@ fn parse_text_element_for_dtype(token: &str, dtype: IOSupportedDType) -> Result<
         }
         IOSupportedDType::U64 | IOSupportedDType::U64Be => {
             Ok(parse_unsigned_text_token_as::<u64>(token)? as f64)
+        }
+        IOSupportedDType::F16 | IOSupportedDType::F16Be => {
+            let value = token
+                .parse::<f64>()
+                .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?;
+            Ok(f16::from_f64(value).to_f64())
         }
         IOSupportedDType::F32 | IOSupportedDType::F32Be => {
             Ok(f64::from(token.parse::<f32>().map_err(|_| {
@@ -7039,6 +7062,8 @@ mm.flush()
             IOSupportedDType::U32Be,
             IOSupportedDType::U64,
             IOSupportedDType::U64Be,
+            IOSupportedDType::F16,
+            IOSupportedDType::F16Be,
             IOSupportedDType::F32,
             IOSupportedDType::F32Be,
             IOSupportedDType::F64,
@@ -7087,6 +7112,10 @@ mm.flush()
             (
                 "=u8",
                 IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "=f2",
+                IOSupportedDType::native_endian(IOSupportedDType::F16, IOSupportedDType::F16Be),
             ),
             (
                 "=f4",
@@ -7165,6 +7194,10 @@ mm.flush()
             (
                 "|u8",
                 IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "|f2",
+                IOSupportedDType::native_endian(IOSupportedDType::F16, IOSupportedDType::F16Be),
             ),
             (
                 "|f4",
@@ -9776,6 +9809,8 @@ mm.flush()
         assert_eq!(IOSupportedDType::I16Be.item_size(), Some(2));
         assert_eq!(IOSupportedDType::U16.item_size(), Some(2));
         assert_eq!(IOSupportedDType::U16Be.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::F16.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::F16Be.item_size(), Some(2));
         assert_eq!(IOSupportedDType::I32.item_size(), Some(4));
         assert_eq!(IOSupportedDType::I32Be.item_size(), Some(4));
         assert_eq!(IOSupportedDType::U32.item_size(), Some(4));
@@ -10299,10 +10334,9 @@ mm.flush()
 
     #[test]
     fn npy_header_framing_accepts_dtypes_fnp_io_does_not_decode() {
-        // float16, datetime64 and structured headers, as numpy writes them: read_npy_header
-        // refuses all three, the framing reads their shape and leaves the dtype to the caller.
+        // datetime64 and structured headers, as numpy writes them: read_npy_header refuses
+        // both, while framing reads their shape and leaves the dtype to the caller.
         for (descr, shape, count) in [
-            ("'<f2'", "(3, 4)", 12),
             ("'<M8[ns]'", "(5,)", 5),
             ("[('a', '<i4'), ('b', '<f8')]", "()", 1),
         ] {
@@ -10327,6 +10361,24 @@ mm.flush()
         assert!(framing.fortran_order);
         assert_eq!(framing.shape, vec![2, 3]);
         assert_eq!(framing.expected_payload_bytes(), Some(48));
+    }
+
+    #[test]
+    fn npy_header_framing_computes_float16_payload_size() {
+        for (descr, dtype) in [("<f2", IOSupportedDType::F16), (">f2", IOSupportedDType::F16Be)] {
+            let header = npy_v1_header_bytes(&format!(
+                "{{'descr': '{descr}', 'fortran_order': False, 'shape': (3, 4), }}"
+            ));
+            let parsed = read_npy_header(&header).expect(descr);
+            assert_eq!(parsed.descr, dtype);
+            assert_eq!(parsed.shape, vec![3, 4]);
+            let framing = read_npy_header_framing(&header).expect(descr);
+            assert_eq!(framing.header_end, header.len());
+            assert_eq!(framing.descr_literal, format!("'{descr}'"));
+            assert_eq!(framing.descr, Some(dtype));
+            assert_eq!(framing.element_count, 12);
+            assert_eq!(framing.expected_payload_bytes(), Some(24));
+        }
     }
 
     #[test]
@@ -11162,6 +11214,181 @@ mm.flush()
             let f32_a = *a as f32;
             let f32_b = *b as f32;
             assert_eq!(f32_a, f32_b, "f32 round-trip mismatch {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn float16_binary_io_covers_every_bit_pattern() {
+        for dtype in [IOSupportedDType::F16, IOSupportedDType::F16Be] {
+            let payload: Vec<u8> = (0..=u16::MAX)
+                .flat_map(|bits| {
+                    if dtype == IOSupportedDType::F16 {
+                        bits.to_le_bytes()
+                    } else {
+                        bits.to_be_bytes()
+                    }
+                })
+                .collect();
+            let values = fromfile(&payload, dtype, None).expect("decode binary16");
+            assert_eq!(values.len(), usize::from(u16::MAX) + 1);
+            let reencoded = tofile(&values, dtype).expect("encode binary16");
+            for ((bits, &value), bytes) in
+                (0..=u16::MAX).zip(&values).zip(reencoded.chunks_exact(2))
+            {
+                let encoded = if dtype == IOSupportedDType::F16 {
+                    u16::from_le_bytes([bytes[0], bytes[1]])
+                } else {
+                    u16::from_be_bytes([bytes[0], bytes[1]])
+                };
+                let exponent = (bits >> 10) & 0x1f;
+                let fraction = bits & 0x03ff;
+                if exponent == 0x1f && fraction != 0 {
+                    // Numeric conversion may quiet signaling NaNs. The raw NPY/NPZ
+                    // APIs have a separate test requiring exact payload preservation.
+                    assert!(value.is_nan(), "{dtype:?} {bits:04x}");
+                    assert_eq!(encoded & 0xfc00, bits & 0xfc00);
+                    assert_ne!(encoded & 0x03ff, 0);
+                } else {
+                    // Independent IEEE-754 binary16 definition; no half conversion
+                    // helper is used to calculate the expected numeric value.
+                    let magnitude = if exponent == 0x1f {
+                        f64::INFINITY
+                    } else if exponent == 0 {
+                        f64::from(fraction) * 2.0_f64.powi(-24)
+                    } else {
+                        (1024.0 + f64::from(fraction))
+                            * 2.0_f64.powi(i32::from(exponent) - 25)
+                    };
+                    let expected = if bits & 0x8000 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    };
+                    assert_eq!(value.to_bits(), expected.to_bits(), "{dtype:?} {bits:04x}");
+                    assert_eq!(encoded, bits, "{dtype:?} {bits:04x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float16_binary_and_text_writes_round_once_to_nearest_even() {
+        let midpoint = 1.0 + 2.0_f64.powi(-11);
+        let cases = [
+            (0.0, 0x0000_u16),
+            (-0.0, 0x8000),
+            (2.0_f64.powi(-25), 0x0000),
+            (3.0 * 2.0_f64.powi(-25), 0x0002),
+            (midpoint, 0x3c00),
+            (f64::from_bits(midpoint.to_bits() + 1), 0x3c01),
+            (1.0 + 3.0 * 2.0_f64.powi(-11), 0x3c02),
+            (65519.0, 0x7bff),
+            (65520.0, 0x7c00),
+            (-65520.0, 0xfc00),
+        ];
+        let values: Vec<f64> = cases.iter().map(|&(value, _)| value).collect();
+        let text = values
+            .iter()
+            .map(|value| format!("{value:.17e}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for dtype in [IOSupportedDType::F16, IOSupportedDType::F16Be] {
+            let expected: Vec<u8> = cases
+                .iter()
+                .flat_map(|&(_, bits)| {
+                    if dtype == IOSupportedDType::F16 {
+                        bits.to_le_bytes()
+                    } else {
+                        bits.to_be_bytes()
+                    }
+                })
+                .collect();
+            assert_eq!(tofile(&values, dtype).unwrap(), expected);
+            let parsed = fromstring(text.as_bytes(), dtype, " ").unwrap();
+            assert_eq!(tofile(&parsed, dtype).unwrap(), expected);
+            let binary = fromstring(&expected, dtype, "").unwrap();
+            assert_eq!(tofile(&binary, dtype).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn float16_npy_npz_preserve_raw_nan_payloads_and_byte_order() {
+        let words = [
+            0x0000_u16, 0x8000, 0x0001, 0x7bff, 0x7c00, 0xfc00, 0x7c01, 0xfeab,
+        ];
+        for dtype in [IOSupportedDType::F16, IOSupportedDType::F16Be] {
+            let payload: Vec<u8> = words
+                .iter()
+                .flat_map(|bits| {
+                    if dtype == IOSupportedDType::F16 {
+                        bits.to_le_bytes()
+                    } else {
+                        bits.to_be_bytes()
+                    }
+                })
+                .collect();
+            for fortran_order in [false, true] {
+                let header = NpyHeader {
+                    shape: vec![2, 4],
+                    fortran_order,
+                    descr: dtype,
+                };
+                let npy = write_npy_bytes(&header, &payload, false).unwrap();
+                let decoded = read_npy_bytes(&npy, false).unwrap();
+                assert_eq!(decoded.header, header);
+                assert_eq!(decoded.payload.as_ref(), payload.as_slice());
+                assert!(read_npy_bytes(&npy[..npy.len() - 1], false).is_err());
+                assert!(
+                    write_npy_bytes(&header, &payload[..payload.len() - 1], false).is_err()
+                );
+                for compression in [NpzCompression::Store, NpzCompression::Deflate] {
+                    let npz = write_npz_bytes_with_compression(
+                        &[("half", &header, &payload)],
+                        compression,
+                    )
+                    .unwrap();
+                    let entries = read_npz_bytes(&npz, false).unwrap();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].name, "half");
+                    assert_eq!(entries[0].array.header, header);
+                    assert_eq!(entries[0].array.payload.as_ref(), payload.as_slice());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float16_save_load_preserves_scalar_and_empty_shapes() {
+        for dtype in [IOSupportedDType::F16, IOSupportedDType::F16Be] {
+            for (shape, values) in [
+                (vec![], vec![-0.0_f64]),
+                (vec![2, 0, 3], vec![]),
+                (
+                    vec![2, 3],
+                    vec![1.5, -2.0, 2.0_f64.powi(-24), 2.0_f64.powi(-14), 65504.0, -0.0],
+                ),
+            ] {
+                let expected_bits: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
+                let bytes = save(&shape, &values, dtype).unwrap();
+                let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+                assert_eq!(loaded_shape, shape);
+                assert_eq!(loaded_dtype, dtype);
+                let actual_bits: Vec<u64> =
+                    loaded_values.iter().map(|value| value.to_bits()).collect();
+                assert_eq!(actual_bits, expected_bits);
+
+                let entries = [("half", shape.as_slice(), values.as_slice(), dtype)];
+                for archive in [savez(&entries), savez_compressed(&entries)] {
+                    let loaded = load_npz(&archive.unwrap(), false).unwrap();
+                    assert_eq!(loaded.len(), 1);
+                    assert_eq!(loaded[0].0, "half");
+                    assert_eq!(loaded[0].1, shape);
+                    assert_eq!(loaded[0].3, dtype);
+                    let actual_bits: Vec<u64> =
+                        loaded[0].2.iter().map(|value| value.to_bits()).collect();
+                    assert_eq!(actual_bits, expected_bits);
+                }
+            }
         }
     }
 

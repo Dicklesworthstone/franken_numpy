@@ -11,6 +11,8 @@ categories.workspace = true
 description = "NumPy file format I/O: NPY/NPZ load and save, text I/O, with bounded resource consumption."
 
 [dependencies]
+# Share the numeric core's IEEE-754 binary16 conversion with the IO boundary.
+fnp-dtype = { path = "../fnp-dtype", version = "0.5.0" }
 # bytemuck: zerocopy reinterpretation between byte buffers and typed slices,
 # used in NPY/NPZ load+save for transmuting raw bytes into f64/i64/etc. without
 # allocation. Only Pod-derived types are eligible (see ArrayStorage in fnp-dtype).

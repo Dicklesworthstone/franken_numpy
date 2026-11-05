@@ -96,6 +96,16 @@ elif case == "i16_big_endian":
     emit_npy(np.array([-2, 0, 257], dtype=np.dtype(">i2")))
 elif case == "f32_fortran_order":
     emit_npy(np.asfortranarray(np.array([[1, 2, 3], [4, 5, 6]], dtype=np.dtype("<f4"))))
+elif case == "f16_c_order":
+    emit_npy(np.array([[1.5, -2, 2.0**-24], [2.0**-14, 65504, -0.0]], dtype="<f2"))
+elif case == "f16_big_endian":
+    emit_npy(np.array([[1.5, -2, 2.0**-24], [2.0**-14, 65504, -0.0]], dtype=">f2"))
+elif case == "f16_fortran_order":
+    emit_npy(np.asfortranarray(np.arange(6, dtype="<f2").reshape(2, 3)))
+elif case == "f16_scalar":
+    emit_npy(np.array(-0.0, dtype="<f2"))
+elif case == "f16_empty":
+    emit_npy(np.empty((2, 0, 3), dtype=">f2"))
 elif case == "complex128":
     emit_npy(np.array([1 + 2j, -3 + 0.5j], dtype=np.dtype("<c16")))
 elif case == "u8_empty":
@@ -126,6 +136,8 @@ elif case == "i64_range":
             [-9223372036854775808, -1, 0, 1, 9223372036854775807], dtype=np.dtype("<i8")
         )
     )
+elif case == "f16_specials":
+    emit_npy(np.array([np.inf, -np.inf, np.nan, -0.0, 0.0, 1.5], dtype="<f2"))
 elif case == "f32_specials":
     emit_npy(np.array([np.inf, -np.inf, np.nan, -0.0, 0.0, 1.5], dtype=np.dtype("<f4")))
 elif case == "f64_specials":
@@ -428,6 +440,11 @@ fn numpy_generated_npy_payloads_parse_with_matching_headers_and_values() -> Resu
         ("f64_c_order", IOSupportedDType::F64),
         ("i16_big_endian", IOSupportedDType::I16Be),
         ("f32_fortran_order", IOSupportedDType::F32),
+        ("f16_c_order", IOSupportedDType::F16),
+        ("f16_big_endian", IOSupportedDType::F16Be),
+        ("f16_fortran_order", IOSupportedDType::F16),
+        ("f16_scalar", IOSupportedDType::F16),
+        ("f16_empty", IOSupportedDType::F16Be),
         ("u8_empty", IOSupportedDType::U8),
     ];
 
@@ -648,13 +665,14 @@ fn unicode_npy_values_preserve_embedded_nuls_in_both_byte_orders() -> Result<(),
 fn uncovered_dtypes_and_special_floats_round_trip_byte_exactly() -> Result<(), String> {
     // The existing conformance cases compare decimal `values=` lines, which cannot
     // distinguish -0.0 from 0.0 and cannot see a NaN's payload bits at all. These dtypes
-    // (bool/i32/i64/f32/f64/complex64/complex128) are checked on RAW BYTES in both
+    // (bool/i32/i64/f16/f32/f64/complex64/complex128) are checked on RAW BYTES in both
     // directions: NumPy's payload must survive our parse untouched, and re-serialising the
     // parsed header + payload must reproduce NumPy's whole .npy file byte for byte.
     let cases = [
         ("bool_mixed", IOSupportedDType::Bool),
         ("i32_range", IOSupportedDType::I32),
         ("i64_range", IOSupportedDType::I64),
+        ("f16_specials", IOSupportedDType::F16),
         ("f32_specials", IOSupportedDType::F32),
         ("f64_specials", IOSupportedDType::F64),
         ("complex64_specials", IOSupportedDType::Complex64),
@@ -899,6 +917,8 @@ fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
     let floats_shape = [2_usize];
     let ints = [1.0, 255.0];
     let ints_shape = [2_usize];
+    let halves = [1.5, 2.0_f64.powi(-24), -0.0];
+    let halves_shape = [3_usize];
     let entries = [
         (
             "floats",
@@ -911,6 +931,12 @@ fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
             ints_shape.as_slice(),
             ints.as_slice(),
             IOSupportedDType::U8,
+        ),
+        (
+            "halves",
+            halves_shape.as_slice(),
+            halves.as_slice(),
+            IOSupportedDType::F16Be,
         ),
     ];
 
@@ -928,7 +954,9 @@ fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
         ),
     ] {
         let lines = numpy_load_npz_summary(&npz_bytes)?;
-        let expected_methods = format!("floats.npy:{expected_method},ints.npy:{expected_method}");
+        let expected_methods = format!(
+            "floats.npy:{expected_method},ints.npy:{expected_method},halves.npy:{expected_method}"
+        );
         ensure_eq(
             require_line(&lines, "zip_methods")?.as_str(),
             expected_methods.as_str(),
@@ -936,7 +964,7 @@ fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
         )?;
         ensure_eq(
             require_line(&lines, "npz_names")?.as_str(),
-            "floats,ints",
+            "floats,ints,halves",
             format!("{case_id}: NumPy-visible member names"),
         )?;
         ensure_eq(
@@ -961,6 +989,17 @@ fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
             format!("{case_id}: ints shape"),
         )?;
         assert_close(&parse_values(lines.get("ints_values"))?, &ints)?;
+        ensure_eq(
+            require_line(&lines, "halves_dtype")?.as_str(),
+            ">f2",
+            format!("{case_id}: halves dtype"),
+        )?;
+        ensure_eq(
+            parse_shape(require_line(&lines, "halves_shape")?)?,
+            vec![3],
+            format!("{case_id}: halves shape"),
+        )?;
+        assert_close(&parse_values(lines.get("halves_values"))?, &halves)?;
     }
     Ok(())
 }
