@@ -1,7 +1,8 @@
 use fnp_io::{
     IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, load_strings,
-    load_structured, parse_structured_descr, read_npy_bytes, read_npy_header_framing, save_strings,
-    save_structured, savez, savez_compressed, write_npy_bytes,
+    load_structured, parse_structured_descr, read_npy_bytes, read_npy_header_framing,
+    read_npz_member_framings, save_strings, save_structured, savez, savez_compressed,
+    write_npy_bytes,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -52,8 +53,15 @@ def emit_npy(arr):
         values = ",".join(f"{float(value):.17g}" for value in flat)
         print("values=" + values)
 
-def emit_npz(compressed):
-    buf = io.BytesIO()
+class NonSeekableBytesIO(io.BytesIO):
+    def seekable(self):
+        return False
+
+    def seek(self, *args):
+        raise io.UnsupportedOperation("seek")
+
+def emit_npz(compressed, streaming=False):
+    buf = NonSeekableBytesIO() if streaming else io.BytesIO()
     floats = np.array([1.25, -2.5], dtype=np.dtype("<f8"))
     ints = np.array([1, 255], dtype=np.dtype("|u1"))
     if compressed:
@@ -160,6 +168,10 @@ elif case == "npz_store":
     emit_npz(False)
 elif case == "npz_deflate":
     emit_npz(True)
+elif case == "npz_store_streaming":
+    emit_npz(False, streaming=True)
+elif case == "npz_deflate_streaming":
+    emit_npz(True, streaming=True)
 elif case == "load_npz_hex":
     emit_loaded_npz(sys.argv[2])
 elif case.startswith("structured_"):
@@ -857,8 +869,23 @@ fn numpy_generated_complex_npy_loads_interleaved_complex_values() -> Result<(), 
 
 #[test]
 fn numpy_generated_npz_archives_dispatch_and_decode_members() -> Result<(), String> {
-    for case_id in ["npz_store", "npz_deflate"] {
+    for case_id in [
+        "npz_store",
+        "npz_deflate",
+        "npz_store_streaming",
+        "npz_deflate_streaming",
+    ] {
         let npz_bytes = numpy_npz_oracle(case_id)?;
+        let framings = read_npz_member_framings(&npz_bytes)
+            .map_err(|err| format!("{case_id}: hardened NPZ framing should validate: {err}"))?;
+        ensure_eq(
+            framings
+                .iter()
+                .map(|member| (member.name.as_str(), member.payload_len))
+                .collect::<Vec<_>>(),
+            vec![("floats.npy", 16), ("ints.npy", 2)],
+            format!("{case_id}: hardened member framing"),
+        )?;
         match load_auto(&npz_bytes, false)
             .map_err(|err| format!("{case_id}: NumPy NPZ should auto-dispatch: {err}"))?
         {

@@ -22,6 +22,63 @@ mod bin_test;
 
 pub use half::f16;
 
+/// Convert binary64 to binary16 with one round-to-nearest, ties-to-even step.
+///
+/// Keep the entire binary64 significand until rounding. The `half` crate's
+/// hardware path can round through binary32, and its software path discards
+/// low significand bits that distinguish an exact midpoint from its neighbors.
+/// NaN signs and representable payload bits follow NumPy's narrowing behavior.
+#[must_use]
+pub const fn f16_from_f64(value: f64) -> f16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let biased_exponent = ((bits >> 52) & 0x07ff) as i32;
+    let fraction = bits & 0x000f_ffff_ffff_ffff;
+
+    if biased_exponent == 0x07ff {
+        let payload = (fraction >> 42) as u16;
+        // A NaN whose payload lives entirely in discarded bits must remain a
+        // NaN, while a zero significand must remain infinity.
+        let payload = if fraction != 0 && payload == 0 {
+            1
+        } else {
+            payload
+        };
+        return f16::from_bits(sign | 0x7c00 | payload);
+    }
+
+    let exponent = biased_exponent - 1023;
+    if exponent < -25 {
+        return f16::from_bits(sign);
+    }
+    if exponent > 15 {
+        return f16::from_bits(sign | 0x7c00);
+    }
+
+    let significand = fraction | (1_u64 << 52);
+    // Normal halves retain eleven significant bits. Subnormal halves have a
+    // fixed 2^-24 quantum, so increasingly small inputs discard more bits.
+    let shift = if exponent < -14 {
+        (28 - exponent) as u32
+    } else {
+        42
+    };
+    let retained = significand >> shift;
+    let remainder = significand & ((1_u64 << shift) - 1);
+    let halfway = 1_u64 << (shift - 1);
+    let round_up = remainder > halfway || (remainder == halfway && retained & 1 != 0);
+    let rounded = (retained + if round_up { 1 } else { 0 }) as u16;
+    let magnitude = if exponent < -14 {
+        rounded
+    } else {
+        // The implicit leading bit supplies one exponent unit. Addition also
+        // carries rounding across binades and from the largest finite half
+        // into infinity, including the exact overflow midpoint at 65520.
+        (((exponent + 14) as u16) << 10) + rounded
+    };
+    f16::from_bits(sign | magnitude)
+}
+
 /// Canonical NumPy-like dtypes for FrankenNumPy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
@@ -883,9 +940,9 @@ pub enum ArrayStorage {
     Structured(StructuredStorage),
 }
 
-/// Convert f64 to i128 with NumPy-compatible semantics: truncate toward zero,
-/// then allow integer wrapping via `as` casts. NaN and infinity map to 0,
-/// matching `numpy`'s behavior for integer casts of non-finite floats.
+/// Truncate f64 toward zero, then allow integer wrapping via `as` casts.
+/// This storage bridge maps NaN and infinity to zero; NumPy's platform-specific
+/// invalid-cast sentinels are not modeled by this helper.
 fn f64_to_wrapping_i128(val: f64) -> i128 {
     if val.is_nan() || val.is_infinite() {
         return 0;
@@ -1045,7 +1102,7 @@ impl ArrayStorage {
             Self::U16(v) => v[index] = f64_to_wrapping_i128(val) as u16,
             Self::U32(v) => v[index] = f64_to_wrapping_i128(val) as u32,
             Self::U64(v) => v[index] = f64_to_wrapping_i128(val) as u64,
-            Self::F16(v) => v[index] = f16::from_f64(val),
+            Self::F16(v) => v[index] = f16_from_f64(val),
             Self::F32(v) => v[index] = val as f32,
             Self::F64(v) => v[index] = val,
             Self::Complex64(v) => v[index] = (val as f32, 0.0),
@@ -1134,7 +1191,7 @@ impl ArrayStorage {
             Self::U16(v) => v[index] = val as u16,
             Self::U32(v) => v[index] = val as u32,
             Self::U64(v) => v[index] = val as u64,
-            Self::F16(v) => v[index] = f16::from_f64(val as f64),
+            Self::F16(v) => v[index] = f16_from_f64(val as f64),
             Self::F32(v) => v[index] = val as f32,
             Self::F64(v) => v[index] = val as f64,
             Self::Complex64(v) => v[index] = (val as f32, 0.0),
@@ -1316,7 +1373,7 @@ impl ArrayStorage {
             Self::F16(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f16::from_f64(v as f64)),
+                .for_each(|(o, &v)| *o = f16_from_f64(v as f64)),
             Self::F32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f32),
             Self::F64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f64),
             Self::Complex64(out) => out
@@ -1378,7 +1435,7 @@ impl ArrayStorage {
             Self::F16(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f16::from_f64(v)),
+                .for_each(|(o, &v)| *o = f16_from_f64(v)),
             Self::F32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f32),
             Self::F64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v),
             Self::Complex64(out) => out
@@ -2211,7 +2268,7 @@ impl ArrayStorage {
 mod tests {
     use super::{
         ArrayStorage, DType, StorageError, StructuredField, StructuredStorage, can_cast,
-        can_cast_lossless, common_type, f16, finfo, iinfo, min_scalar_type, promote,
+        can_cast_lossless, common_type, f16, f16_from_f64, finfo, iinfo, min_scalar_type, promote,
         promote_for_mean_reduction, promote_for_sum_reduction, result_type,
     };
 
@@ -3327,6 +3384,113 @@ print("\n".join(rows))
         assert!((cast.get_f64(0).unwrap() - 0.099_975_585_937_5).abs() < 1e-15);
         assert_eq!(cast.get_f64(1).unwrap(), 1.5);
         assert_eq!(cast.get_f64(2).unwrap(), 65_504.0);
+    }
+
+    #[test]
+    fn f16_from_f64_rounds_every_finite_midpoint_once() {
+        // Adjacent finite half values and their midpoint are exact in f64.
+        // The neighboring f64 bit patterns exercise every discarded bit,
+        // including sticky bits lost by a binary32 intermediate or truncation.
+        for lower in 0_u16..0x7bff {
+            let upper = lower + 1;
+            let midpoint = (f16::from_bits(lower).to_f64() + f16::from_bits(upper).to_f64()) * 0.5;
+            let tie = if lower & 1 == 0 { lower } else { upper };
+            for (value, expected) in [
+                (f64::from_bits(midpoint.to_bits() - 1), lower),
+                (midpoint, tie),
+                (f64::from_bits(midpoint.to_bits() + 1), upper),
+            ] {
+                assert_eq!(
+                    f16_from_f64(value).to_bits(),
+                    expected,
+                    "positive midpoint near half {lower:#06x}, f64 bits {:#018x}",
+                    value.to_bits(),
+                );
+                assert_eq!(
+                    f16_from_f64(-value).to_bits(),
+                    expected | 0x8000,
+                    "negative midpoint near half {lower:#06x}, f64 bits {:#018x}",
+                    (-value).to_bits(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f16_from_f64_preserves_special_values_and_overflow_boundary() {
+        let midpoint = 65_520.0_f64;
+        for (value, expected) in [
+            (0.0, 0x0000),
+            (f64::from_bits(1), 0x0000),
+            (f64::MIN_POSITIVE, 0x0000),
+            (f64::from_bits(midpoint.to_bits() - 1), 0x7bff),
+            (midpoint, 0x7c00),
+            (f64::from_bits(midpoint.to_bits() + 1), 0x7c00),
+            (f64::MAX, 0x7c00),
+            (f64::INFINITY, 0x7c00),
+        ] {
+            assert_eq!(f16_from_f64(value).to_bits(), expected);
+            assert_eq!(f16_from_f64(-value).to_bits(), expected | 0x8000);
+        }
+        // NumPy retains the leading NaN payload and preserves a low-only
+        // payload as the smallest nonzero half payload, never as infinity.
+        for (bits, expected) in [
+            (0x7ff0_0000_0000_0001, 0x7c01),
+            (0x7ff4_0000_0000_0000, 0x7d00),
+            (0x7ff8_0000_0000_0000, 0x7e00),
+            (0x7fff_ffff_ffff_ffff, 0x7fff),
+            (0x7ff8_1234_5678_9abc, 0x7e04),
+        ] {
+            assert_eq!(f16_from_f64(f64::from_bits(bits)).to_bits(), expected);
+            assert_eq!(
+                f16_from_f64(f64::from_bits(bits | (1_u64 << 63))).to_bits(),
+                expected | 0x8000,
+            );
+        }
+    }
+
+    #[test]
+    fn storage_f64_to_f16_cast_set_and_copy_preserve_boundary_bits() {
+        let normal_midpoint = 1.0 + 2.0_f64.powi(-11);
+        let subnormal_midpoint = 2.0_f64.powi(-25);
+        let overflow_midpoint = 65_520.0_f64;
+        let mut values = Vec::new();
+        let mut expected_bits = Vec::new();
+        for (midpoint, lower, tie, upper) in [
+            (normal_midpoint, 0x3c00_u16, 0x3c00, 0x3c01),
+            (subnormal_midpoint, 0x0000, 0x0000, 0x0001),
+            (overflow_midpoint, 0x7bff, 0x7c00, 0x7c00),
+        ] {
+            for (value, expected) in [
+                (f64::from_bits(midpoint.to_bits() - 1), lower),
+                (midpoint, tie),
+                (f64::from_bits(midpoint.to_bits() + 1), upper),
+            ] {
+                values.extend([value, -value]);
+                expected_bits.extend([expected, expected | 0x8000]);
+            }
+        }
+        values.extend([0.0, -0.0, f64::INFINITY, f64::NEG_INFINITY]);
+        expected_bits.extend([0x0000, 0x8000, 0x7c00, 0xfc00]);
+        let source = ArrayStorage::F64(values.clone());
+        let cast = source.cast_to(DType::F16).unwrap();
+        let mut assigned = ArrayStorage::zeros(DType::F16, values.len());
+        for (index, value) in values.into_iter().enumerate() {
+            assigned.set_f64(index, value).unwrap();
+        }
+        let copied = cast.cast_to(DType::F16).unwrap();
+        let roundtrip = cast
+            .cast_to(DType::F64)
+            .unwrap()
+            .cast_to(DType::F16)
+            .unwrap();
+        for storage in [cast, assigned, copied, roundtrip] {
+            let ArrayStorage::F16(values) = storage else {
+                panic!("conversion must retain half storage");
+            };
+            let bits: Vec<u16> = values.into_iter().map(f16::to_bits).collect();
+            assert_eq!(bits, expected_bits);
+        }
     }
 
     #[test]

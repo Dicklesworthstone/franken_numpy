@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use bytemuck::{cast_slice, try_cast_slice};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
-use fnp_dtype::f16;
+use fnp_dtype::{f16, f16_from_f64};
 
 pub const IO_PACKET_ID: &str = "FNP-P2C-009";
 pub const NPY_MAGIC_PREFIX: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
@@ -1840,7 +1840,7 @@ pub struct NpzMemberFraming {
 
 /// Validate a whole `.npz` archive the way a hardened loader must before numpy's `zipfile`
 /// reader touches it, keeping no payloads: the archive structure (end of central directory,
-/// local/central agreement, overlap, traversal, STORE/DEFLATE only), the member budget
+/// local/central agreement, data descriptors, overlap, traversal, STORE/DEFLATE only), the member budget
 /// ([`MAX_ARCHIVE_MEMBERS`], checked before any member is read) and the decoded-size budget
 /// ([`MAX_ARCHIVE_UNCOMPRESSED_BYTES`], checked before each member is inflated), each member's
 /// CRC-32, its `.npy` header framing, and - for dtypes fnp-io sizes itself - a payload at least
@@ -1866,6 +1866,78 @@ pub fn read_npz_member_framings(data: &[u8]) -> Result<Vec<NpzMemberFraming>, IO
         Ok(())
     })?;
     Ok(members)
+}
+
+/// Streaming ZIP writers defer the CRC and sizes to a descriptor following the payload.
+/// The signature is optional, and its value can also occur as an unsigned descriptor's
+/// CRC, so match the complete metadata before deciding which form is present.
+fn npz_data_descriptor_len(
+    data: &[u8],
+    crc: u32,
+    compressed_size: usize,
+    uncompressed_size: usize,
+    zip64: bool,
+) -> Result<usize, IOError> {
+    let metadata_len = if zip64 { 20 } else { 12 };
+    for prefix_len in [4, 0] {
+        if prefix_len == 4 && !data.starts_with(&[0x50, 0x4B, 0x07, 0x08]) {
+            continue;
+        }
+        let descriptor_len = prefix_len + metadata_len;
+        let Some(metadata) = data.get(prefix_len..descriptor_len) else {
+            continue;
+        };
+        let descriptor_crc =
+            u32::from_le_bytes([metadata[0], metadata[1], metadata[2], metadata[3]]);
+        let (descriptor_compressed, descriptor_uncompressed) = if zip64 {
+            (
+                u64::from_le_bytes([
+                    metadata[4],
+                    metadata[5],
+                    metadata[6],
+                    metadata[7],
+                    metadata[8],
+                    metadata[9],
+                    metadata[10],
+                    metadata[11],
+                ]),
+                u64::from_le_bytes([
+                    metadata[12],
+                    metadata[13],
+                    metadata[14],
+                    metadata[15],
+                    metadata[16],
+                    metadata[17],
+                    metadata[18],
+                    metadata[19],
+                ]),
+            )
+        } else {
+            (
+                u64::from(u32::from_le_bytes([
+                    metadata[4],
+                    metadata[5],
+                    metadata[6],
+                    metadata[7],
+                ])),
+                u64::from(u32::from_le_bytes([
+                    metadata[8],
+                    metadata[9],
+                    metadata[10],
+                    metadata[11],
+                ])),
+            )
+        };
+        if descriptor_crc == crc
+            && usize::try_from(descriptor_compressed).ok() == Some(compressed_size)
+            && usize::try_from(descriptor_uncompressed).ok() == Some(uncompressed_size)
+        {
+            return Ok(descriptor_len);
+        }
+    }
+    Err(IOError::NpzArchiveContractViolation(
+        "npz: data descriptor is truncated or disagrees with central directory",
+    ))
 }
 
 /// Walk every member of an `.npz` archive, validating the ZIP structure and budgets, and hand
@@ -2132,7 +2204,8 @@ where
             data[local_offset + 24],
             data[local_offset + 25],
         ]) as usize;
-        if local_crc != crc {
+        let has_data_descriptor = central_flags & 0x0008 != 0;
+        if local_crc != crc && !(has_data_descriptor && local_crc == 0) {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: local/central directory metadata mismatch",
             ));
@@ -2171,9 +2244,19 @@ where
             ));
         }
 
-        if local_compressed_size == u32::MAX as usize
-            || local_uncompressed_size == u32::MAX as usize
+        let local_zip64 = local_compressed_size == u32::MAX as usize
+            || local_uncompressed_size == u32::MAX as usize;
+        let local_size_matches = |local: usize, expected: usize| {
+            local == u32::MAX as usize || local == expected || (has_data_descriptor && local == 0)
+        };
+        if !local_size_matches(local_compressed_size, compressed_size)
+            || !local_size_matches(local_uncompressed_size, uncompressed_size)
         {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory metadata mismatch",
+            ));
+        }
+        if local_zip64 {
             let mut cursor = local_fname_end;
             let mut zip64_sizes = None;
             while cursor < local_extra_end {
@@ -2235,29 +2318,17 @@ where
             let (zip64_compressed, zip64_uncompressed) = zip64_sizes.ok_or(
                 IOError::NpzArchiveContractViolation("npz: ZIP64 local size field is missing"),
             )?;
-            if zip64_compressed
-                != u64::try_from(compressed_size).map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: central compressed size exceeds ZIP64 comparison range",
-                    )
-                })?
-                || zip64_uncompressed
-                    != u64::try_from(uncompressed_size).map_err(|_| {
-                        IOError::NpzArchiveContractViolation(
-                            "npz: central uncompressed size exceeds ZIP64 comparison range",
-                        )
-                    })?
-            {
+            let compressed_matches = usize::try_from(zip64_compressed).ok()
+                == Some(compressed_size)
+                || (has_data_descriptor && zip64_compressed == 0);
+            let uncompressed_matches = usize::try_from(zip64_uncompressed).ok()
+                == Some(uncompressed_size)
+                || (has_data_descriptor && zip64_uncompressed == 0);
+            if !compressed_matches || !uncompressed_matches {
                 return Err(IOError::NpzArchiveContractViolation(
                     "npz: local/central directory metadata mismatch",
                 ));
             }
-        } else if local_compressed_size != compressed_size
-            || local_uncompressed_size != uncompressed_size
-        {
-            return Err(IOError::NpzArchiveContractViolation(
-                "npz: local/central directory metadata mismatch",
-            ));
         }
 
         let data_start = local_extra_end;
@@ -2283,11 +2354,25 @@ where
                 "npz: entry data overlaps central directory",
             ));
         }
+        let member_end = if has_data_descriptor {
+            let descriptor_len = npz_data_descriptor_len(
+                &data[data_end..cd_offset],
+                crc,
+                compressed_size,
+                uncompressed_size,
+                local_zip64,
+            )?;
+            // The descriptor was bounded by the central directory above, so this
+            // addition cannot overflow or include central-directory bytes.
+            data_end + descriptor_len
+        } else {
+            data_end
+        };
 
         // Check for overlapping entries. The ordered representation maintains
         // the same non-overlap invariant, so only the nearest range on either
         // side can intersect the new range.
-        let current_range = (local_offset, data_end);
+        let current_range = (local_offset, member_end);
         let overlaps = if use_ordered_ranges {
             let predecessor_overlaps = ordered_ranges
                 .range(..=current_range.0)
@@ -4733,8 +4818,11 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
         IOSupportedDType::U32Be => buf.extend_from_slice(&(v as u32).to_be_bytes()),
         IOSupportedDType::U64 => buf.extend_from_slice(&(v as u64).to_le_bytes()),
         IOSupportedDType::U64Be => buf.extend_from_slice(&(v as u64).to_be_bytes()),
-        IOSupportedDType::F16 => buf.extend_from_slice(&f16::from_f64(v).to_bits().to_le_bytes()),
-        IOSupportedDType::F16Be => buf.extend_from_slice(&f16::from_f64(v).to_bits().to_be_bytes()),
+        // Preserve every f64 mantissa bit when deciding which side of a half
+        // midpoint to round to; neither a float32 intermediate nor truncation
+        // of the low mantissa bits is exact here.
+        IOSupportedDType::F16 => buf.extend_from_slice(&f16_from_f64(v).to_bits().to_le_bytes()),
+        IOSupportedDType::F16Be => buf.extend_from_slice(&f16_from_f64(v).to_bits().to_be_bytes()),
         IOSupportedDType::F32 => buf.extend_from_slice(&(v as f32).to_le_bytes()),
         IOSupportedDType::F32Be => buf.extend_from_slice(&(v as f32).to_be_bytes()),
         IOSupportedDType::F64 => buf.extend_from_slice(&v.to_le_bytes()),
@@ -5488,7 +5576,7 @@ fn parse_text_element_for_dtype(token: &str, dtype: IOSupportedDType) -> Result<
             let value = token
                 .parse::<f64>()
                 .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?;
-            Ok(f16::from_f64(value).to_f64())
+            Ok(f16_from_f64(value).to_f64())
         }
         IOSupportedDType::F32 | IOSupportedDType::F32Be => {
             Ok(f64::from(token.parse::<f32>().map_err(|_| {
@@ -9966,6 +10054,193 @@ mm.flush()
 
     // ── NPZ tests ──
 
+    // Turn an independently built, single-member ZIP into the form emitted by
+    // a writer that cannot seek back to fill in its local header.
+    fn with_npz_data_descriptor(mut npz: Vec<u8>, zip64: bool, signed: bool) -> Vec<u8> {
+        let old_eocd = npz.len() - 22;
+        let old_cd = u32::from_le_bytes(
+            npz[old_eocd + 16..old_eocd + 20]
+                .try_into()
+                .expect("central offset"),
+        ) as usize;
+        let crc = u32::from_le_bytes(npz[14..18].try_into().expect("CRC"));
+        let compressed = u32::from_le_bytes(npz[18..22].try_into().expect("compressed size"));
+        let uncompressed = u32::from_le_bytes(npz[22..26].try_into().expect("uncompressed size"));
+        let name_len = u16::from_le_bytes(npz[26..28].try_into().expect("name length")) as usize;
+        let mut descriptor = Vec::new();
+        if signed {
+            descriptor.extend_from_slice(&[0x50, 0x4B, 0x07, 0x08]);
+        }
+        descriptor.extend_from_slice(&crc.to_le_bytes());
+        if zip64 {
+            descriptor.extend_from_slice(&u64::from(compressed).to_le_bytes());
+            descriptor.extend_from_slice(&u64::from(uncompressed).to_le_bytes());
+        } else {
+            descriptor.extend_from_slice(&compressed.to_le_bytes());
+            descriptor.extend_from_slice(&uncompressed.to_le_bytes());
+        }
+        let descriptor_len = descriptor.len();
+        npz.splice(old_cd..old_cd, descriptor);
+        npz[6..8].copy_from_slice(&0x0008_u16.to_le_bytes());
+        npz[14..26].fill(0);
+        let extra_len = if zip64 {
+            npz[4..6].copy_from_slice(&45_u16.to_le_bytes());
+            npz[18..26].fill(0xFF);
+            npz[28..30].copy_from_slice(&20_u16.to_le_bytes());
+            let mut extra = vec![0x01, 0x00, 0x10, 0x00];
+            extra.resize(20, 0);
+            npz.splice(30 + name_len..30 + name_len, extra);
+            20
+        } else {
+            0
+        };
+        let cd_offset = old_cd + descriptor_len + extra_len;
+        npz[cd_offset + 8..cd_offset + 10].copy_from_slice(&0x0008_u16.to_le_bytes());
+        if zip64 {
+            npz[cd_offset + 6..cd_offset + 8].copy_from_slice(&45_u16.to_le_bytes());
+        }
+        let eocd = npz.len() - 22;
+        npz[eocd + 16..eocd + 20].copy_from_slice(
+            &u32::try_from(cd_offset)
+                .expect("central offset")
+                .to_le_bytes(),
+        );
+        npz
+    }
+
+    #[test]
+    fn npz_streaming_descriptors_decode_store_and_deflate() {
+        let header = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::I32,
+        };
+        let payload: Vec<u8> = [17_i32, -3, 1048576]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let npy = write_npy_bytes(&header, &payload, false).expect("NPY fixture");
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&npy).expect("compress fixture");
+        let compressed = encoder.finish().expect("finish fixture compression");
+        let store = build_single_store_npz("a.npy", &npy);
+        let deflate = build_single_deflate_npz(
+            "a.npy",
+            &compressed,
+            crc32_ieee(&npy),
+            u32::try_from(npy.len()).expect("NPY size"),
+        );
+        for archive in [store, deflate] {
+            for zip64 in [false, true] {
+                for signed in [false, true] {
+                    let npz = with_npz_data_descriptor(archive.clone(), zip64, signed);
+                    let entries = read_npz_bytes(&npz, false).expect("streaming archive");
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].name, "a");
+                    assert_eq!(entries[0].array.header, header);
+                    assert_eq!(entries[0].array.payload.as_ref(), payload.as_slice());
+                    let framing = read_npz_member_framings(&npz).expect("hardened framing");
+                    assert_eq!(framing[0].name, "a.npy");
+                    assert_eq!(framing[0].payload_len, payload.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn npz_streaming_descriptors_reject_inconsistent_metadata() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::U8,
+        };
+        let npy = write_npy_bytes(&header, &[42], false).expect("NPY fixture");
+        for zip64 in [false, true] {
+            for signed in [false, true] {
+                let npz =
+                    with_npz_data_descriptor(build_single_store_npz("a.npy", &npy), zip64, signed);
+                let descriptor_start = 30 + "a.npy".len() + if zip64 { 20 } else { 0 } + npy.len();
+                let metadata_start = descriptor_start + if signed { 4 } else { 0 };
+                let size_width = if zip64 { 8 } else { 4 };
+                // Corrupt each authoritative descriptor field independently.
+                for offset in [0, 4, 4 + size_width] {
+                    let mut corrupt = npz.clone();
+                    corrupt[metadata_start + offset] ^= 1;
+                    let err = read_npz_bytes(&corrupt, false).expect_err("corrupt descriptor");
+                    assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+                    assert!(err.to_string().contains("data descriptor"));
+                    assert!(read_npz_member_framings(&corrupt).is_err());
+                }
+                // Bit 3 permits zero local placeholders, never contradictory values.
+                for offset in [14, 18, 22] {
+                    let mut corrupt = npz.clone();
+                    corrupt[offset..offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+                    assert!(read_npz_bytes(&corrupt, false).is_err());
+                }
+                if zip64 {
+                    let mut corrupt = npz.clone();
+                    corrupt[30 + "a.npy".len() + 4] = 1;
+                    assert!(read_npz_bytes(&corrupt, false).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn npz_streaming_descriptor_cannot_extend_into_central_directory() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::U8,
+        };
+        let npy = write_npy_bytes(&header, &[42], false).expect("NPY fixture");
+        for zip64 in [false, true] {
+            let npz = with_npz_data_descriptor(build_single_store_npz("a.npy", &npy), zip64, true);
+            let descriptor_start = 30 + "a.npy".len() + if zip64 { 20 } else { 0 } + npy.len();
+            let descriptor_len = if zip64 { 24 } else { 16 };
+            for retained_len in [0, 4, descriptor_len - 1] {
+                let mut truncated = npz.clone();
+                truncated.drain(descriptor_start + retained_len..descriptor_start + descriptor_len);
+                let eocd = truncated.len() - 22;
+                let cd_offset =
+                    u32::try_from(descriptor_start + retained_len).expect("central offset");
+                truncated[eocd + 16..eocd + 20].copy_from_slice(&cd_offset.to_le_bytes());
+                let err = read_npz_bytes(&truncated, false).expect_err("truncated descriptor");
+                assert!(err.to_string().contains("data descriptor"));
+                assert!(read_npz_member_framings(&truncated).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn npz_unsigned_descriptor_crc_may_equal_optional_signature() {
+        let descriptor = [
+            0x50, 0x4B, 0x07, 0x08, // CRC, not a signature
+            0x12, 0x00, 0x00, 0x00, // compressed size
+            0x34, 0x00, 0x00, 0x00, // uncompressed size
+        ];
+        assert_eq!(
+            super::npz_data_descriptor_len(&descriptor, 0x0807_4B50, 18, 52, false)
+                .expect("unsigned descriptor whose CRC equals the optional signature"),
+            descriptor.len(),
+        );
+
+        // Both interpretations match when the CRC and sizes all equal the
+        // signature. Prefer the signed form so the full descriptor is covered.
+        let ambiguous = 0x0807_4B50_u32.to_le_bytes().repeat(4);
+        assert_eq!(
+            super::npz_data_descriptor_len(
+                &ambiguous,
+                0x0807_4B50,
+                0x0807_4B50,
+                0x0807_4B50,
+                false,
+            )
+            .expect("signed descriptor with signature-valued CRC and sizes"),
+            ambiguous.len(),
+        );
+    }
+
     #[test]
     fn npz_single_array_roundtrip() {
         let header = NpyHeader {
@@ -10365,7 +10640,10 @@ mm.flush()
 
     #[test]
     fn npy_header_framing_computes_float16_payload_size() {
-        for (descr, dtype) in [("<f2", IOSupportedDType::F16), (">f2", IOSupportedDType::F16Be)] {
+        for (descr, dtype) in [
+            ("<f2", IOSupportedDType::F16),
+            (">f2", IOSupportedDType::F16Be),
+        ] {
             let header = npy_v1_header_bytes(&format!(
                 "{{'descr': '{descr}', 'fortran_order': False, 'shape': (3, 4), }}"
             ));
@@ -11232,8 +11510,9 @@ mm.flush()
             let values = fromfile(&payload, dtype, None).expect("decode binary16");
             assert_eq!(values.len(), usize::from(u16::MAX) + 1);
             let reencoded = tofile(&values, dtype).expect("encode binary16");
-            for ((bits, &value), bytes) in
-                (0..=u16::MAX).zip(&values).zip(reencoded.chunks_exact(2))
+            for ((bits, &value), bytes) in (0..=u16::MAX)
+                .zip(&values)
+                .zip(reencoded.as_chunks::<2>().0)
             {
                 let encoded = if dtype == IOSupportedDType::F16 {
                     u16::from_le_bytes([bytes[0], bytes[1]])
@@ -11256,8 +11535,7 @@ mm.flush()
                     } else if exponent == 0 {
                         f64::from(fraction) * 2.0_f64.powi(-24)
                     } else {
-                        (1024.0 + f64::from(fraction))
-                            * 2.0_f64.powi(i32::from(exponent) - 25)
+                        (1024.0 + f64::from(fraction)) * 2.0_f64.powi(i32::from(exponent) - 25)
                     };
                     let expected = if bits & 0x8000 == 0 {
                         magnitude
@@ -11338,9 +11616,7 @@ mm.flush()
                 assert_eq!(decoded.header, header);
                 assert_eq!(decoded.payload.as_ref(), payload.as_slice());
                 assert!(read_npy_bytes(&npy[..npy.len() - 1], false).is_err());
-                assert!(
-                    write_npy_bytes(&header, &payload[..payload.len() - 1], false).is_err()
-                );
+                assert!(write_npy_bytes(&header, &payload[..payload.len() - 1], false).is_err());
                 for compression in [NpzCompression::Store, NpzCompression::Deflate] {
                     let npz = write_npz_bytes_with_compression(
                         &[("half", &header, &payload)],
@@ -11365,7 +11641,14 @@ mm.flush()
                 (vec![2, 0, 3], vec![]),
                 (
                     vec![2, 3],
-                    vec![1.5, -2.0, 2.0_f64.powi(-24), 2.0_f64.powi(-14), 65504.0, -0.0],
+                    vec![
+                        1.5,
+                        -2.0,
+                        2.0_f64.powi(-24),
+                        2.0_f64.powi(-14),
+                        65504.0,
+                        -0.0,
+                    ],
                 ),
             ] {
                 let expected_bits: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
