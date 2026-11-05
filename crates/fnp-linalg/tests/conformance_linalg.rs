@@ -4,8 +4,9 @@
 //! that match NumPy's np.linalg module within floating-point tolerance.
 
 use fnp_linalg::{
-    LinAlgError, cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, qr_mxn, qr_nxn, slogdet_2x2,
-    slogdet_nxn, solve_2x2, solve_nxn, svd_mxn_full,
+    LinAlgError, batch_inv, batch_solve, cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn,
+    lu_factor_nxn, lu_solve, qr_mxn, qr_nxn, slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn,
+    solve_nxn_multi, svd_mxn_full,
 };
 use std::process::Command;
 
@@ -93,6 +94,18 @@ elif case == "scaled_solve_and_inverse":
                 emit_scalar(f"singular_{name}_{index}", 1)
             else:
                 emit_scalar(f"singular_{name}_{index}", 0)
+elif case == "mixed_scale_general_solve":
+    for n in (3, 17, 512):
+        diagonal = np.ones(n)
+        diagonal[0] = 2.0**40
+        diagonal[-1] = 2.0**-40
+        a = np.diag(diagonal)
+        a[[0, -1]] = a[[-1, 0]]
+        b = diagonal * np.arange(1, n + 1, dtype=np.float64)
+        b[[0, -1]] = b[[-1, 0]]
+        emit_vec(f"solve_{n}", np.linalg.solve(a, b))
+        if n < 512:
+            emit_vec(f"inverse_{n}", np.linalg.inv(a))
 elif case == "solve_3x3":
     x = np.linalg.solve(A_3x3, b_3)
     emit_vec("x", x)
@@ -267,10 +280,63 @@ fn conformance_scaled_solve_and_inverse() {
         [[0.0, 1e-200], [1e200, 0.0]],
     ]);
     let truth = [1.5, -2.0];
+    let identity = [1.0, 0.0, 0.0, 1.0];
+    let mut stacked_a = Vec::new();
+    let mut stacked_b = Vec::new();
     for (index, &a) in matrices.iter().enumerate() {
         let b = a.map(|row| row[0] * truth[0] + row[1] * truth[1]);
+        let flat: Vec<f64> = a.into_iter().flatten().collect();
+        stacked_a.extend_from_slice(&flat);
+        stacked_b.extend_from_slice(&b);
         let expected_solve = &oracle["solve"][index * 2..(index + 1) * 2];
         let expected_inv = &oracle["inverse"][index * 4..(index + 1) * 4];
+
+        assert_vec_close(
+            "scaled general solve",
+            &solve_nxn(&flat, &b, 2).expect("scaled general solve"),
+            expected_solve,
+            1e-12,
+            0.0,
+        );
+        assert_vec_close(
+            "scaled general inverse",
+            &inv_nxn(&flat, 2).expect("scaled general inverse"),
+            expected_inv,
+            1e-12,
+            0.0,
+        );
+        assert_vec_close(
+            "scaled multiple RHS",
+            &solve_nxn_multi(&flat, &identity, 2, 2).expect("scaled multiple RHS"),
+            expected_inv,
+            1e-12,
+            0.0,
+        );
+        let (lu, perm, _) = lu_factor_nxn(&flat, 2).expect("scaled LU factorization");
+        assert_vec_close(
+            "scaled factored solve",
+            &lu_solve(&lu, &perm, &b, 2).expect("scaled factored solve"),
+            expected_solve,
+            1e-12,
+            0.0,
+        );
+        // These calls factor one A once and reuse it across a batch of RHS lanes.
+        assert_vec_close(
+            "scaled broadcast vector RHS",
+            &batch_solve(&flat, &[2, 2], &b.repeat(2), &[2, 2], true)
+                .expect("scaled broadcast vector RHS"),
+            &expected_solve.repeat(2),
+            1e-12,
+            0.0,
+        );
+        assert_vec_close(
+            "scaled broadcast matrix RHS",
+            &batch_solve(&flat, &[2, 2], &identity.repeat(2), &[2, 2, 2], false)
+                .expect("scaled broadcast matrix RHS"),
+            &expected_inv.repeat(2),
+            1e-12,
+            0.0,
+        );
 
         let solution = solve_2x2(a, b).expect("scaled fixed solve");
         assert_vec_close("scaled fixed solve", &solution, expected_solve, 1e-12, 0.0);
@@ -296,6 +362,32 @@ fn conformance_scaled_solve_and_inverse() {
         }
     }
 
+    // A different matrix in every lane reaches the reusable scratch-buffer routes.
+    let batch = matrices.len();
+    assert_vec_close(
+        "scaled batch solve",
+        &batch_solve(&stacked_a, &[batch, 2, 2], &stacked_b, &[batch, 2], true)
+            .expect("scaled batch solve"),
+        &oracle["solve"],
+        1e-12,
+        0.0,
+    );
+    assert_vec_close(
+        "scaled batch multiple RHS",
+        &batch_solve(&stacked_a, &[batch, 2, 2], &identity, &[2, 2], false)
+            .expect("scaled batch multiple RHS"),
+        &oracle["inverse"],
+        1e-12,
+        0.0,
+    );
+    assert_vec_close(
+        "scaled batch inverse",
+        &batch_inv(&stacked_a, &[batch, 2, 2]).expect("scaled batch inverse"),
+        &oracle["inverse"],
+        1e-12,
+        0.0,
+    );
+
     for (index, scale) in [1e-200, 1.0, 1e200].into_iter().enumerate() {
         assert_eq!(oracle[&format!("singular_solve_{index}")], [1.0]);
         assert_eq!(oracle[&format!("singular_inv_{index}")], [1.0]);
@@ -305,6 +397,77 @@ fn conformance_scaled_solve_and_inverse() {
             Err(LinAlgError::SolverSingularity)
         );
         assert_eq!(inv_2x2(a), Err(LinAlgError::SolverSingularity));
+        let flat: Vec<f64> = a.into_iter().flatten().collect();
+        for result in [
+            solve_nxn(&flat, &[1.0, 1.0], 2),
+            solve_nxn_multi(&flat, &identity, 2, 2),
+            inv_nxn(&flat, 2),
+            batch_solve(&flat, &[1, 2, 2], &[1.0, 1.0], &[2], true),
+            batch_solve(&flat, &[1, 2, 2], &identity, &[2, 2], false),
+            batch_inv(&flat, &[1, 2, 2]),
+            batch_solve(&flat, &[2, 2], &[1.0; 4], &[2, 2], true),
+            batch_solve(&flat, &[2, 2], &identity.repeat(2), &[2, 2, 2], false),
+        ] {
+            assert_eq!(result, Err(LinAlgError::SolverSingularity));
+        }
+        assert_eq!(lu_factor_nxn(&flat, 2), Err(LinAlgError::SolverSingularity));
+    }
+}
+
+#[test]
+fn conformance_mixed_scale_general_solve() {
+    let oracle = run_numpy_oracle("mixed_scale_general_solve");
+    for n in [3, 17, 512] {
+        let mut a = vec![0.0; n * n];
+        let mut b = vec![0.0; n];
+        let two = 2.0_f64.powi(40);
+        for i in 0..n {
+            let diagonal = if i == 0 {
+                two
+            } else if i == n - 1 {
+                1.0 / two
+            } else {
+                1.0
+            };
+            a[i * n + i] = diagonal;
+            b[i] = diagonal * (i + 1) as f64;
+        }
+        for col in 0..n {
+            a.swap(col, (n - 1) * n + col);
+        }
+        b.swap(0, n - 1);
+        let expected_solve = &oracle[&format!("solve_{n}")];
+        assert_vec_close(
+            "mixed-scale general solve",
+            &solve_nxn(&a, &b, n).expect("mixed-scale general solve"),
+            expected_solve,
+            1e-12,
+            0.0,
+        );
+        // n=512 reaches blocked LU; smaller cases also cover both batch inverse
+        // dispatches and the matrix-RHS batch route above its scratch-buffer cutoff.
+        if n < 512 {
+            let expected_inverse = &oracle[&format!("inverse_{n}")];
+            let mut identity = vec![0.0; n * n];
+            for i in 0..n {
+                identity[i * n + i] = 1.0;
+            }
+            assert_vec_close(
+                "mixed-scale batch inverse",
+                &batch_inv(&a, &[1, n, n]).expect("mixed-scale batch inverse"),
+                expected_inverse,
+                1e-12,
+                0.0,
+            );
+            assert_vec_close(
+                "mixed-scale batch multiple RHS",
+                &batch_solve(&a, &[1, n, n], &identity, &[n, n], false)
+                    .expect("mixed-scale batch multiple RHS"),
+                expected_inverse,
+                1e-12,
+                0.0,
+            );
+        }
     }
 }
 

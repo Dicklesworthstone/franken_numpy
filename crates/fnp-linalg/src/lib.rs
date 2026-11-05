@@ -594,7 +594,7 @@ fn lu_factor_unblocked_into(
 
 /// LU for `det` / `slogdet`: a matrix is singular only when a pivot is EXACTLY zero, as in
 /// LAPACK's getrf, which numpy's det and slogdet run. A relative threshold (`n * eps * max|a|`,
-/// what the solvers here use) called nonsingular, badly scaled matrices singular:
+/// formerly also used by the solvers) called nonsingular, badly scaled matrices singular:
 /// det(diag(1e10, 1, 1e-10)) was 0.0 where numpy gives 1.0, and det([[0, 2^-30], [2^30, 0]])
 /// 0.0 where numpy gives -1.0 (bead deadlock-audit-41n96).
 #[inline]
@@ -729,13 +729,14 @@ fn lu_decompose_blocked(
 }
 
 fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, true, false)
+    lu_decompose_inner(a, n, true, true)
 }
 
 /// LU that lets non-finite values through (LAPACK's NaN-pivot passthrough), for the solvers
-/// and the inverse: a pivot <= n * eps * max|a| is singular.
+/// and the inverse. Only an exactly zero pivot is singular, as in LAPACK's getrf:
+/// a global relative cutoff incorrectly rejects nonsingular, badly scaled systems.
 fn lu_decompose_for_det(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
-    lu_decompose_inner(a, n, false, false)
+    lu_decompose_inner(a, n, false, true)
 }
 
 /// LU for the determinant routines: non-finite values pass through and only an exactly zero
@@ -1117,9 +1118,7 @@ fn solve_nxn_into_out(
         out.copy_from_slice(&solved);
         return Ok(());
     }
-    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)?;
+    lu_factor_unblocked_into(a, n, 0.0, lu, perm)?;
     // Forward/back substitution into `out` (byte-identical to lu_forward_back's
     // x-allocating form: x[i] = b[perm[i]], then unit-lower forward, then upper back).
     for i in 0..n {
@@ -1163,9 +1162,7 @@ fn solve_nxn_multi_into_out(
         out.copy_from_slice(&solved);
         return Ok(());
     }
-    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)?;
+    lu_factor_unblocked_into(a, n, 0.0, lu, perm)?;
     // Permutation (Pb) + unit-lower forward + upper back, into `out` (byte-identical
     // to lu_forward_back_multi's unblocked form).
     for i in 0..n {
@@ -1671,9 +1668,7 @@ fn inv_nxn_into_out(
         out.copy_from_slice(&inv);
         return Ok(());
     }
-    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)?;
+    lu_factor_unblocked_into(a, n, 0.0, lu, perm)?;
     // Natural identity first: L^-1 is unit-lower triangular, so rows before the
     // current pivot column are guaranteed zero and can be skipped bit-for-bit.
     out.fill(0.0);
@@ -11285,11 +11280,9 @@ pub fn batch_solve(
         && n < LU_BLOCK_MIN
         && a.iter().all(|value| value.is_finite())
     {
-        let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
         let mut lu = vec![0.0f64; mat_size];
         let mut perm = vec![0usize; n];
-        lu_factor_unblocked_into(a, n, singularity_threshold, &mut lu, &mut perm)?;
+        lu_factor_unblocked_into(a, n, 0.0, &mut lu, &mut perm)?;
 
         let solve_factored_into = |b_sub: &[f64], out: &mut [f64]| {
             if vector_rhs {
@@ -15330,7 +15323,8 @@ print(",".join(repr(float(x)) for x in s))
 
     #[test]
     fn solve_nxn_rejects_singular() {
-        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        // A zero column guarantees an exactly zero pivot without depending on FMA rounding.
+        let a = [1.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 0.0, 9.0];
         let b = [1.0, 2.0, 3.0];
         let err = solve_nxn(&a, &b, 3).expect_err("singular");
         assert_eq!(err.reason_code(), "linalg_solver_singularity");
@@ -15713,7 +15707,8 @@ print(",".join(repr(float(x)) for x in s))
 
     #[test]
     fn inv_nxn_rejects_singular() {
-        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        // A zero column guarantees an exactly zero pivot without depending on FMA rounding.
+        let a = [1.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 0.0, 9.0];
         let err = inv_nxn(&a, 3).expect_err("singular inv");
         assert_eq!(err.reason_code(), "linalg_solver_singularity");
     }
@@ -19778,7 +19773,8 @@ for col in range(n):
 
     #[test]
     fn lu_factor_rejects_singular() {
-        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        // A zero column guarantees an exactly zero pivot without depending on FMA rounding.
+        let a = [1.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 0.0, 9.0];
         let err = lu_factor_nxn(&a, 3).expect_err("singular");
         assert_eq!(err.reason_code(), "linalg_solver_singularity");
     }
