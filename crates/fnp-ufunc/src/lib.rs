@@ -8496,6 +8496,250 @@ impl UFuncArray {
         }
     }
 
+    /// Sum with an explicit accumulator and result dtype (`np.sum(dtype=)`).
+    ///
+    /// Inputs are cast before addition, so a floating accumulator controls the
+    /// precision of the calculation, and integer accumulators wrap at their
+    /// requested width. Floating conversions use NumPy's default 8192-element
+    /// buffer boundaries. Boolean accumulation uses logical OR. Complex and
+    /// nonnumeric dtypes are not representable by this real-valued array bridge.
+    pub fn reduce_sum_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_with_dtype(axis, keepdims, dtype, false)
+    }
+
+    fn reduce_arithmetic_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if product { "prod" } else { "sum" };
+        let is_real_numeric = |dt: DType| {
+            dt.is_integer() || matches!(dt, DType::Bool | DType::F16 | DType::F32 | DType::F64)
+        };
+        for (role, dt) in [("input", self.dtype), ("accumulator", dtype)] {
+            if !is_real_numeric(dt) {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: unsupported {role} dtype {dt:?}; the array bridge supports real numeric reductions"
+                )));
+            }
+        }
+
+        // NumPy permits axis=0 and axis=-1 for a scalar reduction. Treat those
+        // spellings as the same scalar operation as axis=None.
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
+        let storage = self
+            .to_storage()?
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?;
+        let casted = Self::from_storage(self.shape.clone(), storage)?;
+
+        if dtype == DType::Bool {
+            let mut result = if product {
+                casted.all(axis)?
+            } else {
+                casted.any(axis)?
+            };
+            if keepdims {
+                result.shape = match axis {
+                    Some(raw_axis) => reduced_shape(
+                        &self.shape,
+                        normalize_axis(raw_axis, self.shape.len())?,
+                        true,
+                    ),
+                    None => vec![1; self.shape.len()],
+                };
+            }
+            return Ok(result);
+        }
+
+        if matches!(dtype, DType::F16 | DType::F32 | DType::F64) {
+            // NumPy converts through its default 8192-element iterator buffer.
+            // Each contiguous reduction lane resumes from the accumulator left
+            // by its previous buffer, rather than reducing one fully cast lane.
+            // Identical dtypes need no conversion buffer and use one whole-lane
+            // pairwise tree. Strided reductions round after each element.
+            let buffered = self.dtype != dtype;
+            match axis {
+                None => {
+                    let shape = if keepdims {
+                        vec![1; self.shape.len()]
+                    } else {
+                        Vec::new()
+                    };
+                    return Self::new(
+                        shape,
+                        vec![Self::reduce_float_lane_with_dtype(
+                            &casted.values,
+                            dtype,
+                            product,
+                            buffered,
+                        )],
+                        dtype,
+                    );
+                }
+                Some(raw_axis) => {
+                    let axis = normalize_axis(raw_axis, self.shape.len())?;
+                    let shape = reduced_shape(&self.shape, axis, keepdims);
+                    let out_count = element_count(&shape).map_err(UFuncError::Shape)?;
+                    if out_count == 0 {
+                        return Self::new(shape, Vec::new(), dtype);
+                    }
+                    let inner =
+                        element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+                    if inner == 1 {
+                        let axis_len = self.shape[axis];
+                        let values = if axis_len == 0 {
+                            vec![if product { 1.0 } else { 0.0 }; out_count]
+                        } else {
+                            casted
+                                .values
+                                .chunks_exact(axis_len)
+                                .map(|lane| {
+                                    Self::reduce_float_lane_with_dtype(
+                                        lane, dtype, product, buffered,
+                                    )
+                                })
+                                .collect()
+                        };
+                        return Self::new(shape, values, dtype);
+                    }
+                    if dtype == DType::F64 && !product && self.shape[axis] > COMPENSATED_SUM_MIN_LEN
+                    {
+                        // The legacy f64 API switches to compensated summation
+                        // for very long strided lanes. NumPy keeps its elementwise
+                        // left fold, so the explicit dtype API must do the same.
+                        let outer =
+                            element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let axis_len = self.shape[axis];
+                        let mut values = vec![0.0; out_count];
+                        for outer_index in 0..outer {
+                            for inner_index in 0..inner {
+                                let mut sum = 0.0;
+                                let base = outer_index * axis_len * inner + inner_index;
+                                for reduction_index in 0..axis_len {
+                                    sum += casted.values[base + reduction_index * inner];
+                                }
+                                values[outer_index * inner + inner_index] = sum;
+                            }
+                        }
+                        return Self::new(shape, values, dtype);
+                    }
+                }
+            }
+        }
+
+        let result = if product {
+            casted.reduce_prod(axis, keepdims)?
+        } else {
+            casted.reduce_sum(axis, keepdims)?
+        };
+        if result.dtype == dtype {
+            return Ok(result);
+        }
+
+        // The existing integer kernels accumulate exactly with wrapping i64/u64
+        // arithmetic. Narrowing once at the end is equivalent to wrapping every
+        // addition/multiplication modulo 2^width, including after 64-bit overflow.
+        // Cast typed storage to retain low bits that the f64 working buffer loses.
+        let storage = result
+            .to_storage()?
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{operation}: result cast failed: {err}")))?;
+        Self::from_storage(result.shape, storage)
+    }
+
+    /// Reduce already-cast floating values, using NumPy's default conversion
+    /// buffers when needed. Buffers start anew for each contiguous output lane.
+    fn reduce_float_lane_with_dtype(
+        values: &[f64],
+        dtype: DType,
+        product: bool,
+        buffered: bool,
+    ) -> f64 {
+        const CONVERSION_BUFFER_LEN: usize = 8192;
+
+        // Match DOUBLE_pairwise_sum in NumPy's loops_utils.h.src. The generic
+        // legacy f64 reducer uses a different summation order, so keep this
+        // conversion-loop kernel separate from the existing default API.
+        fn pairwise_sum_f64(values: &[f64]) -> f64 {
+            let n = values.len();
+            if n < 8 {
+                return values.iter().copied().fold(-0.0, |sum, value| sum + value);
+            }
+            if n <= 128 {
+                let mut sums = [0.0; 8];
+                sums.copy_from_slice(&values[..8]);
+                let mut i = 8;
+                while i + 8 <= n {
+                    for (lane, sum) in sums.iter_mut().enumerate() {
+                        *sum += values[i + lane];
+                    }
+                    i += 8;
+                }
+                let mut sum = ((sums[0] + sums[1]) + (sums[2] + sums[3]))
+                    + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+                for &value in &values[i..] {
+                    sum += value;
+                }
+                return sum;
+            }
+            let split = (n / 2) & !7;
+            pairwise_sum_f64(&values[..split]) + pairwise_sum_f64(&values[split..])
+        }
+
+        let mut result = if product { 1.0 } else { 0.0 };
+        let chunk_len = if buffered {
+            CONVERSION_BUFFER_LEN
+        } else {
+            values.len().max(1)
+        };
+        for chunk in values.chunks(chunk_len) {
+            result = match dtype {
+                DType::F16 => {
+                    let accumulator = if product {
+                        chunk
+                            .iter()
+                            .copied()
+                            .fold(result as f32, |acc, value| acc * value as f32)
+                    } else {
+                        // HALF_add adds the unrounded f32 partial to the prior
+                        // half accumulator and rounds only the combined value.
+                        result as f32 + pairwise_sum_f16_values(chunk)
+                    };
+                    f16::from_f32(accumulator).to_f64()
+                }
+                DType::F32 => f64::from(if product {
+                    chunk
+                        .iter()
+                        .copied()
+                        .fold(result as f32, |acc, value| acc * value as f32)
+                } else {
+                    result as f32 + pairwise_sum_f32_values(chunk)
+                }),
+                DType::F64 => {
+                    if product {
+                        chunk.iter().copied().fold(result, |acc, value| acc * value)
+                    } else {
+                        result + pairwise_sum_f64(chunk)
+                    }
+                }
+                _ => unreachable!("conversion-loop reduction requires a floating accumulator"),
+            };
+        }
+        result
+    }
+
     pub fn plan_reduce_sum_partitions(
         &self,
         axis: Option<isize>,
@@ -9028,6 +9272,20 @@ impl UFuncArray {
                 })
             }
         }
+    }
+
+    /// Product with an explicit accumulator and result dtype (`np.prod(dtype=)`).
+    ///
+    /// Inputs are cast before multiplication. Integer accumulation wraps at the
+    /// requested width, and boolean accumulation uses logical AND. An empty
+    /// reduction returns the multiplicative identity in the requested dtype.
+    pub fn reduce_prod_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_with_dtype(axis, keepdims, dtype, true)
     }
 
     pub fn reduce_min(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
@@ -17305,29 +17563,97 @@ impl UFuncArray {
 
     // ── advanced indexing ────────
 
-    /// Take values along an axis using index array (np.take_along_axis).
-    /// `indices` must have the same number of dimensions as `self`.
-    pub fn take_along_axis(&self, indices: &Self, axis: isize) -> Result<Self, UFuncError> {
+    fn along_axis_index_shape(
+        &self,
+        indices: &Self,
+        axis: isize,
+        context: &str,
+    ) -> Result<(usize, Vec<usize>), UFuncError> {
         let ndim = self.shape.len();
         if indices.shape.len() != ndim {
             return Err(UFuncError::Msg(format!(
-                "take_along_axis: indices ndim {} != array ndim {ndim}",
+                "{context}: indices ndim {} != array ndim {ndim}",
                 indices.shape.len()
             )));
         }
-        let ax = normalize_axis(axis, ndim)?;
-        for d in 0..ndim {
-            if d != ax && self.shape[d] != 1 && self.shape[d] != indices.shape[d] {
+        if !indices.dtype.is_integer() {
+            return Err(UFuncError::Msg(format!(
+                "{context}: indices must be an integer array"
+            )));
+        }
+        let axis = normalize_axis(axis, ndim)?;
+        let mut shape = indices.shape.clone();
+        for (d, dimension) in shape.iter_mut().enumerate() {
+            if d == axis || self.shape[d] == 1 {
+                continue;
+            }
+            if *dimension != 1 && *dimension != self.shape[d] {
                 return Err(UFuncError::Msg(format!(
-                    "take_along_axis: non-axis dimension {d} mismatch: {} vs {}",
+                    "{context}: non-axis dimension {d} mismatch: {} vs {}",
                     self.shape[d], indices.shape[d]
                 )));
             }
+            *dimension = self.shape[d];
         }
+        fnp_ndarray::element_count(&shape).map_err(UFuncError::Shape)?;
+        Ok((axis, shape))
+    }
+
+    fn resolve_along_axis_index(
+        &self,
+        flat: usize,
+        axis: usize,
+        axis_len: usize,
+        context: &str,
+    ) -> Result<usize, UFuncError> {
+        // NumPy's advanced indexing converts integer arrays to np.intp. In
+        // particular, uint64::MAX is -1 on a 64-bit platform. Read the exact
+        // sidecar before this conversion: adjacent large integers can have the
+        // same f64 working value but select different elements.
+        let index = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(values)) => values[flat] as isize,
+            Some(IntegerSidecar::U64(values)) => values[flat] as isize,
+            None => {
+                let value = self.values[flat];
+                let unsigned =
+                    matches!(self.dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64);
+                ensure_exact_integer_bridge_value_supported(
+                    value,
+                    if unsigned { DType::U64 } else { DType::I64 },
+                    context,
+                    flat,
+                )?;
+                if unsigned {
+                    value as u64 as isize
+                } else {
+                    value as i64 as isize
+                }
+            }
+        } as i128;
+        let resolved = if index < 0 {
+            index + axis_len as i128
+        } else {
+            index
+        };
+        if resolved < 0 || resolved >= axis_len as i128 {
+            return Err(UFuncError::Msg(format!(
+                "{context}: index {index} out of bounds for axis {axis} with size {axis_len}"
+            )));
+        }
+        Ok(resolved as usize)
+    }
+
+    /// Take values along an axis using index array (np.take_along_axis).
+    /// Integer `indices` must have the same rank as `self`; non-axis
+    /// dimensions broadcast in either direction.
+    pub fn take_along_axis(&self, indices: &Self, axis: isize) -> Result<Self, UFuncError> {
+        let (ax, out_shape) = self.along_axis_index_shape(indices, axis, "take_along_axis")?;
+        let ndim = self.shape.len();
         let axis_len = self.shape[ax];
         let strides = c_strides_elems(&self.shape);
         let idx_strides = c_strides_elems(&indices.shape);
-        let total: usize = fnp_ndarray::element_count(&indices.shape).map_err(UFuncError::Shape)?;
+        let out_strides = c_strides_elems(&out_shape);
+        let total: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
 
         // Each output element `flat` is an independent, pure function of `flat`:
         // resolve the on-axis index and read the matching source element. The
@@ -17348,48 +17674,27 @@ impl UFuncArray {
         let equal_shape = self.shape == indices.shape;
         let resolve_src = |flat: usize| -> Result<usize, UFuncError> {
             if equal_shape {
-                let idx_f = indices.values[flat];
-                if !idx_f.is_finite() {
-                    return Err(UFuncError::Msg(
-                        "indices must be finite integers".to_string(),
-                    ));
-                }
-                let idx = idx_f as i64;
-                let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
-                if resolved < 0 || resolved >= axis_len as i64 {
-                    return Err(UFuncError::Msg(format!(
-                        "take_along_axis: index {idx} out of bounds for axis {ax} with size {axis_len}"
-                    )));
-                }
-                let axis_coord = ((flat / inner) % axis_len) as i64;
-                return Ok((flat as i64 + (resolved - axis_coord) * inner as i64) as usize);
+                let resolved =
+                    indices.resolve_along_axis_index(flat, ax, axis_len, "take_along_axis")?;
+                let axis_coord = (flat / inner) % axis_len;
+                return Ok(flat - axis_coord * inner + resolved * inner);
             }
             let mut rem = flat;
             let mut src_flat = 0usize;
+            let mut idx_flat = 0usize;
             for d in 0..ndim {
-                let coord = rem / idx_strides[d];
-                rem %= idx_strides[d];
-                if d == ax {
-                    let idx_f = indices.values[flat];
-                    if !idx_f.is_finite() {
-                        return Err(UFuncError::Msg(
-                            "indices must be finite integers".to_string(),
-                        ));
-                    }
-                    let idx = idx_f as i64;
-                    let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
-                    if resolved < 0 || resolved >= axis_len as i64 {
-                        return Err(UFuncError::Msg(format!(
-                            "take_along_axis: index {idx} out of bounds for axis {ax} with size {axis_len}"
-                        )));
-                    }
-                    src_flat += resolved as usize * strides[d];
-                } else {
-                    let c = if self.shape[d] == 1 { 0 } else { coord };
-                    src_flat += c * strides[d];
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                if indices.shape[d] != 1 {
+                    idx_flat += coord * idx_strides[d];
+                }
+                if d != ax && self.shape[d] != 1 {
+                    src_flat += coord * strides[d];
                 }
             }
-            Ok(src_flat)
+            let resolved =
+                indices.resolve_along_axis_index(idx_flat, ax, axis_len, "take_along_axis")?;
+            Ok(src_flat + resolved * strides[ax])
         };
 
         // L3-cache cliff gate (matches clip): the per-element work is a cheap
@@ -17416,7 +17721,7 @@ impl UFuncArray {
                     .collect::<Result<Vec<f64>, UFuncError>>()?
             };
             return Ok(Self {
-                shape: indices.shape.clone(),
+                shape: out_shape,
                 values,
                 dtype: self.dtype,
                 integer_sidecar: None,
@@ -17437,78 +17742,138 @@ impl UFuncArray {
         };
         let values: Vec<f64> = source_indices.iter().map(|&s| self.values[s]).collect();
         Ok(Self {
-            shape: indices.shape.clone(),
+            shape: out_shape,
             values,
             dtype: self.dtype,
             integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
-    /// Put values along an axis using index array (np.put_along_axis).
+    /// Put values along an axis using an integer index array (np.put_along_axis).
+    /// Non-axis dimensions broadcast in either direction, and `values` may
+    /// have any shape broadcastable to the indexed result after ignoring
+    /// surplus leading dimensions of size one.
     pub fn put_along_axis(
         &mut self,
         indices: &Self,
         values: &Self,
         axis: isize,
     ) -> Result<(), UFuncError> {
+        let (ax, indexed_shape) = self.along_axis_index_shape(indices, axis, "put_along_axis")?;
         let ndim = self.shape.len();
-        if indices.shape.len() != ndim || values.shape.len() != ndim {
-            return Err(UFuncError::Msg(
-                "put_along_axis: all arrays must have same ndim".to_string(),
-            ));
+        // Assignment converts values to the destination dtype before storing
+        // them. This also normalizes the working buffer of narrow integers and
+        // creates exact sidecars for wide results of signedness conversions.
+        // Complex and temporal representations keep their existing bridge path.
+        let source_is_real = values.dtype.is_integer()
+            || matches!(
+                values.dtype,
+                DType::Bool | DType::F16 | DType::F32 | DType::F64
+            );
+        let destination_is_real = self.dtype.is_integer()
+            || matches!(
+                self.dtype,
+                DType::Bool | DType::F16 | DType::F32 | DType::F64
+            );
+        let mut assignment_values = if source_is_real && destination_is_real {
+            values.astype(self.dtype)
+        } else {
+            values.clone()
+        };
+        let surplus = assignment_values.shape.len().saturating_sub(ndim);
+        if surplus > 0
+            && assignment_values.shape[..surplus]
+                .iter()
+                .all(|&dim| dim == 1)
+        {
+            // NumPy assignment permits values such as (1, 1, J) for a (J,)
+            // indexed result. Preserve singleton axes within the result rank:
+            // they determine which dimensions the values broadcast across.
+            assignment_values.shape = assignment_values.shape[surplus..].to_vec();
         }
-        let ax = normalize_axis(axis, ndim)?;
-        for d in 0..ndim {
-            if d != ax && self.shape[d] != 1 && self.shape[d] != indices.shape[d] {
-                return Err(UFuncError::Msg(format!(
-                    "put_along_axis: non-axis dimension {d} mismatch: {} vs {}",
-                    self.shape[d], indices.shape[d]
-                )));
-            }
-        }
-
-        let values_bcast = values.broadcast_to(&indices.shape)?;
+        let values_bcast = assignment_values.broadcast_to(&indexed_shape)?;
 
         let axis_len = self.shape[ax];
         let strides = c_strides_elems(&self.shape);
         let idx_strides = c_strides_elems(&indices.shape);
-        let total: usize = fnp_ndarray::element_count(&indices.shape).map_err(UFuncError::Shape)?;
+        let out_strides = c_strides_elems(&indexed_shape);
+        let total: usize = fnp_ndarray::element_count(&indexed_shape).map_err(UFuncError::Shape)?;
+        if total == 0 {
+            return Ok(());
+        }
+
+        // Validate every destination before mutating anything. NumPy rejects an
+        // out-of-bounds index without applying the preceding valid writes.
+        let mut destinations = Vec::with_capacity(total);
         for flat in 0..total {
             let mut rem = flat;
             let mut dst_flat = 0usize;
+            let mut idx_flat = 0usize;
             for d in 0..ndim {
-                let coord = rem / idx_strides[d];
-                rem %= idx_strides[d];
-                if d == ax {
-                    let idx_f = indices.values[flat];
-                    if !idx_f.is_finite() {
-                        return Err(UFuncError::Msg(
-                            "indices must be finite integers".to_string(),
-                        ));
-                    }
-                    let idx = idx_f as i64;
-                    let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
-                    if resolved < 0 || resolved >= axis_len as i64 {
-                        return Err(UFuncError::Msg(format!(
-                            "put_along_axis: index {idx} out of bounds for axis {ax} with size {axis_len}"
-                        )));
-                    }
-                    dst_flat += resolved as usize * strides[d];
-                } else {
-                    let c = if self.shape[d] == 1 { 0 } else { coord };
-                    dst_flat += c * strides[d];
+                let coord = rem / out_strides[d];
+                rem %= out_strides[d];
+                if indices.shape[d] != 1 {
+                    idx_flat += coord * idx_strides[d];
+                }
+                if d != ax && self.shape[d] != 1 {
+                    dst_flat += coord * strides[d];
                 }
             }
-            let val = values_bcast.values[flat];
-            self.values[dst_flat] = val;
-            self.write_integer_mutation(
-                dst_flat,
-                val,
-                values_bcast.integer_sidecar.as_ref(),
-                flat,
-                "put_along_axis",
-            )?;
+            let resolved =
+                indices.resolve_along_axis_index(idx_flat, ax, axis_len, "put_along_axis")?;
+            destinations.push(dst_flat + resolved * strides[ax]);
         }
+
+        // Prepare exact integer writes separately as well: a conversion failure
+        // must not leave the working buffer and its sidecar out of sync.
+        let mut sidecar = self.exact_integer_sidecar("put_along_axis")?;
+        let exact_value = |flat: usize| -> Result<i128, UFuncError> {
+            match &values_bcast.integer_sidecar {
+                Some(IntegerSidecar::I64(values)) => Ok(i128::from(values[flat])),
+                Some(IntegerSidecar::U64(values)) => Ok(i128::from(values[flat])),
+                None => {
+                    let value = values_bcast.values[flat];
+                    ensure_exact_integer_bridge_value_supported(
+                        value,
+                        self.dtype,
+                        "put_along_axis",
+                        flat,
+                    )?;
+                    Ok(value as i128)
+                }
+            }
+        };
+        match &mut sidecar {
+            Some(IntegerSidecar::I64(destination)) => {
+                for (flat, &dst) in destinations.iter().enumerate() {
+                    let value = exact_value(flat)?;
+                    destination[dst] = i64::try_from(value).map_err(|_| {
+                        UFuncError::Msg(format!(
+                            "put_along_axis: value at index {flat} ({value}) cannot be represented as i64"
+                        ))
+                    })?;
+                }
+            }
+            Some(IntegerSidecar::U64(destination)) => {
+                for (flat, &dst) in destinations.iter().enumerate() {
+                    let value = exact_value(flat)?;
+                    destination[dst] = u64::try_from(value).map_err(|_| {
+                        UFuncError::Msg(format!(
+                            "put_along_axis: value at index {flat} ({value}) cannot be represented as u64"
+                        ))
+                    })?;
+                }
+            }
+            None => {}
+        }
+        for (flat, &dst) in destinations.iter().enumerate() {
+            self.values[dst] = match &sidecar {
+                Some(IntegerSidecar::I64(values)) => values[dst] as f64,
+                Some(IntegerSidecar::U64(values)) => values[dst] as f64,
+                None => values_bcast.values[flat],
+            };
+        }
+        self.integer_sidecar = sidecar;
         Ok(())
     }
 
@@ -17975,6 +18340,25 @@ impl UFuncArray {
             let converted = source
                 .cast_to(dtype)
                 .expect("real numeric storage supports real numeric casts");
+            return Self::from_storage(self.shape.clone(), converted)
+                .expect("numeric casts preserve shape and element count");
+        }
+
+        if matches!(self.dtype, DType::F16 | DType::F32 | DType::F64)
+            && (dtype.is_integer() || dtype == DType::F16)
+        {
+            // Materialize the destination's actual values before they
+            // become the working buffer. Merely truncating to i64/u64 and
+            // relabeling the dtype leaves narrow values unwrapped, saturates
+            // negative-to-unsigned casts, and loses wide unsigned results.
+            // The typed bridge also quantizes F16/F32 inputs before conversion,
+            // rounds directly to half after honoring the source precision,
+            // and creates an exact sidecar when the destination needs one.
+            let converted = self
+                .to_storage()
+                .expect("real floating arrays have typed storage")
+                .cast_to(dtype)
+                .expect("real floating storage supports integer and half casts");
             return Self::from_storage(self.shape.clone(), converted)
                 .expect("numeric casts preserve shape and element count");
         }
@@ -60331,10 +60715,24 @@ print(json.dumps(payload))
             .collect();
         let arr = UFuncArray::new(vec![len], values.clone(), DType::F64).unwrap();
         let cast = arr.astype(DType::I32);
-        let reference: Vec<f64> = values.iter().map(|&value| (value as i64) as f64).collect();
+        // Invalid float conversions retain ArrayStorage's deterministic zero
+        // policy. Finite values here are all in int32 range. The old golden
+        // recorded i64::MAX in an int32 working buffer for +inf, although
+        // exporting that same array to int32 storage yielded zero.
+        let reference: Vec<f64> = values
+            .iter()
+            .map(|&value| {
+                if value.is_finite() {
+                    value.trunc()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
 
         assert_eq!(cast.dtype(), DType::I32);
         assert_eq!(cast.values(), reference.as_slice());
+        assert_eq!(cast.values(), cast.to_storage().unwrap().to_f64_vec());
 
         let mut hasher = Sha256::new();
         for value in cast.values() {
@@ -60346,7 +60744,176 @@ print(json.dumps(payload))
         }
         assert_eq!(
             actual_sha,
-            "9b705b8e29c06c01b2c837e98c93555b742f16fb896381142fed728257db5a79"
+            "60ef46a56d457521dbef583663412bfc8ed422610a87042027944baf4552fcc3"
+        );
+    }
+
+    #[test]
+    fn astype_float16_rounds_once_at_normal_and_subnormal_midpoints() {
+        let midpoint = 1.0 + 2.0_f64.powi(-11);
+        let above_midpoint = f64::from_bits(midpoint.to_bits() + 1);
+        let above_underflow = f64::from_bits(2.0_f64.powi(-25).to_bits() + 1);
+        let source = UFuncArray::new(
+            vec![5],
+            vec![
+                midpoint,
+                above_midpoint,
+                -midpoint,
+                -above_midpoint,
+                above_underflow,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let cast = source.astype(DType::F16);
+        let expected = ArrayStorage::F16(
+            [0x3c00, 0x3c01, 0xbc00, 0xbc01, 0x0001]
+                .into_iter()
+                .map(fnp_dtype::f16::from_bits)
+                .collect(),
+        );
+        assert_eq!(cast.to_storage().unwrap(), expected);
+        assert_eq!(cast.values(), expected.to_f64_vec());
+        assert_eq!(cast.astype(DType::F64).values(), expected.to_f64_vec());
+
+        // The same f64 working values labeled as f32 first round to the exact
+        // midpoint in their source dtype, then tie to the even half value.
+        let source_f32 =
+            UFuncArray::new(vec![2], vec![above_midpoint, -above_midpoint], DType::F32).unwrap();
+        assert_eq!(
+            source_f32.astype(DType::F16).to_storage().unwrap(),
+            ArrayStorage::F16(vec![
+                fnp_dtype::f16::from_bits(0x3c00),
+                fnp_dtype::f16::from_bits(0xbc00)
+            ])
+        );
+    }
+
+    #[test]
+    fn astype_float_integer_narrowing_normalizes_working_values() {
+        for dtype in [DType::F16, DType::F32, DType::F64] {
+            let source =
+                UFuncArray::new(vec![5], vec![300.75, -1.75, 257.0, 128.0, -129.0], dtype).unwrap();
+            let signed = source.astype(DType::I8);
+            assert_eq!(signed.values(), &[44.0, -1.0, 1.0, -128.0, 127.0]);
+            assert_eq!(
+                signed.to_storage().unwrap(),
+                ArrayStorage::I8(vec![44, -1, 1, -128, 127])
+            );
+            assert_eq!(signed.reduce_sum(None, false).unwrap().values(), &[43.0]);
+            assert_eq!(signed.reduce_mean(None, false).unwrap().values(), &[8.6]);
+
+            let unsigned = source.astype(DType::U8);
+            assert_eq!(unsigned.values(), &[44.0, 255.0, 1.0, 128.0, 127.0]);
+            assert_eq!(
+                unsigned.to_storage().unwrap(),
+                ArrayStorage::U8(vec![44, 255, 1, 128, 127])
+            );
+            assert_eq!(unsigned.reduce_sum(None, false).unwrap().values(), &[555.0]);
+        }
+    }
+
+    #[test]
+    fn astype_float_to_wide_integer_retains_exact_storage() {
+        let source = UFuncArray::new(
+            vec![2, 2],
+            vec![-1.75, -128.0, 1.0, ((1_u64 << 53) + 2) as f64],
+            DType::F64,
+        )
+        .unwrap();
+        let unsigned = source.astype(DType::U64);
+        assert_eq!(unsigned.shape(), &[2, 2]);
+        assert!(unsigned.has_integer_sidecar());
+        assert_eq!(
+            unsigned.to_storage().unwrap(),
+            ArrayStorage::U64(vec![u64::MAX, u64::MAX - 127, 1, (1_u64 << 53) + 2])
+        );
+        assert_eq!(
+            unsigned
+                .reduce_sum(Some(1), false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::U64(vec![u64::MAX - 128, (1_u64 << 53) + 3])
+        );
+        assert_eq!(
+            unsigned.astype(DType::I64).to_storage().unwrap(),
+            ArrayStorage::I64(vec![-1, -128, 1, (1_i64 << 53) + 2])
+        );
+    }
+
+    #[test]
+    fn astype_float_integer_casts_quantize_source_and_validate_policy() {
+        let source = UFuncArray::new(vec![1], vec![2047.75], DType::F16).unwrap();
+        assert_eq!(source.astype(DType::I16).values(), &[2048.0]);
+        assert!(source.astype_with_casting(DType::I16, "safe").is_err());
+        assert!(source.astype_with_casting(DType::I16, "same_kind").is_err());
+        let source = UFuncArray::new(vec![1], vec![16_777_219.0], DType::F32).unwrap();
+        assert_eq!(source.astype(DType::I32).values(), &[16_777_220.0]);
+        let empty = UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap();
+        let converted = empty.astype(DType::U64);
+        assert_eq!(converted.shape(), &[0, 2]);
+        assert_eq!(converted.to_storage().unwrap(), ArrayStorage::U64(vec![]));
+    }
+
+    #[test]
+    fn astype_finite_float_integer_casts_match_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        // Keep inputs inside int32's range: NumPy's out-of-range and non-finite
+        // float conversions are platform dependent and are separate parity debt.
+        let values = [
+            -1000.75, -257.75, -129.0, -1.75, -0.0, 0.0, 1.75, 128.0, 257.0, 300.75,
+        ];
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for (source_name, source_dtype) in [
+            ("float16", DType::F16),
+            ("float32", DType::F32),
+            ("float64", DType::F64),
+        ] {
+            let source = UFuncArray::new(vec![2, 5], values.to_vec(), source_dtype).unwrap();
+            for (target_name, target_dtype) in [
+                ("int8", DType::I8),
+                ("int16", DType::I16),
+                ("int32", DType::I32),
+                ("int64", DType::I64),
+                ("uint8", DType::U8),
+                ("uint16", DType::U16),
+                ("uint32", DType::U32),
+                ("uint64", DType::U64),
+            ] {
+                cases.push(serde_json::json!({"source": source_name, "target": target_name, "values": values}));
+                let converted = source.astype(target_dtype);
+                let storage = converted.to_storage().unwrap();
+                assert_eq!(converted.shape(), &[2, 5]);
+                assert_eq!(converted.dtype(), target_dtype);
+                assert_eq!(converted.values(), storage.to_f64_vec());
+                actual.push(
+                    (0..storage.len())
+                        .map(|i| storage.get_i128(i).unwrap().to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", r#"
+import json, sys, numpy as np
+cases = json.loads(sys.argv[1])
+print(json.dumps([[str(int(x)) for x in np.array(c['values'], dtype=c['source']).astype(c['target'])] for c in cases]))
+"#, &serde_json::to_string(&cases).unwrap()])
+            .output()
+            .expect("run NumPy floating cast oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            actual, expected,
+            "finite floating cast matrix must match NumPy"
         );
     }
 
@@ -68658,6 +69225,533 @@ for module, prefix in families:
     }
 
     #[test]
+    fn take_along_axis_broadcasts_indices_and_source_dimensions() {
+        let a = UFuncArray::new(
+            vec![2, 3],
+            vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            DType::F64,
+        )
+        .unwrap();
+        let rows = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I8(vec![-1, 0])).unwrap();
+        let taken = a.take_along_axis(&rows, -1).unwrap();
+        assert_eq!(taken.shape(), &[2, 2]);
+        assert_eq!(taken.values(), &[30.0, 10.0, 60.0, 40.0]);
+
+        let columns = UFuncArray::from_storage(vec![2, 1], ArrayStorage::U16(vec![1, 0])).unwrap();
+        let taken = a.take_along_axis(&columns, 0).unwrap();
+        assert_eq!(taken.shape(), &[2, 3]);
+        assert_eq!(taken.values(), &[40.0, 50.0, 60.0, 10.0, 20.0, 30.0]);
+
+        let source = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let indices =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![2, 0, 1, -1])).unwrap();
+        let taken = source.take_along_axis(&indices, 1).unwrap();
+        assert_eq!(taken.shape(), &[2, 2]);
+        assert_eq!(taken.values(), &[30.0, 10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn put_along_axis_broadcasts_scalar_vector_and_column_values() {
+        let original = UFuncArray::new(
+            vec![2, 3],
+            vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            DType::F64,
+        )
+        .unwrap();
+        let indices = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I32(vec![-1, 0])).unwrap();
+        let cases = [
+            (vec![], vec![7.0], vec![7.0, 20.0, 7.0, 7.0, 50.0, 7.0]),
+            (
+                vec![2],
+                vec![8.0, 9.0],
+                vec![9.0, 20.0, 8.0, 9.0, 50.0, 8.0],
+            ),
+            (
+                vec![2, 1],
+                vec![70.0, 80.0],
+                vec![70.0, 20.0, 70.0, 80.0, 50.0, 80.0],
+            ),
+        ];
+        for (shape, data, expected) in cases {
+            let values = UFuncArray::new(shape, data, DType::F64).unwrap();
+            let mut target = original.clone();
+            target.put_along_axis(&indices, &values, -1).unwrap();
+            assert_eq!(target.shape(), original.shape());
+            assert_eq!(target.values(), expected);
+        }
+
+        // Broadcasting the destination creates repeated writes to the same
+        // element. The last value in the indexed result wins, as in NumPy.
+        let mut target = UFuncArray::new(vec![1, 3], vec![0.0, 0.0, 0.0], DType::F64).unwrap();
+        let indices =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![2, 0, 1, 2])).unwrap();
+        let values = UFuncArray::new(vec![2, 2], vec![30.0, 10.0, 20.0, 40.0], DType::F64).unwrap();
+        target.put_along_axis(&indices, &values, 1).unwrap();
+        assert_eq!(target.values(), &[10.0, 20.0, 40.0]);
+    }
+
+    #[test]
+    fn put_along_axis_ignores_only_surplus_leading_singleton_value_axes() {
+        let original = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![0, 1, 2])).unwrap();
+        let repeated = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![0, 0])).unwrap();
+        for shape in [vec![1, 2], vec![1, 1, 2]] {
+            let values = UFuncArray::from_storage(shape, ArrayStorage::I64(vec![10, 11])).unwrap();
+            let mut target = original.clone();
+            target.put_along_axis(&repeated, &values, 0).unwrap();
+            assert_eq!(
+                target.to_storage().unwrap(),
+                ArrayStorage::I64(vec![11, 1, 2])
+            );
+        }
+
+        // Only the surplus leading singleton disappears. Keeping the trailing
+        // singleton makes these column values broadcast independently per row.
+        let mut target =
+            UFuncArray::from_storage(vec![2, 3], ArrayStorage::U8(vec![0; 6])).unwrap();
+        let indices =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![0, 2, 0, 2])).unwrap();
+        let values =
+            UFuncArray::from_storage(vec![1, 2, 1], ArrayStorage::F64(vec![300.9, -1.0])).unwrap();
+        target.put_along_axis(&indices, &values, 1).unwrap();
+        assert_eq!(target.values(), &[44.0, 0.0, 44.0, 255.0, 0.0, 255.0]);
+        assert_eq!(
+            target.to_storage().unwrap(),
+            ArrayStorage::U8(vec![44, 0, 44, 255, 0, 255])
+        );
+
+        let invalid =
+            UFuncArray::from_storage(vec![1, 2, 2], ArrayStorage::I64(vec![10, 11, 12, 13]))
+                .unwrap();
+        let mut unchanged = original.clone();
+        assert!(unchanged.put_along_axis(&repeated, &invalid, 0).is_err());
+        assert_eq!(unchanged, original);
+    }
+
+    #[test]
+    fn along_axis_empty_broadcasts_do_not_access_indices() {
+        let mut target = UFuncArray::from_storage(vec![0, 3], ArrayStorage::I64(vec![])).unwrap();
+        let indices = UFuncArray::from_storage(vec![1, 1], ArrayStorage::I64(vec![99])).unwrap();
+        let taken = target.take_along_axis(&indices, 1).unwrap();
+        assert_eq!(taken.shape(), &[0, 1]);
+        assert!(taken.values().is_empty());
+        target
+            .put_along_axis(&indices, &UFuncArray::scalar(7.0, DType::I64), 1)
+            .unwrap();
+        assert_eq!(target.shape(), &[0, 3]);
+        assert!(target.values().is_empty());
+
+        let target = UFuncArray::new(vec![2, 0, 3], vec![], DType::F64).unwrap();
+        let indices = UFuncArray::from_storage(vec![1, 0, 1], ArrayStorage::I64(vec![])).unwrap();
+        let taken = target.take_along_axis(&indices, 1).unwrap();
+        assert_eq!(taken.shape(), &[2, 0, 3]);
+
+        // A zero extent makes this legal without multiplying the enormous
+        // trailing dimensions when computing strides or iterating elements.
+        let mut huge_empty = UFuncArray::new(vec![0, usize::MAX, 2], vec![], DType::F64).unwrap();
+        let indices = UFuncArray::from_storage(vec![1, 1, 1], ArrayStorage::I64(vec![0])).unwrap();
+        let taken = huge_empty.take_along_axis(&indices, 2).unwrap();
+        assert_eq!(taken.shape(), &[0, usize::MAX, 1]);
+        assert!(taken.values().is_empty());
+        huge_empty
+            .put_along_axis(&indices, &UFuncArray::scalar(7.0, DType::F64), 2)
+            .unwrap();
+        assert_eq!(huge_empty.shape(), &[0, usize::MAX, 2]);
+        assert!(huge_empty.values().is_empty());
+
+        let mut empty_axis = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let index = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![0])).unwrap();
+        assert!(empty_axis.take_along_axis(&index, 0).is_err());
+        assert!(
+            empty_axis
+                .put_along_axis(&index, &UFuncArray::scalar(7.0, DType::F64), 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn along_axis_rejects_non_integer_and_malformed_indices() {
+        let original = UFuncArray::new(vec![2, 3], vec![0.0; 6], DType::F64).unwrap();
+        let values = UFuncArray::scalar(7.0, DType::F64);
+        for dtype in [
+            DType::Bool,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex128,
+        ] {
+            let indices = UFuncArray::new(vec![1, 1], vec![1.0], dtype).unwrap();
+            let error = original.take_along_axis(&indices, 1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("indices must be an integer array")
+            );
+            let mut target = original.clone();
+            let error = target.put_along_axis(&indices, &values, 1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("indices must be an integer array")
+            );
+            assert_eq!(target, original);
+        }
+        for value in [0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // The low-level constructor accepts an f64 working buffer. Even
+            // with integer metadata, malformed values must not truncate.
+            let indices = UFuncArray::new(vec![1, 1], vec![value], DType::I64).unwrap();
+            assert!(original.take_along_axis(&indices, 1).is_err());
+            let mut target = original.clone();
+            assert!(target.put_along_axis(&indices, &values, 1).is_err());
+            assert_eq!(target, original);
+        }
+    }
+
+    #[test]
+    fn along_axis_uses_exact_index_and_value_sidecars() {
+        let base = (1_u64 << 63) + 1;
+        let mut target = UFuncArray::from_storage(
+            vec![1, 3],
+            ArrayStorage::U64(vec![base, base + 1, base + 2]),
+        )
+        .unwrap();
+        let indices =
+            UFuncArray::from_storage(vec![1, 2], ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1]))
+                .unwrap();
+        // Both index values round to the same f64; their np.intp conversions
+        // select different elements (-1 and -2).
+        assert_eq!(indices.values()[0], indices.values()[1]);
+        let taken = target.take_along_axis(&indices, 1).unwrap();
+        assert_eq!(
+            taken.to_storage().unwrap(),
+            ArrayStorage::U64(vec![base + 2, base + 1])
+        );
+        let values =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX - 2, u64::MAX - 3]))
+                .unwrap();
+        target.put_along_axis(&indices, &values, 1).unwrap();
+        assert_eq!(
+            target.to_storage().unwrap(),
+            ArrayStorage::U64(vec![base, u64::MAX - 3, u64::MAX - 2])
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let index = (1_i64 << 53) + 1;
+            let invalid =
+                UFuncArray::from_storage(vec![1, 1], ArrayStorage::I64(vec![index])).unwrap();
+            let error = target.take_along_axis(&invalid, 1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("index {index} out of bounds"))
+            );
+        }
+    }
+
+    #[test]
+    fn put_along_axis_failure_preserves_values_and_sidecar() {
+        let large = (1_i64 << 53) + 1;
+        let original = UFuncArray::from_storage(
+            vec![2, 3],
+            ArrayStorage::I64(vec![large, 1, 2, 3, 4, large + 1]),
+        )
+        .unwrap();
+        let invalid = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I64(vec![1, 99])).unwrap();
+        let mut target = original.clone();
+        assert!(
+            target
+                .put_along_axis(&invalid, &UFuncArray::scalar(7.0, DType::I64), 1)
+                .is_err()
+        );
+        assert_eq!(target, original);
+
+        let indices = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let incompatible = UFuncArray::new(vec![3], vec![7.0; 3], DType::F64).unwrap();
+        assert!(target.put_along_axis(&indices, &incompatible, 1).is_err());
+        assert_eq!(target, original);
+        let wrong_shape =
+            UFuncArray::from_storage(vec![4, 2], ArrayStorage::I64(vec![0; 8])).unwrap();
+        assert!(target.take_along_axis(&wrong_shape, 1).is_err());
+        assert!(
+            target
+                .put_along_axis(&wrong_shape, &UFuncArray::scalar(7.0, DType::I64), 1)
+                .is_err()
+        );
+        assert_eq!(target, original);
+    }
+
+    #[test]
+    fn put_along_axis_casts_assignment_values_before_scatter() {
+        let cases = [
+            (
+                DType::I64,
+                ArrayStorage::F64(vec![3.9, -4.9]),
+                ArrayStorage::I64(vec![-4, 0, 3, -4, 0, 3]),
+            ),
+            (
+                DType::U64,
+                ArrayStorage::I64(vec![-1, -2]),
+                ArrayStorage::U64(vec![u64::MAX - 1, 0, u64::MAX, u64::MAX - 1, 0, u64::MAX]),
+            ),
+            (
+                DType::I64,
+                ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1]),
+                ArrayStorage::I64(vec![-2, 0, -1, -2, 0, -1]),
+            ),
+            (
+                DType::I8,
+                ArrayStorage::F64(vec![300.9, -129.9]),
+                ArrayStorage::I8(vec![127, 0, 44, 127, 0, 44]),
+            ),
+            (
+                DType::U8,
+                ArrayStorage::I16(vec![-1, 257]),
+                ArrayStorage::U8(vec![1, 0, 255, 1, 0, 255]),
+            ),
+            (
+                DType::Bool,
+                ArrayStorage::F64(vec![-0.0, 2.0]),
+                ArrayStorage::Bool(vec![true, false, false, true, false, false]),
+            ),
+            (
+                DType::F32,
+                ArrayStorage::F64(vec![1.0000000894069672, 1.1]),
+                ArrayStorage::F32(vec![1.1, 0.0, 1.0000001, 1.1, 0.0, 1.0000001]),
+            ),
+        ];
+        let indices = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I64(vec![-1, 0])).unwrap();
+        for (dtype, source, expected) in cases {
+            let mut target =
+                UFuncArray::from_storage(vec![2, 3], ArrayStorage::zeros(dtype, 6)).unwrap();
+            let values = UFuncArray::from_storage(vec![2], source).unwrap();
+            target.put_along_axis(&indices, &values, 1).unwrap();
+            assert_eq!(target.dtype(), dtype);
+            assert_eq!(
+                target.values(),
+                expected.to_f64_vec(),
+                "working values for {dtype:?}"
+            );
+            assert_eq!(
+                target.to_storage().unwrap(),
+                expected,
+                "typed values for {dtype:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn put_along_axis_assignment_casts_match_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let layouts = [
+            (
+                "int64",
+                DType::I64,
+                "float64",
+                ArrayStorage::F64(vec![3.9, -4.9]),
+            ),
+            (
+                "uint64",
+                DType::U64,
+                "int64",
+                ArrayStorage::I64(vec![-1, -2]),
+            ),
+            (
+                "int64",
+                DType::I64,
+                "uint64",
+                ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1]),
+            ),
+            (
+                "int8",
+                DType::I8,
+                "float64",
+                ArrayStorage::F64(vec![300.9, -129.9]),
+            ),
+            (
+                "uint8",
+                DType::U8,
+                "int16",
+                ArrayStorage::I16(vec![-1, 257]),
+            ),
+            (
+                "bool",
+                DType::Bool,
+                "float64",
+                ArrayStorage::F64(vec![-0.0, 2.0]),
+            ),
+            (
+                "float32",
+                DType::F32,
+                "float64",
+                ArrayStorage::F64(vec![1.0000000894069672, 1.1]),
+            ),
+        ];
+        let indices = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I64(vec![-1, 0])).unwrap();
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for (target_name, dtype, source_name, source) in layouts {
+            let input: Vec<String> = (0..source.len())
+                .map(|i| {
+                    if source.dtype().is_integer() {
+                        source.get_i128(i).unwrap().to_string()
+                    } else {
+                        source.get_f64(i).unwrap().to_string()
+                    }
+                })
+                .collect();
+            cases.push(serde_json::json!({
+                "target": target_name,
+                "source": source_name,
+                "values": input,
+            }));
+            let values = UFuncArray::from_storage(vec![2], source).unwrap();
+            let mut target =
+                UFuncArray::from_storage(vec![2, 3], ArrayStorage::zeros(dtype, 6)).unwrap();
+            target.put_along_axis(&indices, &values, 1).unwrap();
+            let storage = target.to_storage().unwrap();
+            assert_eq!(target.values(), storage.to_f64_vec());
+            actual.push(if dtype.is_integer() || dtype == DType::Bool {
+                serde_json::json!(
+                    (0..storage.len())
+                        .map(|i| storage.get_i128(i).unwrap().to_string())
+                        .collect::<Vec<_>>()
+                )
+            } else {
+                serde_json::json!(storage.to_f64_vec())
+            });
+        }
+        let output = Command::new(oracle_python_bin())
+            .args([
+                "-c",
+                r#"
+import json, sys, numpy as np
+results = []
+for case in json.loads(sys.argv[1]):
+    target = np.zeros((2, 3), dtype=case['target'])
+    values = np.array(case['values'], dtype=case['source'])
+    np.put_along_axis(target, np.array([[-1, 0]]), values, axis=1)
+    results.append([str(int(x)) for x in target.ravel()] if target.dtype.kind in 'biu'
+                   else target.ravel().tolist())
+print(json.dumps(results))
+"#,
+                &serde_json::to_string(&cases).unwrap(),
+            ])
+            .output()
+            .expect("run NumPy along-axis assignment oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            actual, expected,
+            "along-axis assignment casts must match NumPy"
+        );
+    }
+
+    #[test]
+    fn along_axis_broadcasts_match_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        // Both directions of broadcasting, multiple broadcast dimensions,
+        // negative axes, repeated destinations, and empty indexed results.
+        let layouts = [
+            (vec![2, 3], vec![1, 2], vec![2, 0], 1isize, vec![]),
+            (vec![2, 3], vec![1, 2], vec![2, 0], -1, vec![2]),
+            (vec![1, 3], vec![2, 2], vec![2, 0, 1, -1], 1, vec![2]),
+            (
+                vec![2, 3, 1],
+                vec![1, 2, 4],
+                vec![0, 1, 2, -1, 2, 0, 1, -2],
+                1,
+                vec![4],
+            ),
+            (vec![3, 2], vec![2, 1], vec![2, 0], 0, vec![2]),
+            (vec![2, 3, 4], vec![1, 2, 1], vec![1, -1], -2, vec![2, 1]),
+            (vec![0, 3], vec![1, 1], vec![99], 1, vec![]),
+            (vec![2, 0, 3], vec![1, 0, 1], vec![], 1, vec![3]),
+            (vec![3], vec![3], vec![2, 0, -1], 0, vec![]),
+            (vec![3], vec![2], vec![0, 0], 0, vec![1, 2]),
+            (vec![3], vec![2], vec![0, 0], 0, vec![1, 1, 2]),
+            (vec![2, 3], vec![2, 2], vec![0, 2, 0, 2], 1, vec![1, 2, 1]),
+        ];
+        let base = (1_i64 << 53) + 1;
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for (shape, indices_shape, index_values, axis, values_shape) in layouts {
+            let count = fnp_ndarray::element_count(&shape).unwrap();
+            let data: Vec<i64> = (0..count).map(|i| base + i as i64).collect();
+            let value_count = fnp_ndarray::element_count(&values_shape).unwrap();
+            let value_data: Vec<i64> = (0..value_count).map(|i| base + 100 + i as i64).collect();
+            let mut source =
+                UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(data.clone())).unwrap();
+            let indices = UFuncArray::from_storage(
+                indices_shape.clone(),
+                ArrayStorage::I64(index_values.clone()),
+            )
+            .unwrap();
+            let values = UFuncArray::from_storage(
+                values_shape.clone(),
+                ArrayStorage::I64(value_data.clone()),
+            )
+            .unwrap();
+            let taken = source.take_along_axis(&indices, axis).unwrap();
+            let ArrayStorage::I64(taken_values) = taken.to_storage().unwrap() else {
+                panic!("take_along_axis must preserve int64 storage");
+            };
+            source.put_along_axis(&indices, &values, axis).unwrap();
+            let ArrayStorage::I64(written_values) = source.to_storage().unwrap() else {
+                panic!("put_along_axis must preserve int64 storage");
+            };
+            actual.push(serde_json::json!({
+                "shape": taken.shape(),
+                "taken": taken_values,
+                "written": written_values,
+            }));
+            cases.push(serde_json::json!({
+                "shape": shape,
+                "data": data,
+                "indices_shape": indices_shape,
+                "indices": index_values,
+                "axis": axis,
+                "values_shape": values_shape,
+                "values": value_data,
+            }));
+        }
+        let output = Command::new(oracle_python_bin())
+            .args([
+                "-c",
+                r#"
+import json, sys, numpy as np
+results = []
+for case in json.loads(sys.argv[1]):
+    source = np.array(case['data'], dtype=np.int64).reshape(case['shape'])
+    indices = np.array(case['indices'], dtype=np.int64).reshape(case['indices_shape'])
+    values = np.array(case['values'], dtype=np.int64).reshape(case['values_shape'])
+    taken = np.take_along_axis(source, indices, axis=case['axis'])
+    np.put_along_axis(source, indices, values, axis=case['axis'])
+    results.append({'shape': list(taken.shape), 'taken': taken.ravel().tolist(),
+                    'written': source.ravel().tolist()})
+print(json.dumps(results))
+"#,
+                &serde_json::to_string(&cases).unwrap(),
+            ])
+            .output()
+            .expect("run NumPy along-axis indexing oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual, expected, "along-axis broadcasting must match NumPy");
+    }
+
+    #[test]
     fn take_along_axis_parallel_matches_serial_and_golden() {
         use crate::c_strides_elems;
         use sha2::{Digest, Sha256};
@@ -76476,6 +77570,773 @@ print(json.dumps(rows))
                 expected["count_nonzero"].as_u64().unwrap() as f64,
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_wraps_every_integer_width() {
+        for (dtype, maximum, minimum) in [
+            (DType::I8, i8::MAX as i64, i8::MIN as i64),
+            (DType::I16, i16::MAX as i64, i16::MIN as i64),
+            (DType::I32, i32::MAX as i64, i32::MIN as i64),
+            (DType::I64, i64::MAX, i64::MIN),
+        ] {
+            let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![maximum, 2])).unwrap();
+            for (result, expected) in [
+                (
+                    a.reduce_sum_with_dtype(None, false, dtype).unwrap(),
+                    minimum + 1,
+                ),
+                (a.reduce_prod_with_dtype(None, false, dtype).unwrap(), -2),
+            ] {
+                assert_eq!(result.dtype(), dtype);
+                assert_eq!(
+                    result.to_storage().unwrap().get_i128(0).unwrap(),
+                    expected as i128
+                );
+                assert_eq!(result.values(), &[expected as f64]);
+            }
+        }
+        for (dtype, maximum) in [
+            (DType::U8, u8::MAX as u64),
+            (DType::U16, u16::MAX as u64),
+            (DType::U32, u32::MAX as u64),
+            (DType::U64, u64::MAX),
+        ] {
+            let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![maximum, 2])).unwrap();
+            for (result, expected) in [
+                (a.reduce_sum_with_dtype(None, false, dtype).unwrap(), 1),
+                (
+                    a.reduce_prod_with_dtype(None, false, dtype).unwrap(),
+                    maximum - 1,
+                ),
+            ] {
+                assert_eq!(result.dtype(), dtype);
+                assert_eq!(
+                    result.to_storage().unwrap().get_i128(0).unwrap(),
+                    expected as i128
+                );
+                assert_eq!(result.values(), &[expected as f64]);
+            }
+        }
+
+        let a = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::U64(vec![u64::MAX, 1, (1_u64 << 53) + 3, 2]),
+        )
+        .unwrap();
+        let sum = a.reduce_sum_with_dtype(Some(0), true, DType::I8).unwrap();
+        assert_eq!(sum.shape(), &[1, 2]);
+        assert_eq!(sum.to_storage().unwrap(), ArrayStorage::I8(vec![2, 3]));
+        let prod = a
+            .reduce_prod_with_dtype(Some(-1), false, DType::I8)
+            .unwrap();
+        assert_eq!(prod.shape(), &[2]);
+        assert_eq!(prod.to_storage().unwrap(), ArrayStorage::I8(vec![-1, 6]));
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_casts_before_accumulating() {
+        let fractional = UFuncArray::new(vec![2], vec![0.75, 0.75], DType::F64).unwrap();
+        assert_eq!(
+            fractional
+                .reduce_sum_with_dtype(None, false, DType::I8)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+        let fractional = UFuncArray::new(vec![2], vec![1.9, 2.9], DType::F64).unwrap();
+        assert_eq!(
+            fractional
+                .reduce_prod_with_dtype(None, false, DType::I8)
+                .unwrap()
+                .values(),
+            &[2.0]
+        );
+
+        let a =
+            UFuncArray::new(vec![3], vec![16_777_216.0, 1.0, -16_777_216.0], DType::F64).unwrap();
+        assert_eq!(
+            a.reduce_sum_with_dtype(None, false, DType::F32)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+        assert_eq!(
+            a.reduce_sum_with_dtype(None, false, DType::F64)
+                .unwrap()
+                .values(),
+            &[1.0]
+        );
+        let a = UFuncArray::new(vec![3], vec![2048.0, 1.0, -2048.0], DType::F64).unwrap();
+        let half_sum = a.reduce_sum_with_dtype(None, false, DType::F16).unwrap();
+        assert_eq!(half_sum.dtype(), DType::F16);
+        assert_eq!(half_sum.values(), &[1.0]);
+
+        let a = UFuncArray::new(vec![2], vec![1.0 + 2.0_f64.powi(-25); 2], DType::F64).unwrap();
+        assert_eq!(
+            a.reduce_prod_with_dtype(None, false, DType::F32)
+                .unwrap()
+                .values(),
+            &[1.0]
+        );
+        assert!(
+            a.reduce_prod_with_dtype(None, false, DType::F64)
+                .unwrap()
+                .values()[0]
+                > 1.0
+        );
+
+        let a = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::I64(vec![(1_i64 << 53) + 1, -(1_i64 << 53)]),
+        )
+        .unwrap();
+        assert_eq!(
+            a.reduce_sum_with_dtype(None, false, DType::I64)
+                .unwrap()
+                .values(),
+            &[1.0]
+        );
+        assert_eq!(
+            a.reduce_sum_with_dtype(None, false, DType::F64)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_boolean_empty_scalar_and_errors() {
+        let a = UFuncArray::new(
+            vec![2, 3],
+            vec![0.0, 2.0, -3.0, 4.0, f64::NAN, 0.0],
+            DType::F64,
+        )
+        .unwrap();
+        let sum = a.reduce_sum_with_dtype(Some(0), true, DType::Bool).unwrap();
+        assert_eq!(sum.shape(), &[1, 3]);
+        assert_eq!(sum.dtype(), DType::Bool);
+        assert_eq!(sum.values(), &[1.0, 1.0, 1.0]);
+        let prod = a
+            .reduce_prod_with_dtype(Some(-1), true, DType::Bool)
+            .unwrap();
+        assert_eq!(prod.shape(), &[2, 1]);
+        assert_eq!(prod.values(), &[0.0, 0.0]);
+
+        let empty = UFuncArray::new(vec![0, 3], vec![], DType::F64).unwrap();
+        for dtype in [
+            DType::Bool,
+            DType::I8,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+        ] {
+            let sum = empty.reduce_sum_with_dtype(Some(0), true, dtype).unwrap();
+            let prod = empty.reduce_prod_with_dtype(Some(0), true, dtype).unwrap();
+            assert_eq!(sum.shape(), &[1, 3]);
+            assert_eq!(prod.shape(), &[1, 3]);
+            assert_eq!(sum.dtype(), dtype);
+            assert_eq!(prod.dtype(), dtype);
+            assert_eq!(sum.values(), &[0.0; 3]);
+            assert_eq!(prod.values(), &[1.0; 3]);
+            assert!(
+                empty
+                    .reduce_prod_with_dtype(Some(1), true, dtype)
+                    .unwrap()
+                    .values()
+                    .is_empty()
+            );
+        }
+
+        let scalar = UFuncArray::scalar(7.5, DType::F64);
+        for axis in [None, Some(0), Some(-1)] {
+            for keepdims in [false, true] {
+                let sum = scalar
+                    .reduce_sum_with_dtype(axis, keepdims, DType::I8)
+                    .unwrap();
+                let prod = scalar
+                    .reduce_prod_with_dtype(axis, keepdims, DType::Bool)
+                    .unwrap();
+                assert!(sum.shape().is_empty());
+                assert!(prod.shape().is_empty());
+                assert_eq!(sum.values(), &[7.0]);
+                assert_eq!(prod.values(), &[1.0]);
+            }
+        }
+        for axis in [Some(1), Some(-2)] {
+            assert!(matches!(
+                scalar.reduce_sum_with_dtype(axis, false, DType::I8),
+                Err(UFuncError::AxisOutOfBounds { .. })
+            ));
+            assert!(matches!(
+                scalar.reduce_prod_with_dtype(axis, false, DType::Bool),
+                Err(UFuncError::AxisOutOfBounds { .. })
+            ));
+        }
+        for dtype in [
+            DType::Complex64,
+            DType::Complex128,
+            DType::Str,
+            DType::Structured,
+            DType::DateTime64,
+            DType::TimeDelta64,
+        ] {
+            assert!(scalar.reduce_sum_with_dtype(None, false, dtype).is_err());
+            assert!(scalar.reduce_prod_with_dtype(None, false, dtype).is_err());
+            let unsupported = UFuncArray::new(Vec::new(), vec![1.0], dtype).unwrap();
+            assert!(
+                unsupported
+                    .reduce_sum_with_dtype(None, false, DType::F64)
+                    .is_err()
+            );
+            assert!(
+                unsupported
+                    .reduce_prod_with_dtype(None, false, DType::F64)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_empty_output_skips_unused_extents() {
+        for (shape, reduced, kept) in [
+            (
+                vec![0, 1, usize::MAX, 2],
+                vec![0, usize::MAX, 2],
+                vec![0, 1, usize::MAX, 2],
+            ),
+            (
+                vec![1 << 20, COMPENSATED_SUM_MIN_LEN + 1, 0],
+                vec![1 << 20, 0],
+                vec![1 << 20, 1, 0],
+            ),
+        ] {
+            let input = UFuncArray::new(shape.clone(), Vec::new(), DType::F64).unwrap();
+            for dtype in [DType::F16, DType::F32, DType::F64] {
+                for keepdims in [false, true] {
+                    let expected_shape = if keepdims {
+                        kept.as_slice()
+                    } else {
+                        reduced.as_slice()
+                    };
+                    for result in [
+                        input.reduce_sum_with_dtype(Some(1), keepdims, dtype),
+                        input.reduce_prod_with_dtype(Some(1), keepdims, dtype),
+                    ] {
+                        let result = result.unwrap();
+                        assert_eq!(result.shape(), expected_shape);
+                        assert_eq!(result.dtype(), dtype);
+                        assert!(result.values().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_conversion_buffer_regressions() {
+        let cases = [
+            (
+                DType::F64,
+                DType::F32,
+                8193,
+                false,
+                vec![(0, -16_777_216.0), (4096, 16_777_216.0), (8192, 1.0)],
+                1.0,
+            ),
+            (
+                DType::F32,
+                DType::F64,
+                8193,
+                false,
+                vec![
+                    (0, -9_007_199_254_740_992.0),
+                    (4096, 9_007_199_254_740_992.0),
+                    (8192, 1.0),
+                ],
+                1.0,
+            ),
+            (
+                DType::F64,
+                DType::F16,
+                8193,
+                false,
+                vec![(0, 2048.0), (1, 1.0), (8192, -2048.0)],
+                0.0,
+            ),
+            (
+                DType::F64,
+                DType::F16,
+                8193,
+                true,
+                vec![(0, 0.6865234375), (1, 1.705078125), (8192, 1.6513671875)],
+                1.93359375,
+            ),
+            // Do not round a HALF pairwise partial before adding the prior
+            // accumulator: -2048 + (2048 + 1) must remain 1 in the last block.
+            (
+                DType::F64,
+                DType::F16,
+                8194,
+                false,
+                vec![(0, -2048.0), (8192, 2048.0), (8193, 1.0)],
+                1.0,
+            ),
+            // An identical dtype does not introduce conversion boundaries.
+            (
+                DType::F16,
+                DType::F16,
+                8193,
+                false,
+                vec![(0, 2048.0), (1, 1.0), (8192, -2048.0)],
+                1.0,
+            ),
+            (
+                DType::F16,
+                DType::F16,
+                8193,
+                true,
+                vec![(0, 0.6865234375), (1, 1.705078125), (8192, 1.6513671875)],
+                1.9326171875,
+            ),
+            // Explicit float64 uses NumPy's pairwise tree even without a cast.
+            (
+                DType::F64,
+                DType::F64,
+                8,
+                false,
+                vec![
+                    (0, -9_007_199_254_740_992.0),
+                    (4, 9_007_199_254_740_992.0),
+                    (7, 1.0),
+                ],
+                0.0,
+            ),
+        ];
+        for (source, target, len, product, edits, expected) in cases {
+            let mut lane = vec![if product { 1.0 } else { 0.0 }; len];
+            for (index, value) in edits {
+                lane[index] = value;
+            }
+            for (shape, values, axis, output_shape) in [
+                (vec![len], lane.clone(), None, vec![1]),
+                (vec![3, len], lane.repeat(3), Some(-1), vec![3, 1]),
+                (vec![2, len, 1], lane.repeat(2), Some(1), vec![2, 1, 1]),
+            ] {
+                let array = UFuncArray::new(shape, values, source).unwrap();
+                let result = if product {
+                    array.reduce_prod_with_dtype(axis, true, target).unwrap()
+                } else {
+                    array.reduce_sum_with_dtype(axis, true, target).unwrap()
+                };
+                assert_eq!(result.shape(), output_shape);
+                assert_eq!(result.dtype(), target);
+                assert!(
+                    result.values().iter().all(|&value| value == expected),
+                    "source={source:?}, target={target:?}, len={len}, product={product}: {:?}",
+                    result.values()
+                );
+            }
+        }
+
+        // A global flat buffer would split the second row at 3192 and produce
+        // 1 there. NumPy's contiguous reduction lanes each start their own tree.
+        let mut lane = vec![0.0; 5000];
+        lane[0] = -16_777_216.0;
+        lane[3191] = 16_777_216.0;
+        lane[4999] = 1.0;
+        let array = UFuncArray::new(vec![3, 5000], lane.repeat(3), DType::F64).unwrap();
+        assert_eq!(
+            array
+                .reduce_sum_with_dtype(Some(1), false, DType::F32)
+                .unwrap()
+                .values(),
+            &[0.0; 3]
+        );
+
+        // NumPy's strided sums remain linear beyond the legacy API's threshold
+        // for switching to compensated summation.
+        let len = super::COMPENSATED_SUM_MIN_LEN + 1;
+        let mut values = vec![0.0; len * 2];
+        values[..2].fill(9_007_199_254_740_992.0);
+        values[2..4].fill(1.0);
+        values[(len - 1) * 2..].fill(-9_007_199_254_740_992.0);
+        let array = UFuncArray::new(vec![len, 2], values, DType::F32).unwrap();
+        assert_eq!(
+            array
+                .reduce_sum_with_dtype(Some(0), true, DType::F64)
+                .unwrap()
+                .values(),
+            &[0.0; 2]
+        );
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_buffer_boundaries_match_live_numpy() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut payload = Vec::new();
+        let mut actual = Vec::new();
+        for len in [8191, 8192, 8193, 8194, 16_383, 16_384, 16_385] {
+            let fixtures = [
+                (
+                    "float64",
+                    DType::F64,
+                    "float32",
+                    DType::F32,
+                    false,
+                    vec![(0, -16_777_216.0), (len / 2, 16_777_216.0), (len - 1, 1.0)],
+                ),
+                (
+                    "float32",
+                    DType::F32,
+                    "float64",
+                    DType::F64,
+                    false,
+                    vec![
+                        (0, -9_007_199_254_740_992.0),
+                        (len / 2, 9_007_199_254_740_992.0),
+                        (len - 1, 1.0),
+                    ],
+                ),
+                (
+                    "float64",
+                    DType::F64,
+                    "float16",
+                    DType::F16,
+                    false,
+                    vec![(0, 2048.0), (1, 1.0), (len - 1, -2048.0)],
+                ),
+                (
+                    "float64",
+                    DType::F64,
+                    "float16",
+                    DType::F16,
+                    true,
+                    vec![(0, 0.6865234375), (1, 1.705078125), (len - 1, 1.6513671875)],
+                ),
+                (
+                    "float32",
+                    DType::F32,
+                    "float32",
+                    DType::F32,
+                    false,
+                    vec![(0, -16_777_216.0), (len / 2, 16_777_216.0), (len - 1, 1.0)],
+                ),
+                (
+                    "float64",
+                    DType::F64,
+                    "float64",
+                    DType::F64,
+                    false,
+                    vec![
+                        (0, -9_007_199_254_740_992.0),
+                        (len / 2, 9_007_199_254_740_992.0),
+                        (len - 1, 1.0),
+                    ],
+                ),
+                (
+                    "float16",
+                    DType::F16,
+                    "float16",
+                    DType::F16,
+                    false,
+                    vec![(0, 2048.0), (1, 1.0), (len - 1, -2048.0)],
+                ),
+                (
+                    "float16",
+                    DType::F16,
+                    "float16",
+                    DType::F16,
+                    true,
+                    vec![(0, 0.6865234375), (1, 1.705078125), (len - 1, 1.6513671875)],
+                ),
+            ];
+            for (source_name, source_dtype, target_name, target_dtype, product, edits) in fixtures {
+                let fill = if product { 1.0 } else { 0.0 };
+                let mut lane = vec![fill; len];
+                for &(index, value) in &edits {
+                    lane[index] = value;
+                }
+                for layout in ["flat", "rows", "columns", "trailing_singleton", "middle"] {
+                    let (shape, values, axis) = match layout {
+                        "flat" => (vec![len], lane.clone(), None),
+                        "rows" => (vec![3, len], lane.repeat(3), Some(-1)),
+                        "columns" => (
+                            vec![len, 2],
+                            lane.iter().flat_map(|&v| [v; 2]).collect(),
+                            Some(0),
+                        ),
+                        "trailing_singleton" => (vec![2, len, 1], lane.repeat(2), Some(1)),
+                        "middle" => (
+                            vec![2, len, 3],
+                            lane.iter()
+                                .flat_map(|&v| [v; 3])
+                                .collect::<Vec<_>>()
+                                .repeat(2),
+                            Some(-2),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let array = UFuncArray::new(shape, values, source_dtype).unwrap();
+                    for keepdims in [false, true] {
+                        payload.push(serde_json::json!({
+                            "source": source_name, "target": target_name, "len": len,
+                            "product": product, "fill": fill, "edits": edits,
+                            "layout": layout, "axis": axis, "keepdims": keepdims,
+                        }));
+                        actual.push(if product {
+                            array
+                                .reduce_prod_with_dtype(axis, keepdims, target_dtype)
+                                .unwrap()
+                        } else {
+                            array
+                                .reduce_sum_with_dtype(axis, keepdims, target_dtype)
+                                .unwrap()
+                        });
+                    }
+                }
+            }
+        }
+        let script = r#"
+import json, struct, sys, numpy as np
+np.setbufsize(8192)
+rows = []
+for case in json.load(sys.stdin):
+    lane = np.full(case['len'], case['fill'], dtype=case['source'])
+    for index, value in case['edits']:
+        lane[index] = value
+    layout = case['layout']
+    if layout == 'flat':
+        a = lane
+    elif layout == 'rows':
+        a = np.tile(lane, (3, 1))
+    elif layout == 'columns':
+        a = np.repeat(lane[:, None], 2, axis=1)
+    elif layout == 'trailing_singleton':
+        a = np.tile(lane, (2, 1)).reshape(2, case['len'], 1)
+    elif layout == 'middle':
+        a = np.tile(np.repeat(lane[:, None], 3, axis=1)[None, :, :], (2, 1, 1))
+    result = np.asarray((np.prod if case['product'] else np.sum)(
+        a, axis=case['axis'], keepdims=case['keepdims'], dtype=case['target']))
+    rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                     bits=[struct.pack('>d', float(x)).hex() for x in result.ravel()]))
+print(json.dumps(rows))
+"#;
+        let mut child = Command::new(oracle_python_bin())
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("NumPy buffered reduction oracle should launch");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&payload).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for ((result, expected), case) in actual.into_iter().zip(expected).zip(payload) {
+            let shape: Vec<usize> = serde_json::from_value(expected["shape"].clone()).unwrap();
+            let bits: Vec<String> = serde_json::from_value(expected["bits"].clone()).unwrap();
+            assert_eq!(result.shape(), shape, "{case}");
+            assert_eq!(
+                Some(result.dtype()),
+                DType::parse(expected["dtype"].as_str().unwrap()),
+                "{case}"
+            );
+            assert_eq!(
+                result
+                    .values()
+                    .iter()
+                    .map(|v| format!("{:016x}", v.to_bits()))
+                    .collect::<Vec<_>>(),
+                bits,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_sum_prod_with_dtype_match_live_numpy() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        if !numpy_oracle_available() {
+            return;
+        }
+        let sources = [
+            (
+                "int64",
+                vec![2, 3],
+                ArrayStorage::I64(vec![
+                    i64::MIN,
+                    i64::MAX,
+                    (1_i64 << 53) + 1,
+                    -(1_i64 << 53) - 3,
+                    7,
+                    0,
+                ]),
+            ),
+            (
+                "uint64",
+                vec![2, 3],
+                ArrayStorage::U64(vec![u64::MAX, (1_u64 << 53) + 3, 7, 2, 1_u64 << 32, 0]),
+            ),
+            (
+                "float64",
+                vec![2, 3],
+                ArrayStorage::F64(vec![127.75, -128.75, 257.5, -257.5, 1.75, 2.25]),
+            ),
+            (
+                "float32",
+                vec![2, 3],
+                ArrayStorage::F32(vec![16_777_216.0, 1.0, -16_777_216.0, 1.5, 2.0, 3.0]),
+            ),
+            (
+                "float16",
+                vec![2, 3],
+                ArrayStorage::F16(
+                    vec![1.25, 2.5, -3.75, 8.0, -2.0, 0.0]
+                        .into_iter()
+                        .map(f16::from_f64)
+                        .collect(),
+                ),
+            ),
+            (
+                "bool",
+                vec![2, 3],
+                ArrayStorage::Bool(vec![true, false, true, true, true, false]),
+            ),
+            ("float64", vec![0, 3], ArrayStorage::F64(vec![])),
+            ("int64", vec![], ArrayStorage::I64(vec![(1_i64 << 53) + 1])),
+        ];
+        let targets = [
+            (DType::Bool, "bool"),
+            (DType::I8, "int8"),
+            (DType::I16, "int16"),
+            (DType::I32, "int32"),
+            (DType::I64, "int64"),
+            (DType::U8, "uint8"),
+            (DType::U16, "uint16"),
+            (DType::U32, "uint32"),
+            (DType::U64, "uint64"),
+            (DType::F16, "float16"),
+            (DType::F32, "float32"),
+            (DType::F64, "float64"),
+        ];
+        let mut payload = Vec::new();
+        let mut actual = Vec::new();
+        for (source_dtype, shape, storage) in sources {
+            let integers = storage.dtype().is_integer() || storage.dtype() == DType::Bool;
+            let values: Vec<String> = if integers {
+                (0..storage.len())
+                    .map(|i| storage.get_i128(i).unwrap().to_string())
+                    .collect()
+            } else {
+                storage.to_f64_vec().iter().map(f64::to_string).collect()
+            };
+            let array = UFuncArray::from_storage(shape.clone(), storage).unwrap();
+            for (dtype, dtype_name) in targets {
+                for operation in ["sum", "prod"] {
+                    for axis in [None, Some(0), Some(1), Some(-1)] {
+                        if shape.is_empty() && axis == Some(1) {
+                            continue;
+                        }
+                        for keepdims in [false, true] {
+                            payload.push(serde_json::json!({
+                                "source_dtype": source_dtype, "dtype": dtype_name,
+                                "shape": shape, "values": values, "integer_input": integers,
+                                "operation": operation, "axis": axis, "keepdims": keepdims,
+                            }));
+                            actual.push(if operation == "sum" {
+                                array.reduce_sum_with_dtype(axis, keepdims, dtype).unwrap()
+                            } else {
+                                array.reduce_prod_with_dtype(axis, keepdims, dtype).unwrap()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let script = r#"
+import json, struct, sys, numpy as np
+rows = []
+with np.errstate(all='ignore'):
+    for case in json.load(sys.stdin):
+        parse = int if case['integer_input'] else float
+        a = np.array([parse(x) for x in case['values']], dtype=case['source_dtype']).reshape(case['shape'])
+        result = np.asarray(getattr(np, case['operation'])(a, axis=case['axis'],
+                            keepdims=case['keepdims'], dtype=case['dtype']))
+        rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                         integers=[str(int(x)) for x in result.ravel()] if result.dtype.kind in 'biu' else None,
+                         bits=['nan' if np.isnan(x) else struct.pack('>d', float(x)).hex() for x in result.ravel()]))
+print(json.dumps(rows))
+"#;
+        let mut child = Command::new(oracle_python_bin())
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("NumPy dtype reduction oracle should launch");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&payload).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for ((result, expected), case) in actual.into_iter().zip(expected).zip(payload) {
+            let shape: Vec<usize> = serde_json::from_value(expected["shape"].clone()).unwrap();
+            assert_eq!(result.shape(), shape, "{case}");
+            assert_eq!(
+                Some(result.dtype()),
+                DType::parse(expected["dtype"].as_str().unwrap()),
+                "{case}"
+            );
+            if !expected["integers"].is_null() {
+                let integers: Vec<String> =
+                    serde_json::from_value(expected["integers"].clone()).unwrap();
+                let storage = result.to_storage().unwrap();
+                assert_eq!(
+                    (0..storage.len())
+                        .map(|i| storage.get_i128(i).unwrap().to_string())
+                        .collect::<Vec<_>>(),
+                    integers,
+                    "{case}"
+                );
+            }
+            let bits: Vec<String> = serde_json::from_value(expected["bits"].clone()).unwrap();
+            assert_eq!(result.values().len(), bits.len(), "{case}");
+            for (&value, expected) in result.values().iter().zip(bits) {
+                if expected == "nan" {
+                    assert!(value.is_nan(), "{case}: expected NaN, got {value}");
+                } else {
+                    assert_eq!(format!("{:016x}", value.to_bits()), expected, "{case}");
+                }
+            }
         }
     }
 

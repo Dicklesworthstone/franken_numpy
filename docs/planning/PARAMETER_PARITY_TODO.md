@@ -29,8 +29,10 @@
 - [x] Add tests: sum with initial, prod with initial
 
 ## GROUP 4: sum/prod/mean/var/std `dtype` parameter
-- [D] Deferred parity debt — NumPy exposes `dtype=` as observable API behavior even when f64 accumulation is internally precise
-- [D] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`; remaining follow-up must define Rust-core accumulator/result dtype semantics for integer, unsigned, float, bool, and complex reductions before this gap can be marked closed
+- [x] Rust-core `reduce_sum_with_dtype` and `reduce_prod_with_dtype` select both accumulator and result dtype for bool, all signed/unsigned integer widths, and float16/32/64; inputs are cast before accumulation, integer overflow wraps at the requested width, and exact wide-integer sidecars survive the result
+- [D] Rust-core explicit `dtype` for mean/var/std and complex reductions remains parity debt; the real-valued array bridge rejects complex inputs and accumulator dtypes explicitly
+- [D] Invalid and out-of-range floating-to-integer conversions inherit `ArrayStorage`'s conversion policy, including zero for nonfinite inputs; platform-specific NumPy invalid-cast parity remains open
+- [x] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`
 
 ## GROUP 5: percentile/quantile `keepdims` parameter
 - [x] Add `percentile_keepdims` method
@@ -58,4 +60,4 @@
 - [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
 - [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
 - [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces
-- [D] `dtype` on reductions — f64 accumulation is an implementation detail; NumPy result dtype and accumulator dtype behavior remain parity debt
+- [D] `dtype` on mean/var/std and complex reductions — explicit real-valued sum/prod accumulator dtypes are implemented; the remaining reductions still need their own result and accumulator dtype handling
