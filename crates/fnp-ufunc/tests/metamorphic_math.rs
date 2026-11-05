@@ -1541,3 +1541,268 @@ print(json.dumps(records))
         }
     }
 }
+
+#[test]
+fn einsum_preserves_integer_precision_wrapping_and_boolean_reductions() {
+    let signed = UFuncArray::from_storage(
+        vec![2],
+        ArrayStorage::I64(vec![9_007_199_254_740_993, -9_007_199_254_740_995]),
+    )
+    .unwrap();
+    let weights = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![3, 2])).unwrap();
+    let dot = UFuncArray::einsum("i,i->", &[&signed, &weights]).unwrap();
+    assert!(dot.shape().is_empty());
+    assert_eq!(
+        dot.to_storage().unwrap(),
+        ArrayStorage::I64(vec![9_007_199_254_740_989])
+    );
+    assert_eq!(
+        dot.reduce_sum(None, false).unwrap().to_storage().unwrap(),
+        ArrayStorage::I64(vec![9_007_199_254_740_989])
+    );
+
+    let unsigned =
+        UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX, 2])).unwrap();
+    let weights = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![2, 3])).unwrap();
+    assert_eq!(
+        UFuncArray::einsum("i,i->", &[&unsigned, &weights])
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![4])
+    );
+
+    let narrow = UFuncArray::from_storage(vec![2], ArrayStorage::I8(vec![120, 120])).unwrap();
+    assert_eq!(
+        UFuncArray::einsum("i->", &[&narrow])
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I8(vec![-16])
+    );
+    let booleans =
+        UFuncArray::from_storage(vec![3], ArrayStorage::Bool(vec![true, true, false])).unwrap();
+    assert_eq!(
+        UFuncArray::einsum("i->", &[&booleans])
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::Bool(vec![true])
+    );
+
+    // The full expression promotes to int64 before any multiplication. A narrow
+    // pairwise intermediate would wrap 100 * 100 and corrupt this result.
+    let narrow = UFuncArray::from_storage(vec![2], ArrayStorage::I8(vec![100, 100])).unwrap();
+    let wide = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 1])).unwrap();
+    assert_eq!(
+        UFuncArray::einsum("i,i,i->", &[&narrow, &narrow, &wide])
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I64(vec![20_000])
+    );
+
+    let small = UFuncArray::from_storage(vec![1], ArrayStorage::I8(vec![100])).unwrap();
+    let multiplier = UFuncArray::from_storage(vec![1], ArrayStorage::I8(vec![2])).unwrap();
+    let float = UFuncArray::from_vec(vec![1.0]);
+    assert_eq!(
+        UFuncArray::einsum("i,i,i->", &[&small, &multiplier, &float])
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::F64(vec![200.0])
+    );
+
+    for storage in [
+        ArrayStorage::I64(vec![1, 2, 3]),
+        ArrayStorage::F64(vec![1.0, 2.0, 3.0]),
+    ] {
+        let nonsquare = UFuncArray::from_storage(vec![1, 3], storage).unwrap();
+        assert!(UFuncArray::einsum("ii->i", &[&nonsquare]).is_err());
+        assert!(UFuncArray::einsum_optimized("ii->i", &[&nonsquare], "greedy").is_err());
+    }
+}
+
+#[test]
+fn integer_einsum_matches_numpy_across_dtypes_and_subscripts() {
+    use serde_json::Value;
+    use std::process::Command;
+
+    let script = r#"
+import json, math, sys
+try:
+    import numpy as np
+except ImportError:
+    print('null')
+    sys.exit(0)
+
+dtypes = ['bool', 'int8', 'int16', 'int32', 'int64',
+          'uint8', 'uint16', 'uint32', 'uint64']
+cases = [
+    ('i->', [[5]]),
+    ('i->i', [[5]]),
+    ('ji', [[2, 3]]),
+    ('ij->j', [[2, 3]]),
+    ('ijk->ki', [[2, 3, 4]]),
+    ('ii->', [[3, 3]]),
+    ('ii->i', [[3, 3]]),
+    ('ijj->i', [[2, 3, 3]]),
+    ('ii->', [[0, 0]]),
+    ('ii->i', [[1, 3]]),
+    ('ii->', [[3, 1]]),
+    ('i,i->', [[5], [5]]),
+    ('i,i->i', [[5], [5]]),
+    ('i,i->', [[5], [1]]),
+    ('i,j->ij', [[3], [4]]),
+    ('ij,jk->ik', [[2, 3], [3, 4]]),
+    ('ij,ji->', [[2, 3], [3, 2]]),
+    ('ij,ij->i', [[2, 3], [2, 3]]),
+    ('ij,kj->ik', [[2, 3], [4, 3]]),
+    ('...i,...i->...', [[2, 1, 3], [1, 4, 3]]),
+    ('...ij,...jk->...ik', [[2, 1, 2, 3], [1, 4, 3, 2]]),
+    (',->', [[], []]),
+    ('i,->i', [[3], []]),
+    ('ij,jk->ik', [[2, 0], [0, 3]]),
+    ('i,j->ij', [[0], [3]]),
+    ('ij,jk,kl->il', [[2, 3], [3, 4], [4, 2]]),
+    ('ij,jk,kl->il', [[2, 0], [0, 3], [3, 4]]),
+    ('i,i,i->', [[5], [5], [5]]),
+    ('...i,...i,...i->...', [[2, 1, 3], [1, 4, 3], [3]]),
+]
+
+def operand(shape, dtype, shift):
+    if dtype == 'int64':
+        values = [2**53+1, -(2**53+3), 2**63-1, -2**63, 0, 1, -3]
+    elif dtype == 'uint64':
+        values = [2**53+1, 2**63+3, 2**64-1, 0, 1, 3]
+    elif dtype == 'bool':
+        values = [True, False, True, True, False]
+    elif dtype.startswith('uint'):
+        values = [255, 200, 1, 0, 3]
+    else:
+        values = [120, -128, 1, 0, -3]
+    return np.array([values[(i+shift) % len(values)] for i in range(math.prod(shape))],
+                    dtype=dtype).reshape(shape)
+
+def payload(value):
+    value = np.asarray(value)
+    return dict(dtype=str(value.dtype), shape=list(value.shape), values=value.ravel().tolist())
+
+records = []
+def record(subscripts, shapes, types, optimize):
+    arrays = [operand(shape, dtype, i) for i, (shape, dtype) in enumerate(zip(shapes, types))]
+    row = dict(subscripts=subscripts, operands=[payload(a) for a in arrays], optimize=optimize)
+    try:
+        result = np.einsum(subscripts, *arrays, optimize=optimize)
+        row.update(result=payload(result), total=payload(np.sum(result)))
+    except ValueError:
+        row['error'] = True
+    records.append(row)
+
+for dtype in dtypes:
+    for subscripts, shapes in cases:
+        for optimize in [False, 'greedy', 'optimal']:
+            record(subscripts, shapes, [dtype] * len(shapes), optimize)
+
+for lhs in dtypes:
+    for rhs in dtypes:
+        if np.result_type(lhs, rhs).kind not in 'biu':
+            continue
+        for subscripts, shapes in cases:
+            if len(shapes) == 2:
+                record(subscripts, shapes, [lhs, rhs], False)
+
+for types in [('int8', 'int8', 'int64'), ('uint8', 'uint8', 'uint64'),
+              ('bool', 'int16', 'int32')]:
+    for optimize in [False, 'greedy', 'optimal']:
+        record('i,i,i->', [[5], [5], [5]], types, optimize)
+print(json.dumps(records))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python)
+        .args(["-c", script])
+        .output()
+        .expect("launch the NumPy integer einsum oracle");
+    assert!(
+        output.status.success(),
+        "NumPy integer einsum oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records: Value = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+    if records.is_null() {
+        assert_ne!(
+            std::env::var("FNP_REQUIRE_REAL_NUMPY_ORACLE").as_deref(),
+            Ok("1"),
+            "the required NumPy oracle is unavailable"
+        );
+        eprintln!("skipping integer einsum oracle: NumPy is unavailable");
+        return;
+    }
+
+    fn shape(value: &Value) -> Vec<usize> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect()
+    }
+
+    fn storage(value: &Value) -> ArrayStorage {
+        let values = value["values"].as_array().unwrap();
+        macro_rules! signed {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_i64().unwrap() as $ty).collect())
+            };
+        }
+        macro_rules! unsigned {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_u64().unwrap() as $ty).collect())
+            };
+        }
+        match value["dtype"].as_str().unwrap() {
+            "bool" => ArrayStorage::Bool(values.iter().map(|v| v.as_bool().unwrap()).collect()),
+            "int8" => signed!(I8, i8),
+            "int16" => signed!(I16, i16),
+            "int32" => signed!(I32, i32),
+            "int64" => signed!(I64, i64),
+            "uint8" => unsigned!(U8, u8),
+            "uint16" => unsigned!(U16, u16),
+            "uint32" => unsigned!(U32, u32),
+            "uint64" => unsigned!(U64, u64),
+            other => panic!("unexpected integer oracle dtype: {other}"),
+        }
+    }
+
+    for case in records.as_array().unwrap() {
+        let operands: Vec<UFuncArray> = case["operands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| UFuncArray::from_storage(shape(&value["shape"]), storage(value)).unwrap())
+            .collect();
+        let refs: Vec<&UFuncArray> = operands.iter().collect();
+        let subscripts = case["subscripts"].as_str().unwrap();
+        let actual = if let Some(strategy) = case["optimize"].as_str() {
+            UFuncArray::einsum_optimized(subscripts, &refs, strategy)
+        } else {
+            UFuncArray::einsum(subscripts, &refs)
+        };
+        if case["error"] == true {
+            assert!(actual.is_err(), "expected NumPy's rejection: {case}");
+        } else {
+            let actual = actual.unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(actual.shape(), shape(&case["result"]["shape"]), "{case}");
+            assert_eq!(
+                actual.to_storage().unwrap(),
+                storage(&case["result"]),
+                "{case}"
+            );
+            assert_eq!(
+                actual.reduce_sum(None, false).unwrap().to_storage().unwrap(),
+                storage(&case["total"]),
+                "subsequent exact reduction: {case}"
+            );
+        }
+    }
+}

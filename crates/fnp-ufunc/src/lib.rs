@@ -2830,7 +2830,15 @@ impl IntegerContraction {
     }
 
     fn finish(self, shape: Vec<usize>, values: Vec<u64>) -> Result<UFuncArray, UFuncError> {
-        let storage = match self.dtype {
+        Self::finish_values(self.dtype, shape, values)
+    }
+
+    fn finish_values(
+        dtype: DType,
+        shape: Vec<usize>,
+        values: Vec<u64>,
+    ) -> Result<UFuncArray, UFuncError> {
+        let storage = match dtype {
             DType::Bool => ArrayStorage::Bool(values.into_iter().map(|v| v != 0).collect()),
             DType::I8 => ArrayStorage::I8(values.into_iter().map(|v| v as i8).collect()),
             DType::I16 => ArrayStorage::I16(values.into_iter().map(|v| v as i16).collect()),
@@ -24612,7 +24620,8 @@ impl UFuncArray {
         context: &str,
         input_subs: &[&str],
         operands: &[&Self],
-    ) -> Result<(), UFuncError> {
+        validate_diagonals: bool,
+    ) -> Result<std::collections::HashMap<char, usize>, UFuncError> {
         let mut label_sizes: std::collections::HashMap<char, usize> =
             std::collections::HashMap::new();
 
@@ -24629,6 +24638,17 @@ impl UFuncArray {
 
             for (idx, &label) in chars.iter().enumerate() {
                 let dim = op.shape[idx];
+                // Repeated labels select a diagonal within one operand. Only
+                // labels shared by different operands may broadcast.
+                if validate_diagonals
+                    && let Some(previous) = chars[..idx].iter().position(|&c| c == label)
+                    && op.shape[previous] != dim
+                {
+                    return Err(UFuncError::Msg(format!(
+                        "{context}: dimensions for repeated label '{label}' differ: {} vs {dim}",
+                        op.shape[previous]
+                    )));
+                }
                 if let Some(existing) = label_sizes.get_mut(&label) {
                     if *existing == dim {
                         continue;
@@ -24647,7 +24667,7 @@ impl UFuncArray {
             }
         }
 
-        Ok(())
+        Ok(label_sizes)
     }
 
     fn normalize_einsum_subscripts(
@@ -24762,6 +24782,109 @@ impl UFuncArray {
         Ok(None)
     }
 
+    /// Evaluate integer contractions without passing exact values through f64.
+    /// Einsum keeps its promoted dtype, unlike sum's widening accumulator.
+    fn einsum_integer(
+        input_subs: &[&str],
+        output_labels: &[char],
+        operands: &[&Self],
+        label_sizes: &std::collections::HashMap<char, usize>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let output_shape: Vec<usize> = output_labels.iter().map(|c| label_sizes[c]).collect();
+        let output_size = element_count(&output_shape).map_err(UFuncError::Shape)?;
+        let mut all_labels = output_labels.to_vec();
+        for sub in input_subs {
+            for label in sub.chars() {
+                if !all_labels.contains(&label) {
+                    all_labels.push(label);
+                }
+            }
+        }
+        let all_dims: Vec<usize> = all_labels.iter().map(|c| label_sizes[c]).collect();
+        let total_iters = element_count(&all_dims).map_err(UFuncError::Shape)?;
+        if total_iters == 0 {
+            return IntegerContraction::finish_values(dtype, output_shape, vec![0; output_size]);
+        }
+        let contracted_size = total_iters / output_size;
+        let sidecars = operands
+            .iter()
+            .map(|op| {
+                op.synthesized_integer_sidecar("einsum")?.ok_or_else(|| {
+                    UFuncError::Msg("einsum: integer contraction requires integer operands".into())
+                })
+            })
+            .collect::<Result<Vec<_>, UFuncError>>()?;
+        let label_pos: std::collections::HashMap<char, usize> = all_labels
+            .iter()
+            .enumerate()
+            .map(|(i, &label)| (label, i))
+            .collect();
+        let op_terms: Vec<Vec<(usize, usize)>> = input_subs
+            .iter()
+            .zip(operands)
+            .map(|(sub, op)| {
+                let mut stride = 1;
+                sub.chars()
+                    .rev()
+                    .zip(op.shape.iter().rev())
+                    .map(|(label, &dim)| {
+                        let term = (label_pos[&label], if dim == 1 { 0 } else { stride });
+                        stride *= dim;
+                        term
+                    })
+                    .collect()
+            })
+            .collect();
+        let compute_cell = |label_vals: &mut [usize], out: usize| {
+            let mut sum = 0_u64;
+            for contracted in 0..contracted_size {
+                let mut remaining = out * contracted_size + contracted;
+                for i in (0..all_dims.len()).rev() {
+                    label_vals[i] = remaining % all_dims[i];
+                    remaining /= all_dims[i];
+                }
+                let mut product = 1_u64;
+                for (sidecar, terms) in sidecars.iter().zip(&op_terms) {
+                    let flat = terms
+                        .iter()
+                        .map(|&(pos, stride)| label_vals[pos] * stride)
+                        .sum::<usize>();
+                    let value = sidecar.get_u64(flat);
+                    if dtype == DType::Bool {
+                        product &= u64::from(value != 0);
+                    } else {
+                        product = product.wrapping_mul(value);
+                    }
+                }
+                if dtype == DType::Bool {
+                    sum |= product;
+                } else {
+                    sum = sum.wrapping_add(product);
+                }
+            }
+            sum
+        };
+        let values = if output_size >= 2
+            && total_iters >= (1 << 14)
+            && rayon::current_num_threads() >= 2
+        {
+            (0..output_size)
+                .into_par_iter()
+                .map_init(
+                    || vec![0; all_labels.len()],
+                    |labels, out| compute_cell(labels, out),
+                )
+                .collect()
+        } else {
+            let mut labels = vec![0; all_labels.len()];
+            (0..output_size)
+                .map(|out| compute_cell(&mut labels, out))
+                .collect()
+        };
+        IntegerContraction::finish_values(dtype, output_shape, values)
+    }
+
     fn einsum_impl(
         subscripts: &str,
         operands: &[&Self],
@@ -24825,6 +24948,36 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum", &input_subs, &output_labels)?;
+        let label_sizes =
+            Self::validate_einsum_input_shapes("einsum", &input_subs, operands, true)?;
+        let dtype = operands
+            .iter()
+            .skip(1)
+            .fold(operands[0].dtype, |dtype, op| promote(dtype, op.dtype));
+        if dtype.is_integer() || dtype == DType::Bool {
+            // Reassociation is exact in a single integer ring (or the Boolean
+            // semiring). Mixed dtypes must first use the full expression's dtype;
+            // pairwise promotion could otherwise overflow a narrower intermediate.
+            if operands.len() > 2
+                && !allow_private_labels
+                && operands
+                    .iter()
+                    .all(|op| op.dtype == dtype && !op.values.is_empty())
+            {
+                // Check the full Cartesian extent before the pairwise planner,
+                // whose cost arithmetic assumes representable nonempty shapes.
+                let dims: Vec<usize> = label_sizes.values().copied().collect();
+                element_count(&dims).map_err(UFuncError::Shape)?;
+                let shape: Vec<usize> = output_labels.iter().map(|c| label_sizes[c]).collect();
+                if let Ok(folded) = Self::einsum_optimized(subscripts, operands, "greedy")
+                    && folded.shape == shape
+                    && folded.dtype == dtype
+                {
+                    return Ok(folded);
+                }
+            }
+            return Self::einsum_integer(&input_subs, &output_labels, operands, &label_sizes, dtype);
+        }
 
         // Single-operand fast paths: a pure label permutation is a transpose, a repeated
         // label is a trace/diagonal. The general nested-sum path below is alloc-dominated
@@ -24836,41 +24989,6 @@ impl UFuncArray {
                 Self::einsum_single_operand_fast(input_subs[0], &output_labels, operands[0])?
         {
             return Ok(result);
-        }
-
-        // Build label-to-dimension mapping
-        let mut label_sizes: std::collections::HashMap<char, usize> =
-            std::collections::HashMap::new();
-        for (sub, op) in input_subs.iter().zip(operands.iter()) {
-            let chars: Vec<char> = sub.chars().collect();
-            if chars.len() != op.shape.len() {
-                return Err(UFuncError::Msg(format!(
-                    "einsum: subscript '{}' has {} indices but operand has {} dimensions",
-                    sub,
-                    chars.len(),
-                    op.shape.len()
-                )));
-            }
-            for (idx, &c) in chars.iter().enumerate() {
-                let dim = op.shape[idx];
-                if let Some(existing) = label_sizes.get_mut(&c) {
-                    if *existing != dim {
-                        if *existing == 1 {
-                            *existing = dim;
-                        } else if dim == 1 {
-                            // A singleton operand dimension broadcasts against
-                            // the already-established label size.
-                        } else {
-                            return Err(UFuncError::Msg(format!(
-                                "einsum: conflicting sizes for label '{}': {} vs {}",
-                                c, *existing, dim
-                            )));
-                        }
-                    }
-                } else {
-                    label_sizes.insert(c, dim);
-                }
-            }
         }
 
         // Determine output shape
@@ -25155,6 +25273,11 @@ impl UFuncArray {
         // exhaustive general loop, which stays the correctness ground truth.
         if operands.len() > 2
             && !allow_private_labels
+            // An integer pair could wrap before a later floating operand
+            // promotes the full expression. Plain einsum must not narrow it.
+            && operands
+                .iter()
+                .all(|op| !op.dtype.is_integer() && op.dtype != DType::Bool)
             && let Ok(folded) = Self::einsum_optimized(subscripts, operands, "greedy")
             && folded.shape == output_shape
         {
@@ -25311,7 +25434,7 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_path", &input_subs, &output_labels)?;
-        Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands)?;
+        Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands, false)?;
 
         let n = operands.len();
         if n <= 2 {
@@ -25441,7 +25564,7 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_optimized", &input_subs, &output_labels)?;
-        Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands)?;
+        Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands, true)?;
         let output_str: String = output_labels.iter().collect();
 
         // Inline greedy contraction: repeatedly pick and contract the cheapest pair
