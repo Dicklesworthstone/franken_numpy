@@ -4,9 +4,9 @@
 //! that match NumPy's np.linalg module within floating-point tolerance.
 
 use fnp_linalg::{
-    LinAlgError, batch_inv, batch_solve, cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn,
-    lu_factor_nxn, lu_solve, qr_mxn, qr_nxn, slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn,
-    solve_nxn_multi, svd_mxn_full,
+    LinAlgError, batch_inv, batch_solve, cholesky_nxn, complex_det_nxn, complex_inv_nxn,
+    complex_solve_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, lu_factor_nxn, lu_solve, qr_mxn, qr_nxn,
+    slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, svd_mxn_full,
 };
 use std::process::Command;
 
@@ -94,6 +94,53 @@ elif case == "scaled_solve_and_inverse":
                 emit_scalar(f"singular_{name}_{index}", 1)
             else:
                 emit_scalar(f"singular_{name}_{index}", 0)
+elif case == "scaled_complex_lu":
+    bases = [
+        [[2+1j, 0], [0, 3-2j]],
+        [[2+1j, 1-0.5j], [0.5+0.25j, 3-1j]],
+        [[0.5+0.25j, 3-1j], [2+1j, 1-0.5j]],
+        [[3+1j, 1-1j, 2+0.5j], [0.25+0.5j, 4-1j, -0.5+1j],
+         [2-0.5j, 1+0.25j, 5+2j]],
+    ]
+    matrices = [np.array(base, dtype=np.complex128) * scale
+                for scale in (1e-200, 1e-100, 1.0, 1e100, 1e200)
+                for base in bases]
+    matrices.extend([
+        np.diag([complex(1e-200, 2e-200), complex(1e200, -0.5e200)]),
+        np.array([[0, complex(1e-200, 2e-200)],
+                  [complex(1e200, -0.5e200), 0]]),
+        np.diag([2e200+1e200j, 3e200-1e200j, 2e-200+1e-200j, 3e-200-1e-200j]),
+        np.diag([2e-200+1e-200j, 3e-200-1e-200j, 2e200+1e200j, 3e200-1e200j]),
+        np.array([[complex(1e-200, 2e-200)]]),
+        np.array([[complex(1e200, -0.5e200)]]),
+    ])
+    emit_scalar("count", len(matrices))
+    for index, a in enumerate(matrices):
+        n = a.shape[0]
+        x = np.arange(1, n+1, dtype=np.float64) + 0.25j
+        b = a @ x
+        emit_scalar(f"n_{index}", n)
+        emit_vec(f"a_{index}", np.stack((a.real, a.imag), axis=-1))
+        emit_vec(f"b_{index}", np.stack((b.real, b.imag), axis=-1))
+        solution = np.linalg.solve(a, b)
+        inverse = np.linalg.inv(a)
+        emit_vec(f"solve_{index}", np.stack((solution.real, solution.imag), axis=-1))
+        emit_vec(f"inverse_{index}", np.stack((inverse.real, inverse.imag), axis=-1))
+        with np.errstate(all="ignore"):
+            determinant = np.linalg.det(a)
+        emit_vec(f"det_{index}", np.array([determinant.real, determinant.imag]))
+    for index, scale in enumerate((1e-200, 1.0, 1e200)):
+        singular = np.array([[1+1j, 0], [2-1j, 0]]) * scale
+        for name, operation in (("solve", lambda: np.linalg.solve(singular, np.ones(2))),
+                                ("inv", lambda: np.linalg.inv(singular))):
+            try:
+                operation()
+            except np.linalg.LinAlgError:
+                emit_scalar(f"singular_{name}_{index}", 1)
+            else:
+                emit_scalar(f"singular_{name}_{index}", 0)
+        determinant = np.linalg.det(singular)
+        emit_vec(f"singular_det_{index}", np.array([determinant.real, determinant.imag]))
 elif case == "mixed_scale_general_solve":
     for n in (3, 17, 512):
         diagonal = np.ones(n)
@@ -467,6 +514,121 @@ fn conformance_mixed_scale_general_solve() {
                 1e-12,
                 0.0,
             );
+        }
+    }
+}
+
+#[test]
+fn conformance_scaled_complex_lu() {
+    let oracle = run_numpy_oracle("scaled_complex_lu");
+    let count = oracle["count"][0] as usize;
+    assert_eq!(count, 26, "all complex LU oracle fixtures must run");
+    for index in 0..count {
+        let n = oracle[&format!("n_{index}")][0] as usize;
+        let a = &oracle[&format!("a_{index}")];
+        let b = &oracle[&format!("b_{index}")];
+        let expected_solve = &oracle[&format!("solve_{index}")];
+        let expected_inverse = &oracle[&format!("inverse_{index}")];
+        assert!(expected_solve.iter().all(|value| value.is_finite()));
+        assert!(expected_inverse.iter().all(|value| value.is_finite()));
+        assert_vec_close(
+            &format!("complex scaled solve {index}"),
+            &complex_solve_nxn(a, b, n).expect("complex scaled solve"),
+            expected_solve,
+            2e-11,
+            0.0,
+        );
+        // Zero absolute tolerance is essential: tiny inverse components must not
+        // disappear merely because the other components are very large.
+        assert_vec_close(
+            &format!("complex scaled inverse {index}"),
+            &complex_inv_nxn(a, n).expect("complex scaled inverse"),
+            expected_inverse,
+            2e-11,
+            0.0,
+        );
+        let determinant = complex_det_nxn(a, n).expect("complex scaled determinant");
+        for (component, (actual, &expected)) in [determinant.0, determinant.1]
+            .into_iter()
+            .zip(&oracle[&format!("det_{index}")])
+            .enumerate()
+        {
+            if expected.is_infinite() {
+                assert_eq!(
+                    actual, expected,
+                    "determinant {index} component {component}"
+                );
+            } else {
+                assert_scalar_close(
+                    &format!("complex scaled determinant {index} component {component}"),
+                    actual,
+                    expected,
+                    2e-11,
+                    0.0,
+                );
+            }
+        }
+    }
+
+    for (index, scale) in [1e-200, 1.0, 1e200].into_iter().enumerate() {
+        assert_eq!(oracle[&format!("singular_solve_{index}")], [1.0]);
+        assert_eq!(oracle[&format!("singular_inv_{index}")], [1.0]);
+        assert_eq!(oracle[&format!("singular_det_{index}")], [0.0, 0.0]);
+        let a = [scale, scale, 0.0, 0.0, 2.0 * scale, -scale, 0.0, 0.0];
+        assert_eq!(
+            complex_solve_nxn(&a, &[1.0, 0.0, 1.0, 0.0], 2),
+            Err(LinAlgError::SolverSingularity)
+        );
+        assert_eq!(complex_inv_nxn(&a, 2), Err(LinAlgError::SolverSingularity));
+        assert_eq!(complex_det_nxn(&a, 2), Ok((0.0, 0.0)));
+    }
+}
+
+#[test]
+fn complex_lu_division_preserves_extreme_components() {
+    let tiny = f64::from_bits(1);
+    let huge = f64::MAX;
+    let cases = [
+        ([huge, huge], [huge, huge], [1.0, 0.0]),
+        ([huge, -huge], [huge, huge], [0.0, -1.0]),
+        ([tiny, tiny], [tiny, tiny], [1.0, 0.0]),
+        ([huge, tiny], [1.0, 0.0], [huge, tiny]),
+        ([huge, tiny], [0.0, 1.0], [tiny, -huge]),
+        ([0.0, huge], [2.0, tiny], [huge * tiny / 4.0, huge / 2.0]),
+        ([1.0, 0.0], [huge, huge], [0.5 / huge, -0.5 / huge]),
+        ([1e200, 1e200], [1e-200, 1e-200], [f64::INFINITY, 0.0]),
+        ([1e-200, 1e-200], [1e200, 1e200], [0.0, 0.0]),
+    ];
+    for (b, a, expected) in cases {
+        let actual = complex_solve_nxn(&a, &b, 1).expect("finite scalar complex system");
+        assert_eq!(actual, expected, "({b:?}) / ({a:?})");
+    }
+    assert_eq!(
+        complex_solve_nxn(&[0.0, -0.0], &[1.0, 0.0], 1),
+        Err(LinAlgError::SolverSingularity)
+    );
+}
+
+#[test]
+fn complex_lu_preserves_non_finite_input_rejection() {
+    for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for a in [[non_finite, 0.0], [0.0, non_finite]] {
+            assert!(matches!(
+                complex_solve_nxn(&a, &[1.0, 0.0], 1),
+                Err(LinAlgError::NormDetRankPolicyViolation(_))
+            ));
+            assert!(matches!(
+                complex_inv_nxn(&a, 1),
+                Err(LinAlgError::NormDetRankPolicyViolation(_))
+            ));
+            assert!(matches!(
+                complex_det_nxn(&a, 1),
+                Err(LinAlgError::NormDetRankPolicyViolation(_))
+            ));
+            assert!(matches!(
+                complex_solve_nxn(&[1.0, 0.0], &a, 1),
+                Err(LinAlgError::NormDetRankPolicyViolation(_))
+            ));
         }
     }
 }

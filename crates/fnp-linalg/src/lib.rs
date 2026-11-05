@@ -11863,11 +11863,133 @@ fn cabs2(re: f64, im: f64) -> f64 {
     re * re + im * im
 }
 
+/// A real value with a separate binary exponent. Complex division and determinant
+/// accumulation need products outside the f64 exponent range even when the final
+/// answer is representable. Each component keeps its own exponent so a tiny
+/// imaginary part is not discarded while scaling a large real part.
+#[derive(Clone, Copy)]
+struct ScaledReal {
+    significand: f64,
+    exponent: i64,
+}
+
+impl ScaledReal {
+    fn new(value: f64) -> Self {
+        if value == 0.0 || !value.is_finite() {
+            return Self {
+                significand: value,
+                exponent: 0,
+            };
+        }
+        let bits = value.to_bits();
+        let mut fraction = bits & ((1_u64 << 52) - 1);
+        let biased_exponent = ((bits >> 52) & 0x7ff) as i64;
+        let exponent = if biased_exponent == 0 {
+            let shift = fraction.leading_zeros() - 11;
+            fraction = (fraction << shift) & ((1_u64 << 52) - 1);
+            -1022 - i64::from(shift)
+        } else {
+            biased_exponent - 1023
+        };
+        Self {
+            significand: f64::from_bits((bits & (1_u64 << 63)) | (1023_u64 << 52) | fraction),
+            exponent,
+        }
+    }
+
+    fn multiply(self, rhs: Self) -> Self {
+        let mut result = Self::new(self.significand * rhs.significand);
+        result.exponent += self.exponent + rhs.exponent;
+        result
+    }
+
+    fn sum(self, rhs: Self) -> Self {
+        if self.significand == 0.0 && rhs.significand == 0.0 {
+            return Self::new(self.significand + rhs.significand);
+        }
+        if self.significand == 0.0 {
+            return rhs;
+        }
+        if rhs.significand == 0.0 {
+            return self;
+        }
+        let exponent = self.exponent.max(rhs.exponent);
+        let lhs = Self {
+            exponent: self.exponent - exponent,
+            ..self
+        }
+        .value();
+        let rhs = Self {
+            exponent: rhs.exponent - exponent,
+            ..rhs
+        }
+        .value();
+        let mut result = Self::new(lhs + rhs);
+        result.exponent += exponent;
+        result
+    }
+
+    fn negated(self) -> Self {
+        Self {
+            significand: -self.significand,
+            ..self
+        }
+    }
+
+    fn divide(self, rhs: Self) -> f64 {
+        let mut quotient = Self::new(self.significand / rhs.significand);
+        quotient.exponent += self.exponent - rhs.exponent;
+        quotient.value()
+    }
+
+    fn value(self) -> f64 {
+        if self.significand == 0.0 || !self.significand.is_finite() {
+            return self.significand;
+        }
+        let bits = self.significand.to_bits();
+        let sign = bits & (1_u64 << 63);
+        let fraction = bits & ((1_u64 << 52) - 1);
+        if self.exponent > 1023 {
+            return f64::INFINITY.copysign(self.significand);
+        }
+        if self.exponent >= -1022 {
+            return f64::from_bits(sign | (((self.exponent + 1023) as u64) << 52) | fraction);
+        }
+        if self.exponent < -1075 {
+            return 0.0_f64.copysign(self.significand);
+        }
+        // Round only once when materializing a subnormal. A separately computed
+        // power of two can underflow before it is multiplied by the significand.
+        let shift = (-1022 - self.exponent) as u32;
+        let significand = (1_u64 << 52) | fraction;
+        let mut rounded = significand >> shift;
+        let remainder = significand & ((1_u64 << shift) - 1);
+        let halfway = 1_u64 << (shift - 1);
+        if remainder > halfway || (remainder == halfway && rounded & 1 != 0) {
+            rounded += 1;
+        }
+        f64::from_bits(sign | rounded)
+    }
+}
+
+fn complex_norm_squared_scaled(re: f64, im: f64) -> ScaledReal {
+    let re = ScaledReal::new(re);
+    let im = ScaledReal::new(im);
+    re.multiply(re).sum(im.multiply(im))
+}
+
 /// Complex division: (a+bi)/(c+di)
 #[inline]
 fn cdiv(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
-    let denom = cabs2(br, bi);
-    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+    let ar = ScaledReal::new(ar);
+    let ai = ScaledReal::new(ai);
+    let br = ScaledReal::new(br);
+    let bi = ScaledReal::new(bi);
+    let denom = br.multiply(br).sum(bi.multiply(bi));
+    (
+        ar.multiply(br).sum(ai.multiply(bi)).divide(denom),
+        ai.multiply(br).sum(ar.multiply(bi).negated()).divide(denom),
+    )
 }
 
 /// LU decomposition with partial pivoting for complex matrices.
@@ -11890,32 +12012,32 @@ fn complex_lu_decompose(
         }
     }
 
-    let matrix_max_abs = a
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| cabs2(c[0], c[1]).sqrt())
-        .fold(0.0_f64, f64::max);
-    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-
     let mut lu = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     let mut sign_re = 1.0_f64;
     let mut sign_im = 0.0_f64;
 
     for k in 0..n {
-        // partial-pivot: find row with max |entry| in column k
-        let mut max_abs = cabs2(lu[2 * (k * n + k)], lu[2 * (k * n + k) + 1]).sqrt();
+        // Compare squared magnitudes without materializing their exponents: even
+        // finite complex entries can have a norm above f64::MAX or below its
+        // smallest subnormal. Only an exactly zero pivot is singular.
+        let mut max_norm =
+            complex_norm_squared_scaled(lu[2 * (k * n + k)], lu[2 * (k * n + k) + 1]);
         let mut max_row = k;
         for i in (k + 1)..n {
-            let abs_val = cabs2(lu[2 * (i * n + k)], lu[2 * (i * n + k) + 1]).sqrt();
-            if abs_val > max_abs {
-                max_abs = abs_val;
+            let norm = complex_norm_squared_scaled(lu[2 * (i * n + k)], lu[2 * (i * n + k) + 1]);
+            if norm.significand > 0.0
+                && (max_norm.significand == 0.0
+                    || norm.exponent > max_norm.exponent
+                    || (norm.exponent == max_norm.exponent
+                        && norm.significand > max_norm.significand))
+            {
+                max_norm = norm;
                 max_row = i;
             }
         }
 
-        if max_abs <= singularity_threshold {
+        if max_norm.significand == 0.0 {
             return Err(LinAlgError::SolverSingularity);
         }
 
@@ -12032,16 +12154,17 @@ pub fn complex_det_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
 
     match complex_lu_decompose(a, n) {
         Ok((lu, _, sign_re, sign_im)) => {
-            let mut dr = sign_re;
-            let mut di = sign_im;
+            let mut dr = ScaledReal::new(sign_re);
+            let mut di = ScaledReal::new(sign_im);
             for i in 0..n {
-                let ur = lu[2 * (i * n + i)];
-                let ui = lu[2 * (i * n + i) + 1];
-                let (nr, ni) = cmul(dr, di, ur, ui);
+                let ur = ScaledReal::new(lu[2 * (i * n + i)]);
+                let ui = ScaledReal::new(lu[2 * (i * n + i) + 1]);
+                let nr = dr.multiply(ur).sum(di.multiply(ui).negated());
+                let ni = dr.multiply(ui).sum(di.multiply(ur));
                 dr = nr;
                 di = ni;
             }
-            Ok((dr, di))
+            Ok((dr.value(), di.value()))
         }
         Err(LinAlgError::SolverSingularity) => Ok((0.0, 0.0)),
         Err(e) => Err(e),

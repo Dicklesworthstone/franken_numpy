@@ -18004,7 +18004,7 @@ impl UFuncArray {
             DType::F16 => self
                 .values
                 .iter()
-                .map(|&v| f64::from(fnp_dtype::f16::from_f64(v)))
+                .map(|&v| fnp_dtype::f16_from_f64(v).to_f64())
                 .collect(),
             DType::F32 => self.values.iter().map(|&v| (v as f32) as f64).collect(),
             DType::F64 => self.values.clone(),

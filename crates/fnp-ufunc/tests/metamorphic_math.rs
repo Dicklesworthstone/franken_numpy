@@ -1543,6 +1543,37 @@ print(json.dumps(records))
 }
 
 #[test]
+fn float16_astype_rounds_directly_from_f64() {
+    let midpoint = 1.0 + 2.0_f64.powi(-11);
+    let tiny_midpoint = 2.0_f64.powi(-25);
+    let cases = [
+        (0.0, 0x0000),
+        (-0.0, 0x8000),
+        (midpoint, 0x3c00),
+        (f64::from_bits(midpoint.to_bits() + 1), 0x3c01),
+        (-f64::from_bits(midpoint.to_bits() + 1), 0xbc01),
+        (tiny_midpoint, 0x0000),
+        (f64::from_bits(tiny_midpoint.to_bits() + 1), 0x0001),
+        (-f64::from_bits(tiny_midpoint.to_bits() + 1), 0x8001),
+        (65519.0, 0x7bff),
+        (65520.0, 0x7c00),
+    ];
+    let input = UFuncArray::from_vec(cases.iter().map(|&(value, _)| value).collect());
+    let cast = input.astype(DType::F16);
+    assert_eq!(cast.dtype(), DType::F16);
+    let ArrayStorage::F16(values) = cast.to_storage().unwrap() else {
+        panic!("float16 cast must retain half-precision storage");
+    };
+    assert_eq!(
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        cases.iter().map(|&(_, bits)| bits).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn einsum_preserves_integer_precision_wrapping_and_boolean_reductions() {
     let signed = UFuncArray::from_storage(
         vec![2],
