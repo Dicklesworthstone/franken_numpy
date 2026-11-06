@@ -1840,3 +1840,345 @@ print(json.dumps(records))
         }
     }
 }
+
+// These are differential tests rather than algebraic identities: selecting a
+// reduction dtype changes rounding, integer wrapping, and the dtype of the
+// deviations used by variance. A result-only cast can satisfy the usual mean /
+// variance identities while still violating NumPy's accumulator contract.
+fn assert_statistical_dtype_numpy_parity(group: &str) {
+    use fnp_ufunc::UFuncError;
+    use serde_json::Value;
+    use std::process::Command;
+
+    let script = r#"
+import json, sys, warnings
+try:
+    import numpy as np
+except ImportError:
+    print('null')
+    sys.exit(0)
+
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+assert np.getbufsize() == 8192, 'the explicit dtype API models the default NumPy conversion buffer'
+group = sys.argv[1]
+dtypes = ['bool', 'int8', 'int16', 'int32', 'int64',
+          'uint8', 'uint16', 'uint32', 'uint64', 'float16', 'float32', 'float64']
+floating = ['float16', 'float32', 'float64']
+inputs, cases = [], []
+
+def encode(a):
+    a = np.asarray(a)
+    result = dict(dtype=str(a.dtype), shape=list(a.shape))
+    if a.dtype.kind == 'f':
+        result['bits'] = a.ravel().view('u' + str(a.dtype.itemsize)).tolist()
+    else:
+        result['values'] = a.ravel().tolist()
+    return result
+
+def register(label, a, accumulators, axes, keepdims=(False, True),
+             ddofs=(0,), ops=('mean', 'var', 'std'), raw_values=None):
+    index = len(inputs)
+    source = encode(a)
+    if raw_values is not None:
+        source['raw_values'] = raw_values
+    inputs.append(source)
+    for accumulator in accumulators:
+        for axis in axes:
+            for keep in keepdims:
+                for op in ops:
+                    for ddof in ((0,) if op == 'mean' else ddofs):
+                        row = dict(label=label, input=index, accumulator=accumulator,
+                                   axis=axis, keepdims=keep, op=op, ddof=ddof)
+                        try:
+                            kwargs = dict(axis=axis, keepdims=keep, dtype=accumulator)
+                            if op != 'mean':
+                                kwargs['ddof'] = ddof
+                            row['result'] = encode(getattr(np, op)(a, **kwargs))
+                        except (TypeError, ValueError) as error:
+                            row['error'] = type(error).__name__
+                        cases.append(row)
+
+if group == 'matrix':
+    for source in dtypes:
+        # Keep every float->integer input finite and in range. Nonfinite and
+        # out-of-range casts are separate, platform-dependent parity debt.
+        values = ([0.125, 1.875, 2.25, 3.625, 4.5, 5.75]
+                  if source in floating else [0, 1, 2, 3, 4, 5])
+        a = np.array(values, dtype=source).reshape(2, 3)
+        register(source, a, dtypes, [None, 0, 1, -1], keepdims=(False,), ddofs=(1,))
+
+elif group == 'precision':
+    register('half_input_precision',
+             np.array([1., 1.001, 1.002, -1.003, 2., 0.001, 1.5, -0.], dtype='float16').reshape(2, 4),
+             floating, [None, 0, 1])
+    register('single_input_cancellation',
+             np.array([2.**24, 1., -2.**24, 3.125, 1.00001, -2.3, 1.e-7, -0.], dtype='float32').reshape(2, 4),
+             ['float32', 'float64'], [None, 0, 1])
+    register('double_deviations_single_accumulator',
+             np.array([2.**24 + 1., 2.**24 - 1., 2.**24 + 3., 2.**24 - 3.], dtype='float64').reshape(2, 2),
+             ['float32', 'float64'], [None, 0, 1])
+    register('double_deviations_half_accumulator',
+             np.array([1., 1.0003, 1.0007, 1.0011, -0.75, 0.125, -0., 0.0001], dtype='float64').reshape(2, 4),
+             floating, [None, 0, 1])
+    for source in ['int64', 'uint64']:
+        register('exact_' + source,
+                 np.array([2**53+1, 2**53+3, 2**53+5, 2**53+7], dtype=source).reshape(2, 2),
+                 [source, 'float32', 'float64'], [None, 0, 1])
+    register('unsigned_high_bit',
+             np.array([2**63+3, 0, 1, 2], dtype='uint64'),
+             ['uint64', 'float32', 'float64'], [None], keepdims=(False,))
+    register('narrow_accumulator_wrap', np.array([100, 101, 102, 103], dtype='int16'),
+             ['int8', 'uint8'], [None], keepdims=(False,), ops=('mean', 'var'))
+    # Squaring integer deviations must retain their low bits even when the
+    # mathematical product is above f64's exact range. These wrapped variances
+    # stay positive, so std does not cross the invalid float->integer cast debt.
+    for label, values, source in [
+        ('signed_square_low_bit', [-1073741823, 1073741823], 'int32'),
+        ('signed_square_low_bits', [-100000003, 100000003], 'int32'),
+        ('unsigned_square_low_bit', [0, 2147483646], 'uint32'),
+    ]:
+        register(label, np.array(values, dtype=source), [source], [None, 0])
+
+    # UFuncArray::new accepts an f64 working buffer plus declared source dtype.
+    # The declared precision still applies before either statistical reduction.
+    for source, raw in [
+        ('float16', [1.0003, 1.0007, 2.0007, -0.12503]),
+        ('float32', [2.**24+1., 2.**24+3., 2.**24+5., 2.**24+7.]),
+        ('int16', [1.75, 2.25, 3.875, 4.125]),
+    ]:
+        a = np.array(raw, dtype=source).reshape(2, 2)
+        register('declared_' + source, a, ['float32', 'float64'], [None, 0, 1], raw_values=raw)
+
+elif group == 'order':
+    pattern = np.array([1., 0.001, -1., 2.**-12, 0.125, -0.5, 0.75], dtype='float64')
+    for length in [7, 8, 127, 128, 129, 8191, 8192, 8193]:
+        lane = np.resize(pattern, length)
+        for source in ['float32', 'float64']:
+            a = np.stack([lane, -lane * 0.5]).astype(source)
+            register('contiguous_' + source + '_' + str(length), a, floating,
+                     [None, 1], keepdims=(False,))
+    # Reducing axis=0 steps between rows instead of traversing a contiguous
+    # lane. NumPy keeps a left fold here, including beyond its buffer boundary.
+    for length in [129, 8193]:
+        lane = np.resize(pattern, length)
+        for source in ['float32', 'float64']:
+            a = np.column_stack([lane, -lane * 0.5, lane * 0.25]).astype(source)
+            register('strided_' + source + '_' + str(length), a, floating,
+                     [0, -2], keepdims=(True,))
+
+elif group == 'edges':
+    for source in ['bool', 'int8', 'float16', 'float32', 'float64']:
+        a = np.array(True if source == 'bool' else 1.125, dtype=source)
+        register('scalar_' + source, a, dtypes, [None, 0, -1, 1, -2])
+    for shape in [(0,), (0, 3), (2, 0), (0, 2, 3)]:
+        a = np.empty(shape, dtype='float64')
+        register('empty_' + str(shape), a, floating,
+                 [None, *range(len(shape)), -1], ddofs=(0, 1))
+    for values in [[2., 2., 2., 2., 2., 2.], [0., 1., 2., 3., 4., 5.]]:
+        a = np.array(values).reshape(2, 3)
+        register('degrees_of_freedom_' + str(values[0]), a, floating,
+                 [None, 0, 1], ddofs=(0, 1, 2, 3, 7), ops=('var', 'std'))
+    for values in [[-0., -0., -0.], [float('nan'), 1., 2.],
+                   [float('inf'), 1., 2.], [-float('inf'), 1., 2.],
+                   [float('inf'), -float('inf'), 1.]]:
+        for source in floating:
+            register('nonfinite_' + source + '_' + str(values[0]),
+                     np.array(values, dtype=source), floating, [None, 0])
+    register('invalid_axis', np.arange(6, dtype='float32').reshape(2, 3),
+             floating, [2, -3])
+else:
+    raise AssertionError('unrecognized case group: ' + group)
+
+print(json.dumps(dict(version=np.__version__, inputs=inputs, cases=cases), allow_nan=False))
+"#;
+
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python)
+        .args(["-c", script, group])
+        .output()
+        .expect("launch the NumPy statistical dtype oracle");
+    assert!(
+        output.status.success(),
+        "NumPy statistical dtype oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records: Value = serde_json::from_slice(&output.stdout).expect("statistical oracle JSON");
+    if records.is_null() {
+        assert_ne!(
+            std::env::var("FNP_REQUIRE_REAL_NUMPY_ORACLE").as_deref(),
+            Ok("1"),
+            "the required NumPy oracle is unavailable"
+        );
+        eprintln!("skipping statistical dtype oracle: NumPy is unavailable");
+        return;
+    }
+
+    fn shape(value: &Value) -> Vec<usize> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect()
+    }
+
+    fn storage(value: &Value) -> ArrayStorage {
+        let dtype = value["dtype"].as_str().unwrap();
+        if let Some(bits) = value["bits"].as_array() {
+            return match dtype {
+                "float16" => ArrayStorage::F16(
+                    bits.iter()
+                        .map(|v| fnp_dtype::f16::from_bits(v.as_u64().unwrap() as u16))
+                        .collect(),
+                ),
+                "float32" => ArrayStorage::F32(
+                    bits.iter()
+                        .map(|v| f32::from_bits(v.as_u64().unwrap() as u32))
+                        .collect(),
+                ),
+                "float64" => ArrayStorage::F64(
+                    bits.iter()
+                        .map(|v| f64::from_bits(v.as_u64().unwrap()))
+                        .collect(),
+                ),
+                _ => panic!("unexpected floating oracle dtype: {dtype}"),
+            };
+        }
+        let values = value["values"].as_array().unwrap();
+        macro_rules! signed {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_i64().unwrap() as $ty).collect())
+            };
+        }
+        macro_rules! unsigned {
+            ($variant:ident, $ty:ty) => {
+                ArrayStorage::$variant(values.iter().map(|v| v.as_u64().unwrap() as $ty).collect())
+            };
+        }
+        match dtype {
+            "bool" => ArrayStorage::Bool(values.iter().map(|v| v.as_bool().unwrap()).collect()),
+            "int8" => signed!(I8, i8),
+            "int16" => signed!(I16, i16),
+            "int32" => signed!(I32, i32),
+            "int64" => signed!(I64, i64),
+            "uint8" => unsigned!(U8, u8),
+            "uint16" => unsigned!(U16, u16),
+            "uint32" => unsigned!(U32, u32),
+            "uint64" => unsigned!(U64, u64),
+            _ => panic!("unexpected statistical oracle dtype: {dtype}"),
+        }
+    }
+
+    let inputs: Vec<UFuncArray> = records["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| {
+            if let Some(raw) = source["raw_values"].as_array() {
+                UFuncArray::new(
+                    shape(&source["shape"]),
+                    raw.iter().map(|v| v.as_f64().unwrap()).collect(),
+                    DType::parse(source["dtype"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap()
+            } else {
+                UFuncArray::from_storage(shape(&source["shape"]), storage(source)).unwrap()
+            }
+        })
+        .collect();
+    let cases = records["cases"].as_array().unwrap();
+    assert!(
+        cases.len() >= 100,
+        "the oracle matrix must contain its cases"
+    );
+    let mut successes = 0;
+    for case in cases {
+        let input = &inputs[case["input"].as_u64().unwrap() as usize];
+        let axis = case["axis"].as_i64().map(|v| v as isize);
+        let keepdims = case["keepdims"].as_bool().unwrap();
+        let ddof = case["ddof"].as_u64().unwrap() as usize;
+        let dtype = DType::parse(case["accumulator"].as_str().unwrap()).unwrap();
+        let actual = match case["op"].as_str().unwrap() {
+            "mean" => input.reduce_mean_with_dtype(axis, keepdims, dtype),
+            "var" => input.reduce_var_with_dtype(axis, keepdims, ddof, dtype),
+            "std" => input.reduce_std_with_dtype(axis, keepdims, ddof, dtype),
+            _ => unreachable!(),
+        };
+        if let Some(error) = case["error"].as_str() {
+            if error == "AxisError" {
+                assert!(
+                    matches!(actual, Err(UFuncError::AxisOutOfBounds { axis: bad_axis, ndim })
+                        if Some(bad_axis) == axis && ndim == input.shape().len()),
+                    "expected NumPy axis rejection: {case}; got {actual:?}"
+                );
+            } else {
+                assert!(actual.is_err(), "expected NumPy's rejection: {case}");
+            }
+            continue;
+        }
+        successes += 1;
+        let actual = actual.unwrap_or_else(|e| panic!("{case}: {e}"));
+        let expected = storage(&case["result"]);
+        assert_eq!(actual.shape(), shape(&case["result"]["shape"]), "{case}");
+        assert_eq!(actual.dtype(), expected.dtype(), "{case}");
+        let actual_storage = actual.to_storage().unwrap();
+        if matches!(
+            expected,
+            ArrayStorage::F16(_) | ArrayStorage::F32(_) | ArrayStorage::F64(_)
+        ) {
+            let expected_values = expected.to_f64_vec();
+            let actual_values = actual_storage.to_f64_vec();
+            assert_eq!(actual_values.len(), expected_values.len(), "{case}");
+            for (index, (&got, &want)) in actual_values.iter().zip(&expected_values).enumerate() {
+                // NumPy's NaN payload/sign is not part of the reduction value
+                // contract. Finite values, infinities and signed zero are exact.
+                if want.is_nan() {
+                    assert!(got.is_nan(), "element {index}: {case}; got {got:?}");
+                } else {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "element {index}: {case}; got {got:?}, expected {want:?}"
+                    );
+                }
+            }
+        } else {
+            // Comparing typed storage keeps every bit of i64/u64 results;
+            // comparing only the f64 working values would hide >2^53 loss.
+            assert_eq!(actual_storage, expected, "{case}");
+        }
+        for (&working, stored) in actual.values().iter().zip(actual_storage.to_f64_vec()) {
+            if !stored.is_nan() {
+                assert_eq!(
+                    working.to_bits(),
+                    stored.to_bits(),
+                    "stale working value: {case}"
+                );
+            }
+        }
+    }
+    assert!(
+        successes > 0,
+        "the oracle must exercise successful reductions"
+    );
+}
+
+#[test]
+fn statistical_explicit_dtype_matrix_matches_numpy() {
+    assert_statistical_dtype_numpy_parity("matrix");
+}
+
+#[test]
+fn statistical_explicit_dtype_precision_matches_numpy() {
+    assert_statistical_dtype_numpy_parity("precision");
+}
+
+#[test]
+fn statistical_explicit_dtype_reduction_order_matches_numpy() {
+    assert_statistical_dtype_numpy_parity("order");
+}
+
+#[test]
+fn statistical_explicit_dtype_edges_and_errors_match_numpy() {
+    assert_statistical_dtype_numpy_parity("edges");
+}

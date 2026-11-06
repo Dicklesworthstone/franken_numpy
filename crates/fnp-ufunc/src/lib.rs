@@ -9621,6 +9621,42 @@ impl UFuncArray {
         }
     }
 
+    /// Mean with an explicit accumulator and result dtype (`np.mean(dtype=)`).
+    ///
+    /// The sum casts each input to `dtype` before accumulation. Division by the
+    /// integer element count is evaluated in f64 and then cast back, as in
+    /// NumPy's true-divide with an integer count and an explicit output buffer.
+    /// In particular, an explicit float16 accumulator differs from the default
+    /// float16 mean, which uses float32 intermediates.
+    pub fn reduce_mean_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        // Statistical reductions validate the axis while counting elements.
+        // Unlike sum/prod, axis=0 and axis=-1 are invalid for a scalar input.
+        let count = self.statistical_reduction_count(axis)?;
+        self.reduce_sum_with_dtype(axis, keepdims, dtype)?
+            .divide_reduction_by_count(count)
+    }
+
+    fn statistical_reduction_count(&self, axis: Option<isize>) -> Result<usize, UFuncError> {
+        match axis {
+            Some(axis) => Ok(self.shape[normalize_axis(axis, self.shape.len())?]),
+            None => Ok(self.values.len()),
+        }
+    }
+
+    fn divide_reduction_by_count(self, count: usize) -> Result<Self, UFuncError> {
+        let values = self
+            .values
+            .into_iter()
+            .map(|value| value / count as f64)
+            .collect();
+        Self::from_values_with_dtype(self.shape, values, self.dtype)
+    }
+
     pub fn reduce_mean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
@@ -10594,6 +10630,92 @@ impl UFuncArray {
             dtype: self.dtype,
             integer_sidecar: None,
         }
+    }
+
+    /// Variance with an explicit accumulator and result dtype (`np.var(dtype=)`).
+    ///
+    /// `dtype` controls both reductions, but subtraction and squaring retain the
+    /// promotion of the original input and the computed mean. Casting the whole
+    /// input to the accumulator dtype first would lose information that NumPy
+    /// preserves when, for example, float64 inputs use a float32 accumulator.
+    pub fn reduce_var_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let count = self.statistical_reduction_count(axis)?;
+        let mean = self.reduce_mean_with_dtype(axis, true, dtype)?;
+        if self.dtype == DType::Bool && dtype == DType::Bool {
+            return Err(UFuncError::Msg(
+                "var: boolean subtraction is not supported".to_string(),
+            ));
+        }
+        // Normalize the f64 working buffer to the declared source precision,
+        // while keeping exact integer sidecars for mixed integer arithmetic.
+        let input = Self::from_storage(self.shape.clone(), self.to_storage()?)?;
+        let deviations = input.elementwise_binary(&mean, BinaryOp::Sub)?;
+        let squared = match deviations.synthesized_integer_sidecar("var")? {
+            Some(sidecar) => {
+                // Even an int32 deviation can have a square wider than f64's
+                // exact mantissa. Multiply exactly before narrowing modulo the
+                // deviation dtype, so its low bits survive integer wraparound.
+                let storage = match sidecar {
+                    IntegerSidecar::I64(values) => ArrayStorage::I64(
+                        values
+                            .into_iter()
+                            .map(|value| value.wrapping_mul(value))
+                            .collect(),
+                    ),
+                    IntegerSidecar::U64(values) => ArrayStorage::U64(
+                        values
+                            .into_iter()
+                            .map(|value| value.wrapping_mul(value))
+                            .collect(),
+                    ),
+                };
+                let storage = storage.cast_to(deviations.dtype).map_err(|err| {
+                    UFuncError::Msg(format!("var: squared deviation cast failed: {err}"))
+                })?;
+                Self::from_storage(deviations.shape, storage)?
+            }
+            None => deviations.elementwise_binary(&deviations, BinaryOp::Mul)?,
+        };
+        squared
+            .reduce_sum_with_dtype(axis, keepdims, dtype)?
+            .divide_reduction_by_count(count.saturating_sub(ddof))
+    }
+
+    /// Standard deviation with an explicit accumulator and result dtype.
+    ///
+    /// NumPy permits an integer/bool dtype when the result is a scalar, but its
+    /// in-place square root rejects those dtypes for an array-shaped result.
+    pub fn reduce_std_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let variance = self.reduce_var_with_dtype(axis, keepdims, ddof, dtype)?;
+        if (dtype.is_integer() || dtype == DType::Bool) && !variance.shape.is_empty() {
+            return Err(UFuncError::Msg(format!(
+                "std: cannot cast floating square root to {dtype:?} with same_kind casting"
+            )));
+        }
+        let values = variance
+            .values
+            .iter()
+            .map(|&value| match dtype {
+                DType::Bool | DType::I8 | DType::U8 | DType::F16 => {
+                    f16::from_f32(f16::from_f64(value).to_f32().sqrt()).to_f64()
+                }
+                DType::I16 | DType::U16 | DType::F32 => f64::from((value as f32).sqrt()),
+                _ => value.sqrt(),
+            })
+            .collect();
+        Self::from_values_with_dtype(variance.shape, values, dtype)
     }
 
     /// Compute population variance along `axis` (ddof=0 by default, matching `numpy.var`).
