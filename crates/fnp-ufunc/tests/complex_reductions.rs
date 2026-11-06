@@ -46,6 +46,11 @@ fn reduce(
         ("mean", Some(dtype)) => array.reduce_mean_with_dtype(axis, keepdims, dtype),
         ("var", Some(dtype)) => array.reduce_var_with_dtype(axis, keepdims, ddof, dtype),
         ("std", Some(dtype)) => array.reduce_std_with_dtype(axis, keepdims, ddof, dtype),
+        ("nansum", Some(dtype)) => array.nansum_with_dtype(axis, keepdims, dtype),
+        ("nanprod", Some(dtype)) => array.nanprod_with_dtype(axis, keepdims, dtype),
+        ("nanmean", Some(dtype)) => array.nanmean_with_dtype(axis, keepdims, dtype),
+        ("nanvar", Some(dtype)) => array.nanvar_with_dtype(axis, keepdims, ddof, dtype),
+        ("nanstd", Some(dtype)) => array.nanstd_with_dtype(axis, keepdims, ddof, dtype),
         _ => unreachable!("test reduction operation"),
     }
 }
@@ -480,6 +485,332 @@ fn complex_signed_zeros_and_nonfinite_values_match_numpy() {
                 ] {
                     batch.push(input, &a, operation, dtype, None, false, 0);
                 }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_default_f64_preserves_mask_positions_in_contiguous_reductions() {
+    let cancellation = vec![1e16, 1.0, 1.0, f64::NAN, 1.0, 1.0, 1.0, -1e16];
+    let a = UFuncArray::new(vec![8], cancellation.clone(), DType::F64).unwrap();
+    assert_eq!(a.nansum(None, false).unwrap().values(), &[2.0]);
+    assert_eq!(a.nanmean(None, false).unwrap().values(), &[2.0 / 7.0]);
+    let mut batch = OracleBatch::default();
+    for values in [
+        cancellation,
+        vec![
+            0.057571064743431044,
+            12.915675752486784,
+            0.03249502120569186,
+            f64::NAN,
+            -645.4586539400414,
+            2029.5216975049639,
+            0.016698446653827605,
+            -0.9616396122752112,
+            -2116.1740398670127,
+        ],
+    ] {
+        let a = UFuncArray::new(vec![values.len()], values, DType::F64).unwrap();
+        let input = batch.add_input(&a);
+        for operation in ["nansum", "nanmean", "nanvar", "nanstd"] {
+            for keepdims in [false, true] {
+                for ddof in [0, 2] {
+                    batch.push(input, &a, operation, None, None, keepdims, ddof);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_dtype_preserves_source_precision_masks_and_exact_integers() {
+    let a = UFuncArray::new(vec![3], vec![1024.5, f64::NAN, 1025.5], DType::F64).unwrap();
+    // The half accumulator rounds the mean, but deviations stay in float64.
+    // Casting the input to half before subtracting would yield variance 1.
+    assert_eq!(
+        a.nanvar_with_dtype(None, false, 0, DType::F16)
+            .unwrap()
+            .values(),
+        &[0.25]
+    );
+    let a = UFuncArray::new(vec![3], vec![500.0, f64::NAN, -500.0], DType::F16).unwrap();
+    // Conversely, a wide accumulator cannot prevent the source half-precision
+    // squared-deviation buffer from overflowing.
+    assert_eq!(
+        a.nanvar_with_dtype(None, false, 0, DType::F64)
+            .unwrap()
+            .values(),
+        &[f64::INFINITY]
+    );
+    let a = complex_array(
+        &[4],
+        &[(1.0, 2.0), (f64::NAN, 100.0), (50.0, f64::NAN), (3.0, 4.0)],
+        DType::Complex128,
+    );
+    assert_eq!(
+        a.nansum_with_dtype(None, false, DType::F64)
+            .unwrap()
+            .values(),
+        &[4.0]
+    );
+    assert_eq!(
+        a.nanprod_with_dtype(None, false, DType::F64)
+            .unwrap()
+            .values(),
+        &[3.0]
+    );
+    assert_eq!(
+        a.nanvar_with_dtype(None, false, 0, DType::F64)
+            .unwrap()
+            .values(),
+        &[11.0]
+    );
+    let bad = a
+        .nanvar_with_dtype(None, true, 2, DType::Complex64)
+        .unwrap();
+    assert_eq!(bad.shape(), &[1, 2]);
+    assert!(bad.values()[0].is_nan());
+    assert_eq!(bad.values()[1].to_bits(), 0.0_f64.to_bits());
+    let bad_std = a
+        .nanstd_with_dtype(None, false, 2, DType::Complex64)
+        .unwrap();
+    assert!(bad_std.values().iter().all(|value| value.is_nan()));
+
+    let large = (1_u64 << 53) + 1;
+    let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 3])).unwrap();
+    assert_eq!(
+        a.nansum_with_dtype(None, false, DType::U64)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![large + 3])
+    );
+    assert_eq!(
+        a.nanprod_with_dtype(None, false, DType::U64)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![large * 3])
+    );
+}
+
+#[test]
+fn nan_dtype_rejects_invalid_accumulators_and_complex_storage() {
+    for source in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let a = if source.is_complex() {
+            complex_array(&[1], &[(1.0, 2.0)], source)
+        } else {
+            UFuncArray::new(vec![1], vec![1.0], source).unwrap()
+        };
+        // The restriction applies to inexact sources even with no NaN values.
+        for dtype in [
+            DType::Bool,
+            DType::I64,
+            DType::U8,
+            DType::Str,
+            DType::Structured,
+        ] {
+            for operation in ["nanmean", "nanvar", "nanstd"] {
+                assert!(reduce(&a, operation, Some(dtype), None, false, 0).is_err());
+            }
+        }
+    }
+    for a in [
+        UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![1], vec![1.0], DType::Str).unwrap(),
+    ] {
+        for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+            assert!(reduce(&a, operation, Some(DType::F64), None, false, 0).is_err());
+        }
+    }
+}
+
+#[test]
+fn nan_dtype_real_complex_integer_axes_and_empty_results_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let a = if source.is_complex() {
+            complex_array(
+                &[2, 3],
+                &[
+                    (f64::NAN, 7.0),
+                    (2.0, f64::NAN),
+                    (f64::NAN, f64::NAN),
+                    (1.001, 2.003),
+                    (3.0, -0.5),
+                    (-2.0, 1.25),
+                ],
+                source,
+            )
+        } else {
+            UFuncArray::new(
+                vec![2, 3],
+                vec![f64::NAN, f64::NAN, f64::NAN, 1.001, 3.0, -2.0],
+                source,
+            )
+            .unwrap()
+        };
+        let input = batch.add_input(&a);
+        for dtype in [
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+            DType::I8,
+            DType::Bool,
+        ] {
+            for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                for (axis, keepdims, ddof) in
+                    [(None, false, 0), (Some(0), true, 1), (Some(-1), false, 7)]
+                {
+                    batch.push(input, &a, operation, Some(dtype), axis, keepdims, ddof);
+                }
+            }
+        }
+    }
+    for source in [DType::F32, DType::Complex128] {
+        for shape in [vec![], vec![2, 0, 3], vec![0, 2]] {
+            let count = shape.iter().product();
+            let a = if source.is_complex() {
+                complex_array(&shape, &vec![(f64::NAN, 1.0); count], source)
+            } else {
+                UFuncArray::new(shape, vec![f64::NAN; count], source).unwrap()
+            };
+            let input = batch.add_input(&a);
+            for dtype in [DType::F16, DType::F64, DType::Complex128] {
+                for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    for (axis, keepdims, ddof) in [
+                        (None, true, 0),
+                        (Some(0), false, 0),
+                        (Some(-1), true, 1),
+                        (Some(2), false, 0),
+                    ] {
+                        batch.push(input, &a, operation, Some(dtype), axis, keepdims, ddof);
+                    }
+                }
+            }
+        }
+    }
+    for storage in [
+        ArrayStorage::Bool(vec![true, false, true, false, true, false]),
+        ArrayStorage::I8(vec![-127, 126, 4, -3, 2, 5]),
+        ArrayStorage::I64(vec![(1_i64 << 53) + 1, -2, 3, 5, -7, 11]),
+        ArrayStorage::U64(vec![(1_u64 << 53) + 1, 2, 3, 5, 7, 11]),
+    ] {
+        let a = UFuncArray::from_storage(vec![2, 3], storage).unwrap();
+        let input = batch.add_input(&a);
+        for dtype in [
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+            DType::I8,
+            DType::U64,
+            DType::Bool,
+        ] {
+            for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                for (axis, keepdims) in [(None, false), (Some(0), false), (Some(-1), true)] {
+                    batch.push(input, &a, operation, Some(dtype), axis, keepdims, 0);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_dtype_conversion_buffers_and_large_valid_counts_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let large = match source {
+            DType::F16 => 1e3,
+            DType::F32 | DType::Complex64 => 1e8,
+            _ => 1e16,
+        };
+        let targets = if matches!(source, DType::F64 | DType::Complex128) {
+            [DType::F32, DType::Complex64]
+        } else {
+            [DType::F64, DType::Complex128]
+        };
+        for len in [129, 8193] {
+            let pattern = [
+                (large, -large),
+                (f64::NAN, 7.0),
+                (1.001, 2.003),
+                (-large, large),
+                (0.25, -0.125),
+                (3.0, 1.0),
+            ];
+            let values = (0..2 * len)
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            for (shape, axis) in [([2, len], 1), ([len, 2], 0)] {
+                let a = if source.is_complex() {
+                    complex_array(&shape, &values, source)
+                } else {
+                    UFuncArray::new(
+                        shape.to_vec(),
+                        values.iter().map(|pair| pair.0).collect(),
+                        source,
+                    )
+                    .unwrap()
+                };
+                let input = batch.add_input(&a);
+                for dtype in targets {
+                    for operation in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                        batch.push(input, &a, operation, Some(dtype), Some(axis), false, 0);
+                    }
+                }
+            }
+        }
+    }
+    // A valid-element count above float16's finite range must remain integer,
+    // while the half sums and squared deviations are still representable.
+    let a = UFuncArray::new(
+        vec![70_003],
+        (0..70_003)
+            .map(|index| {
+                if index % 101 == 0 {
+                    f64::NAN
+                } else if index % 2 == 0 {
+                    0.25
+                } else {
+                    -0.25
+                }
+            })
+            .collect(),
+        DType::F16,
+    )
+    .unwrap();
+    let input = batch.add_input(&a);
+    for dtype in [DType::F16, DType::F64, DType::Complex64] {
+        for operation in ["nanmean", "nanvar", "nanstd"] {
+            for ddof in [0, 3] {
+                batch.push(input, &a, operation, Some(dtype), None, false, ddof);
             }
         }
     }

@@ -17296,7 +17296,12 @@ impl UFuncArray {
         ddof: usize,
         dtype: Option<DType>,
     ) -> Result<Self, UFuncError> {
-        let mut variance = self.reduce_complex_var(axis, keepdims, ddof, dtype)?;
+        self.reduce_complex_var(axis, keepdims, ddof, dtype)?
+            .sqrt_statistical_reduction()
+    }
+
+    fn sqrt_statistical_reduction(self) -> Result<Self, UFuncError> {
+        let mut variance = self;
         if variance.dtype.is_complex() {
             // Squared deviations produce a nonnegative real part and a zero
             // imaginary part; invalid arithmetic may instead produce NaNs.
@@ -28973,6 +28978,29 @@ impl UFuncArray {
         })
     }
 
+    /// Sum ignoring NaNs with an explicit accumulator and result dtype.
+    ///
+    /// Replace NaNs before converting to the accumulator. For complex inputs,
+    /// either NaN component masks the whole element, including when the target
+    /// dtype is real. Integer inputs retain their exact typed storage.
+    pub fn nansum_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(0.0)?
+                .reduce_sum_with_dtype(axis, keepdims, dtype);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_sum_with_dtype(axis, keepdims, dtype);
+        }
+        self.nan_filtered_fill(0.0)
+            .reduce_sum_with_dtype(axis, keepdims, dtype)
+    }
+
     /// `np.nansum` — sum ignoring NaN values.
     pub fn nansum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
@@ -28982,6 +29010,10 @@ impl UFuncArray {
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_sum(axis, keepdims);
+        }
+        if self.dtype == DType::F64 && axis.is_none() {
+            // Keep masked positions in NumPy's contiguous pairwise tree.
+            return self.nansum_with_dtype(axis, keepdims, self.dtype);
         }
         if matches!(self.dtype, DType::F16 | DType::F32) {
             return self.nan_filtered_fill(0.0).reduce_sum(axis, keepdims);
@@ -29033,6 +29065,26 @@ impl UFuncArray {
         }
     }
 
+    /// Mean ignoring NaNs with an explicit accumulator and result dtype.
+    ///
+    /// Inexact inputs require an inexact accumulator, even when no NaNs are
+    /// present. The valid-element count remains an integer during division.
+    pub fn nanmean_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_mean_with_dtype(axis, keepdims, dtype);
+        }
+        self.validate_nan_statistical_dtype(dtype, "nanmean")?;
+        let counts = self.nan_reduction_counts(axis)?;
+        Ok(self
+            .nansum_with_dtype(axis, keepdims, dtype)?
+            .divide_nan_reduction_by_counts(&counts, None))
+    }
+
     /// `np.nanmean` — mean ignoring NaN values.
     pub fn nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
@@ -29040,6 +29092,9 @@ impl UFuncArray {
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_mean(axis, keepdims);
+        }
+        if self.dtype == DType::F64 && axis.is_none() {
+            return self.nanmean_with_dtype(axis, keepdims, self.dtype);
         }
         if matches!(self.dtype, DType::F16 | DType::F32) {
             return match axis {
@@ -29147,6 +29202,25 @@ impl UFuncArray {
         }
     }
 
+    /// Variance ignoring NaNs with an explicit accumulator and result dtype.
+    ///
+    /// NumPy stores deviations and their squares back into the source dtype
+    /// for NaN-aware variance. A wider accumulator therefore widens the two
+    /// sums without widening those intervening elementwise operations.
+    pub fn nanvar_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_var_with_dtype(axis, keepdims, ddof, dtype);
+        }
+        self.validate_nan_statistical_dtype(dtype, "nanvar")?;
+        self.nanvar_inexact(axis, keepdims, ddof, Some(dtype))
+    }
+
     /// `np.nanvar` — variance ignoring NaN values (ddof=0).
     pub fn nanvar(
         &self,
@@ -29159,6 +29233,9 @@ impl UFuncArray {
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_var(axis, keepdims, ddof);
+        }
+        if self.dtype == DType::F64 && axis.is_none() {
+            return self.nanvar_inexact(axis, keepdims, ddof, None);
         }
         if matches!(self.dtype, DType::F16 | DType::F32) {
             return match axis {
@@ -29374,6 +29451,18 @@ impl UFuncArray {
                 })
             }
         }
+    }
+
+    /// Standard deviation ignoring NaNs with an explicit accumulator and result dtype.
+    pub fn nanstd_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.nanvar_with_dtype(axis, keepdims, ddof, dtype)?
+            .sqrt_statistical_reduction()
     }
 
     /// `np.nanstd` — standard deviation ignoring NaN values (ddof=0).
@@ -29882,6 +29971,27 @@ impl UFuncArray {
         }
     }
 
+    /// Product ignoring NaNs with an explicit accumulator and result dtype.
+    /// NaNs are replaced by one before casting, preserving integer wraparound
+    /// and Boolean AND accumulation in the requested dtype.
+    pub fn nanprod_with_dtype(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(1.0)?
+                .reduce_prod_with_dtype(axis, keepdims, dtype);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_prod_with_dtype(axis, keepdims, dtype);
+        }
+        self.nan_filtered_fill(1.0)
+            .reduce_prod_with_dtype(axis, keepdims, dtype)
+    }
+
     /// `np.nanprod` — product of elements ignoring NaN values (treated as 1).
     pub fn nanprod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
@@ -29938,26 +30048,51 @@ impl UFuncArray {
         Self::new(self.shape.clone(), values, self.dtype)
     }
 
-    fn complex_nan_reduction_counts(&self, axis: Option<isize>) -> Result<Vec<usize>, UFuncError> {
+    fn validate_nan_statistical_dtype(
+        &self,
+        dtype: DType,
+        operation: &str,
+    ) -> Result<(), UFuncError> {
+        if !(self.dtype.is_float() || self.dtype.is_complex()) {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: unsupported input dtype {:?}",
+                self.dtype
+            )));
+        }
+        if !(dtype.is_float() || dtype.is_complex()) {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: if the input is inexact, the accumulator dtype must be inexact"
+            )));
+        }
+        Ok(())
+    }
+
+    fn nan_reduction_counts(&self, axis: Option<isize>) -> Result<Vec<usize>, UFuncError> {
         let shape = self.complex_logical_shape("NaN reduction")?;
         let axis = if shape.is_empty() && matches!(axis, Some(0 | -1)) {
             None
         } else {
             axis
         };
-        let valid = self
-            .values
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|parts| {
-                if parts[0].is_nan() || parts[1].is_nan() {
-                    0.0
-                } else {
-                    1.0
-                }
-            })
-            .collect();
+        let valid = if self.dtype.is_complex() {
+            self.values
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|parts| {
+                    if parts[0].is_nan() || parts[1].is_nan() {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect()
+        } else {
+            self.values
+                .iter()
+                .map(|value| if value.is_nan() { 0.0 } else { 1.0 })
+                .collect()
+        };
         let counts = Self::new(shape, valid, DType::Bool)?.reduce_sum(axis, false)?;
         Ok(counts
             .values
@@ -29966,17 +30101,41 @@ impl UFuncArray {
             .collect())
     }
 
-    fn complex_nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
-        let counts = self.complex_nan_reduction_counts(axis)?;
-        let mut result = self
-            .complex_nan_filtered_fill(0.0)?
-            .reduce_sum(axis, keepdims)?;
-        for (parts, count) in result.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
-            let value =
-                Self::divide_complex_value_by_count((parts[0], parts[1]), count, self.dtype);
-            *parts = [value.0, value.1];
+    fn divide_nan_reduction_by_counts(mut self, counts: &[usize], ddof: Option<usize>) -> Self {
+        if self.dtype.is_complex() {
+            for (parts, &count) in self.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
+                if ddof.is_some_and(|ddof| count <= ddof) {
+                    // nanvar explicitly copies a real NaN into bad slices,
+                    // which sets the imaginary component to positive zero.
+                    *parts = [f64::NAN, 0.0];
+                } else {
+                    let value = Self::divide_complex_value_by_count(
+                        (parts[0], parts[1]),
+                        count.saturating_sub(ddof.unwrap_or(0)),
+                        self.dtype,
+                    );
+                    *parts = [value.0, value.1];
+                }
+            }
+        } else {
+            for (value, &count) in self.values.iter_mut().zip(counts) {
+                let divided = if ddof.is_some_and(|ddof| count <= ddof) {
+                    f64::NAN
+                } else {
+                    *value / count.saturating_sub(ddof.unwrap_or(0)) as f64
+                };
+                *value = match self.dtype {
+                    DType::F16 => fnp_dtype::f16_from_f64(divided).to_f64(),
+                    DType::F32 => f64::from(divided as f32),
+                    _ => divided,
+                };
+            }
         }
-        Ok(result)
+        self
+    }
+
+    fn complex_nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        self.nanmean_with_dtype(axis, keepdims, self.dtype)
     }
 
     fn complex_nanvar(
@@ -29985,39 +30144,50 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        self.nanvar_inexact(axis, keepdims, ddof, None)
+    }
+
+    fn nanvar_inexact(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+        dtype: Option<DType>,
+    ) -> Result<Self, UFuncError> {
         let shape = self.complex_logical_shape("nanvar")?;
         // NaN statistics count with sum(), so NumPy permits axis=0/-1 on a
-        // complex scalar even though its ordinary mean/var reject those axes.
+        // floating or complex scalar even though ordinary mean/var reject them.
         let axis = if shape.is_empty() && matches!(axis, Some(0 | -1)) {
             None
         } else {
             axis
         };
-        let counts = self.complex_nan_reduction_counts(axis)?;
-        let mean = self.complex_nanmean(axis, true)?;
+        let counts = self.nan_reduction_counts(axis)?;
+        let mean = self.nanmean_with_dtype(axis, true, dtype.unwrap_or(self.dtype))?;
+        let inputs = self.complex_reduction_values(self.dtype)?;
         let (axis_len, inner) = match axis {
-            Some(axis) if !self.values.is_empty() => {
+            Some(axis) if !inputs.is_empty() => {
                 let axis = normalize_axis(axis, shape.len())?;
                 (
                     shape[axis],
                     element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
                 )
             }
-            _ => (self.values.len() / 2, 1),
+            _ => (inputs.len(), 1),
         };
-        let dtype = if self.dtype == DType::Complex64 {
-            DType::F32
-        } else {
-            DType::F64
+        let component_dtype = match self.dtype {
+            DType::Complex64 => DType::F32,
+            DType::Complex128 => DType::F64,
+            dtype => dtype,
         };
+        let computation_dtype = promote(self.dtype, mean.dtype);
         // nanvar computes multiply(deviation, conjugate(deviation)), unlike
         // var's two separate real squares. NumPy's SIMD complex multiplication
         // rounds the imaginary product first and fuses the real product with
         // that sum on FMA-capable targets. Preserve this observable rounding
         // without enabling contraction for unrelated kernels.
         let fused_magnitude = Self::complex_multiply_uses_fma();
-        let squared = self
-            .complex_reduction_values(self.dtype)?
+        let squared = inputs
             .into_iter()
             .enumerate()
             .map(|(index, (re, im))| {
@@ -30032,35 +30202,50 @@ impl UFuncArray {
                     0
                 };
                 let average = mean.logical_complex_value(output);
-                if dtype == DType::F32 {
-                    let re = (re as f32) - (average.0 as f32);
-                    let im = (im as f32) - (average.1 as f32);
-                    f64::from(if fused_magnitude {
-                        re.mul_add(re, im * im)
-                    } else {
-                        re * re + im * im
-                    })
+                // Subtraction uses the input/mean promotion, then its `out`
+                // buffer casts back to the original source dtype. Squaring
+                // also happens in that source buffer, before either reduction
+                // casts to the requested accumulator dtype.
+                let (re, im) = if matches!(
+                    computation_dtype,
+                    DType::F16 | DType::F32 | DType::Complex64
+                ) {
+                    (
+                        f64::from((re as f32) - (average.0 as f32)),
+                        f64::from((im as f32) - (average.1 as f32)),
+                    )
                 } else {
-                    let re = re - average.0;
-                    let im = im - average.1;
-                    if fused_magnitude {
-                        re.mul_add(re, im * im)
-                    } else {
-                        re * re + im * im
+                    (re - average.0, im - average.1)
+                };
+                match self.dtype {
+                    DType::F16 => {
+                        let deviation = fnp_dtype::f16_from_f64(re).to_f32();
+                        f16::from_f32(deviation * deviation).to_f64()
                     }
+                    DType::F32 => f64::from((re as f32) * (re as f32)),
+                    DType::F64 => re * re,
+                    DType::Complex64 => {
+                        let (re, im) = (re as f32, im as f32);
+                        f64::from(if fused_magnitude {
+                            re.mul_add(re, im * im)
+                        } else {
+                            re * re + im * im
+                        })
+                    }
+                    DType::Complex128 => {
+                        if fused_magnitude {
+                            re.mul_add(re, im * im)
+                        } else {
+                            re * re + im * im
+                        }
+                    }
+                    _ => unreachable!("NaN-aware variance requires an inexact source dtype"),
                 }
             })
             .collect();
-        let mut result =
-            Self::new(shape, squared, dtype)?.reduce_sum_with_dtype(axis, keepdims, dtype)?;
-        for (value, count) in result.values.iter_mut().zip(counts) {
-            *value = if count <= ddof {
-                f64::NAN
-            } else {
-                round_narrow_float_or_nan(*value / (count - ddof) as f64, dtype)
-            };
-        }
-        Ok(result)
+        Ok(Self::new(shape, squared, component_dtype)?
+            .reduce_sum_with_dtype(axis, keepdims, dtype.unwrap_or(component_dtype))?
+            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
     }
 
     /// Replace NaN values with a specified fill value.
