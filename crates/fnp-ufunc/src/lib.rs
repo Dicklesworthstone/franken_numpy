@@ -9677,15 +9677,17 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_mean(axis, keepdims, self.dtype);
         }
+        if self.dtype == DType::F16 {
+            // The default half mean reads rounded half inputs through NumPy's
+            // f32 conversion buffers and rounds the final f32 mean back to half.
+            return Ok(self
+                .reduce_mean_with_dtype(axis, keepdims, DType::F32)?
+                .astype(DType::F16));
+        }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
                 let mean = match out_dtype {
-                    DType::F16 => {
-                        let n = self.values.len() as f32;
-                        let sum = reduce_sum_values_f32(&self.values) as f32;
-                        f16::from_f32(sum / n).to_f64()
-                    }
                     DType::F32 => {
                         let n = self.values.len() as f32;
                         let sum = reduce_sum_values_f32(&self.values) as f32;
@@ -9715,18 +9717,6 @@ impl UFuncArray {
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
                 match out_dtype {
-                    DType::F16 => {
-                        let axis_len = self.shape[axis] as f32;
-                        reduce_sum_axis_contiguous_f32(
-                            &self.values,
-                            &self.shape,
-                            axis,
-                            &mut out_values,
-                        );
-                        for v in &mut out_values {
-                            *v = f16::from_f32((*v as f32) / axis_len).to_f64();
-                        }
-                    }
                     DType::F32 => {
                         let axis_len = self.shape[axis] as f32;
                         reduce_sum_axis_contiguous_f32(
@@ -9765,9 +9755,15 @@ impl UFuncArray {
 
     /// Reduce sum over multiple axes simultaneously.
     ///
-    /// Mimics `np.sum(a, axis=(0, 2))`. Axes are validated for duplicates
-    /// and reduced from highest to lowest to avoid index-shifting issues.
+    /// Mimics `np.sum(a, axis=(0, 2))`. Floating and complex inputs use a
+    /// joint traversal so their accumulation order matches NumPy.
     pub fn reduce_sum_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_sum_prod_axes(axes, keepdims, false);
+        }
+        if matches!(self.dtype, DType::F32 | DType::F64) {
+            return self.reduce_real_sum_prod_axes(axes, keepdims, false);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             // An empty axis tuple reduces singleton lanes. It still applies
@@ -9817,6 +9813,12 @@ impl UFuncArray {
 
     /// Reduce prod over multiple axes simultaneously.
     pub fn reduce_prod_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_sum_prod_axes(axes, keepdims, true);
+        }
+        if matches!(self.dtype, DType::F32 | DType::F64) {
+            return self.reduce_real_sum_prod_axes(axes, keepdims, true);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             let out_dtype = promote_for_sum_reduction(self.dtype);
@@ -9897,55 +9899,36 @@ impl UFuncArray {
 
     /// Reduce mean over multiple axes simultaneously.
     pub fn reduce_mean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_mean_axes(axes, keepdims);
+        }
+        if matches!(self.dtype, DType::F32 | DType::F64) {
+            return self.reduce_real_mean_axes(axes, keepdims, false);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            // Convert the typed source (including exact wide-integer sidecars)
+            // before the joint floating accumulation used by NumPy's mean.
+            return self
+                .astype(DType::F64)
+                .reduce_real_mean_axes(axes, keepdims, true);
+        }
+        if self.dtype == DType::F16 {
+            let widened =
+                Self::from_storage_with_dtype(self.shape.clone(), self.to_storage()?, DType::F32)?;
+            return Ok(widened
+                .reduce_real_mean_axes(axes, keepdims, true)?
+                .astype(DType::F16));
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         let out_dtype = promote_for_mean_reduction(self.dtype);
         if axes.is_empty() {
-            let values = match out_dtype {
-                DType::F16 => self
-                    .values
-                    .iter()
-                    .map(|&value| f16::from_f32(0.0f32 + f16::from_f64(value).to_f32()).to_f64())
-                    .collect(),
-                DType::F32 => self
-                    .values
-                    .iter()
-                    .map(|&value| f64::from(0.0f32 + (value as f32)))
-                    .collect(),
-                _ => self.values.iter().map(|&value| 0.0 + value).collect(),
-            };
+            let values = self.values.iter().map(|&value| 0.0 + value).collect();
             return Ok(Self {
                 shape: self.shape.clone(),
                 values,
                 dtype: out_dtype,
                 integer_sidecar: None,
             });
-        }
-
-        if matches!(out_dtype, DType::F16 | DType::F32) {
-            let count = norm_axes.iter().try_fold(1usize, |count, &axis| {
-                count
-                    .checked_mul(self.shape[axis])
-                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
-            })?;
-            let f32_view = Self {
-                shape: self.shape.clone(),
-                values: self.values.clone(),
-                dtype: DType::F32,
-                integer_sidecar: None,
-            };
-            let mut sum_arr = f32_view.reduce_sum_axes(axes, keepdims)?;
-            let denom = count as f32;
-            if out_dtype == DType::F16 {
-                for v in &mut sum_arr.values {
-                    *v = f16::from_f32((*v as f32) / denom).to_f64();
-                }
-            } else {
-                for v in &mut sum_arr.values {
-                    *v = f64::from((*v as f32) / denom);
-                }
-            }
-            sum_arr.dtype = out_dtype;
-            return Ok(sum_arr);
         }
 
         let mut axes_iter = norm_axes.into_iter();
@@ -9969,12 +9952,30 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
-        let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
-        let count = norm_axes.iter().try_fold(1usize, |count, &axis| {
-            count
-                .checked_mul(self.shape[axis])
-                .ok_or(UFuncError::Shape(ShapeError::Overflow))
-        })?;
+        let logical_shape = if self.dtype.is_complex() {
+            self.complex_logical_shape("var")?
+        } else {
+            self.shape.clone()
+        };
+        let norm_axes = normalize_reduction_axes(axes, logical_shape.len())?;
+        // Variance validates its selected element count even when no output
+        // lanes remain. A selected zero makes the joint count exactly zero,
+        // regardless of the order in which the other dimensions are listed.
+        let count = if norm_axes.iter().any(|&axis| logical_shape[axis] == 0) {
+            0
+        } else {
+            norm_axes.iter().try_fold(1usize, |count, &axis| {
+                count
+                    .checked_mul(logical_shape[axis])
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
+            })?
+        };
+        if self.dtype.is_complex() {
+            return self.reduce_complex_var_axes(axes, keepdims, ddof);
+        }
+        if matches!(self.dtype, DType::F32 | DType::F64) {
+            return self.reduce_real_var_axes(axes, keepdims, ddof);
+        }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         if out_dtype == DType::F16 {
             let mut mean = self.reduce_sum_axes(axes, true)?;
@@ -16822,6 +16823,247 @@ impl UFuncArray {
         )
     }
 
+    fn reduce_real_tuple_values(
+        values: &[f64],
+        plan: &AxesReductionPlan,
+        dtype: DType,
+        product: bool,
+        buffered: bool,
+    ) -> Vec<f64> {
+        let mut result = vec![if product { 1.0 } else { 0.0 }; plan.output_count];
+        if product {
+            // A tuple product keeps one accumulator across all selected axes;
+            // independently reduced runs would reassociate its multiplication.
+            for (index, &value) in values.iter().enumerate() {
+                let slot = &mut result[plan.output_index(index)];
+                *slot = if dtype == DType::F32 {
+                    f64::from((*slot as f32) * (value as f32))
+                } else {
+                    *slot * value
+                };
+            }
+        } else {
+            for (run_index, run) in values.chunks(plan.contiguous_run_len).enumerate() {
+                let output = plan.output_index(run_index * plan.contiguous_run_len);
+                // Real reductions use NumPy's eight-lane / 128-leaf tree.
+                // A retained dimension separates runs, which add in C order.
+                let buffer_len = if buffered { 8192 } else { run.len() };
+                for buffer in run.chunks(buffer_len) {
+                    let partial = Self::reduce_float_lane_with_dtype(buffer, dtype, false, false);
+                    // Cast buffers resume the existing output accumulator;
+                    // summing their partials into a run total reassociates it.
+                    result[output] = if dtype == DType::F32 {
+                        f64::from((result[output] as f32) + (partial as f32))
+                    } else {
+                        result[output] + partial
+                    };
+                }
+            }
+        }
+        result
+    }
+
+    fn reduce_real_sum_prod_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let plan = AxesReductionPlan::new(&self.shape, axes, keepdims)?;
+        let values =
+            Self::reduce_real_tuple_values(&self.values, &plan, self.dtype, product, false);
+        Self::new(plan.output_shape, values, self.dtype)
+    }
+
+    fn reduce_real_mean_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        buffered: bool,
+    ) -> Result<Self, UFuncError> {
+        let plan = AxesReductionPlan::new(&self.shape, axes, keepdims)?;
+        let mut values =
+            Self::reduce_real_tuple_values(&self.values, &plan, self.dtype, false, buffered);
+        for value in &mut values {
+            let mean = *value / plan.reduction_count as f64;
+            *value = if self.dtype == DType::F32 {
+                f64::from(mean as f32)
+            } else {
+                mean
+            };
+        }
+        Self::new(plan.output_shape, values, self.dtype)
+    }
+
+    fn reduce_real_var_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        let plan = AxesReductionPlan::new(&self.shape, axes, keepdims)?;
+        let mut means =
+            Self::reduce_real_tuple_values(&self.values, &plan, self.dtype, false, false);
+        for mean in &mut means {
+            *mean /= plan.reduction_count as f64;
+            if self.dtype == DType::F32 {
+                *mean = f64::from(*mean as f32);
+            }
+        }
+        let squared: Vec<f64> = self
+            .values
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                let mean = means[plan.output_index(index)];
+                if self.dtype == DType::F32 {
+                    let deviation = (value as f32) - (mean as f32);
+                    f64::from(deviation * deviation)
+                } else {
+                    let deviation = value - mean;
+                    deviation * deviation
+                }
+            })
+            .collect();
+        let mut values = Self::reduce_real_tuple_values(&squared, &plan, self.dtype, false, false);
+        let denominator = plan.reduction_count.saturating_sub(ddof) as f64;
+        for value in &mut values {
+            let variance = *value / denominator;
+            *value = if self.dtype == DType::F32 {
+                f64::from(variance as f32)
+            } else {
+                variance
+            };
+        }
+        Self::new(plan.output_shape, values, self.dtype)
+    }
+
+    fn reduce_complex_tuple_values(
+        values: &[(f64, f64)],
+        plan: &AxesReductionPlan,
+        dtype: DType,
+        product: bool,
+    ) -> Result<Vec<(f64, f64)>, UFuncError> {
+        plan.output_count
+            .checked_mul(2)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let identity = if product { (1.0, 0.0) } else { (0.0, 0.0) };
+        let mut result = vec![identity; plan.output_count];
+        if product {
+            // Keep one accumulator per output across every reduced coordinate.
+            // Multiplying independently reduced runs would reassociate products.
+            let fused = plan.vector_product && Self::complex_multiply_uses_fma();
+            for (index, &value) in values.iter().enumerate() {
+                let slot = &mut result[plan.output_index(index)];
+                *slot = if fused {
+                    Self::complex_cumulative_fused_multiply(*slot, value, dtype)
+                } else {
+                    Self::complex_reduction_multiply(*slot, value, dtype)
+                };
+            }
+        } else {
+            // Coalesce consecutive reduced axes into one contiguous run. Runs
+            // separated by a retained dimension accumulate in original C order;
+            // gathering a whole output lane changes NumPy's pairwise tree.
+            for (run_index, run) in values.chunks(plan.contiguous_run_len).enumerate() {
+                let output = plan.output_index(run_index * plan.contiguous_run_len);
+                result[output] = Self::complex_reduction_add(
+                    result[output],
+                    Self::complex_pairwise_sum(run, dtype),
+                    dtype,
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    fn reduce_complex_sum_prod_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape(if product { "prod" } else { "sum" })?;
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        let values = self.complex_reduction_values(self.dtype)?;
+        let reduced = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, product)?;
+        let mut output_shape = plan.output_shape;
+        output_shape.push(2);
+        Self::new(
+            output_shape,
+            reduced.into_iter().flat_map(|(re, im)| [re, im]).collect(),
+            self.dtype,
+        )
+    }
+
+    fn reduce_complex_mean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("mean")?;
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        let values = self.complex_reduction_values(self.dtype)?;
+        let reduced = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false)?;
+        let values = reduced
+            .into_iter()
+            .flat_map(|value| {
+                let (re, im) =
+                    Self::divide_complex_value_by_count(value, plan.reduction_count, self.dtype);
+                [re, im]
+            })
+            .collect();
+        let mut output_shape = plan.output_shape;
+        output_shape.push(2);
+        Self::new(output_shape, values, self.dtype)
+    }
+
+    fn reduce_complex_var_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("var")?;
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        let values = self.complex_reduction_values(self.dtype)?;
+        let mut means = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false)?;
+        for mean in &mut means {
+            *mean = Self::divide_complex_value_by_count(*mean, plan.reduction_count, self.dtype);
+        }
+        let component_dtype = if self.dtype == DType::Complex64 {
+            DType::F32
+        } else {
+            DType::F64
+        };
+        let squared: Vec<f64> = values
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                let mean = means[plan.output_index(index)];
+                let deviation = Self::complex_reduction_add(value, (-mean.0, -mean.1), self.dtype);
+                // Ordinary var squares the two real component arrays separately.
+                // Unlike nanvar's complex multiply, these products must not fuse.
+                if self.dtype == DType::Complex64 {
+                    let (re, im) = (deviation.0 as f32, deviation.1 as f32);
+                    f64::from(re * re + im * im)
+                } else {
+                    deviation.0 * deviation.0 + deviation.1 * deviation.1
+                }
+            })
+            .collect();
+        // Squared magnitudes use the real pairwise tree, independently of the
+        // four-complex-lane / 64-leaf tree used to compute the mean.
+        let mut result =
+            Self::reduce_real_tuple_values(&squared, &plan, component_dtype, false, false);
+        let denominator = plan.reduction_count.saturating_sub(ddof) as f64;
+        for value in &mut result {
+            let variance = *value / denominator;
+            *value = if component_dtype == DType::F32 {
+                f64::from(variance as f32)
+            } else {
+                variance
+            };
+        }
+        Self::new(plan.output_shape, result, component_dtype)
+    }
+
     fn reduce_complex_sum_prod(
         &self,
         axis: Option<isize>,
@@ -16859,7 +17101,7 @@ impl UFuncArray {
         } else {
             axis
         };
-        let (mut out_shape, axis_len, inner) = match axis {
+        let (mut out_shape, axis_len, inner, vector_product) = match axis {
             None => (
                 if keepdims {
                     vec![1; logical_shape.len()]
@@ -16868,6 +17110,7 @@ impl UFuncArray {
                 },
                 values.len(),
                 1,
+                false,
             ),
             Some(axis) => {
                 let axis = normalize_axis(axis, logical_shape.len())?;
@@ -16875,6 +17118,10 @@ impl UFuncArray {
                     reduced_shape(&logical_shape, axis, keepdims),
                     logical_shape[axis],
                     element_count(&logical_shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                    logical_shape
+                        .iter()
+                        .rposition(|&len| len > 1)
+                        .is_some_and(|last| last != axis),
                 )
             }
         };
@@ -16883,6 +17130,7 @@ impl UFuncArray {
             .checked_mul(2)
             .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
         let mut out_values = Vec::with_capacity(physical_count);
+        let fused_product = product && vector_product && Self::complex_multiply_uses_fma();
         for output in 0..out_count {
             let base = (output / inner) * axis_len * inner + output % inner;
             let mut result = if product { (1.0, 0.0) } else { (0.0, 0.0) };
@@ -16902,7 +17150,9 @@ impl UFuncArray {
             } else {
                 for offset in 0..axis_len {
                     let value = values[base + offset * inner];
-                    result = if product {
+                    result = if fused_product {
+                        Self::complex_cumulative_fused_multiply(result, value, dtype)
+                    } else if product {
                         Self::complex_reduction_multiply(result, value, dtype)
                     } else {
                         Self::complex_reduction_add(result, value, dtype)
@@ -25763,11 +26013,10 @@ impl UFuncArray {
             // axis reduction over the dropped axes. The general path handles this by
             // iterating the full output×contracted Cartesian product with a per-cell
             // odometer decode + per-axis flat-index recompute (O(n^d) decodes); the
-            // same sum routed through reduce_sum_axes drops the decode entirely and
-            // reduces each contiguous fiber directly (vectorized + parallel). einsum
-            // reduction parity is tolerance-based (both sum in an implementation-
-            // defined order), so the reassociation is permitted — same as the multi-
-            // operand greedy and Hadamard levers. A REORDERED kept-label subsequence
+            // single-axis kernels reduce each contiguous fiber directly (vectorized
+            // + parallel). Keep their established descending-axis arithmetic here;
+            // einsum has its own reduction-order contract, independent of the public
+            // joint-axis sum API. A REORDERED kept-label subsequence
             // (e.g. 'ijk->ki') would need a trailing transpose, so defer it.
             let mut out_pos = Vec::with_capacity(output_labels.len());
             for &oc in output_labels {
@@ -25781,7 +26030,15 @@ impl UFuncArray {
                     .filter(|i| !out_pos.contains(i))
                     .map(|i| i as isize)
                     .collect();
-                return Ok(Some(op.reduce_sum_axes(&dropped, false)?));
+                let mut axes = dropped.into_iter().rev();
+                let first = axes
+                    .next()
+                    .expect("a strict output subsequence drops at least one axis");
+                let mut result = op.reduce_sum(Some(first), false)?;
+                for axis in axes {
+                    result = result.reduce_sum(Some(axis), false)?;
+                }
+                return Ok(Some(result));
             }
             return Ok(None);
         }
@@ -39456,6 +39713,102 @@ fn normalize_reduction_axes(axes: &[isize], ndim: usize) -> Result<Vec<usize>, U
         return Err(UFuncError::Msg("duplicate value in 'axis'".to_string()));
     }
     Ok(normalized)
+}
+
+/// The C-order traversal shared by real and logical-complex tuple reductions.
+/// A retained axis separates pairwise runs; singleton axes do not break physical
+/// contiguity, including when they separate consecutive selected axes.
+struct AxesReductionPlan {
+    output_shape: Vec<usize>,
+    output_count: usize,
+    reduction_count: usize,
+    contiguous_run_len: usize,
+    // Each retained axis contributes (input stride, extent, output stride).
+    output_coordinates: Vec<(usize, usize, usize)>,
+    vector_product: bool,
+}
+
+impl AxesReductionPlan {
+    fn new(shape: &[usize], axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        let count_elements = |extents: &[usize]| {
+            // The selected axes are sorted independently of their source order.
+            // Detect a zero before multiplication can overflow on earlier axes.
+            if extents.contains(&0) {
+                Ok(0)
+            } else {
+                element_count(extents).map_err(UFuncError::Shape)
+            }
+        };
+        let axes = normalize_reduction_axes(axes, shape.len())?;
+        let mut reduced = vec![false; shape.len()];
+        for &axis in &axes {
+            reduced[axis] = true;
+        }
+        let retained_axes: Vec<usize> = (0..shape.len()).filter(|&axis| !reduced[axis]).collect();
+        let retained_shape: Vec<usize> = retained_axes.iter().map(|&axis| shape[axis]).collect();
+        let output_shape = if keepdims {
+            shape
+                .iter()
+                .enumerate()
+                .map(|(axis, &len)| if reduced[axis] { 1 } else { len })
+                .collect()
+        } else {
+            retained_shape.clone()
+        };
+        let output_count = count_elements(&output_shape)?;
+        let input_count = count_elements(shape)?;
+        let reduction_count = if output_count == 0 {
+            // An empty output has no lanes; large unused selected dimensions
+            // need not have a representable product.
+            0
+        } else {
+            let extents: Vec<usize> = axes.iter().map(|&axis| shape[axis]).collect();
+            count_elements(&extents)?
+        };
+        let mut suffix = shape.len();
+        for axis in (0..shape.len()).rev() {
+            if reduced[axis] || shape[axis] == 1 {
+                suffix = axis;
+            } else {
+                break;
+            }
+        }
+        let contiguous_run_len = if input_count == 0 {
+            1
+        } else {
+            count_elements(&shape[suffix..])?
+        };
+        let input_strides = c_strides_elems(shape);
+        let output_strides = c_strides_elems(&retained_shape);
+        let output_coordinates = retained_axes
+            .iter()
+            .enumerate()
+            .map(|(index, &axis)| (input_strides[axis], shape[axis], output_strides[index]))
+            .collect();
+        // NumPy multiplies a vector of output accumulators when its fastest
+        // non-singleton axis is retained. A scalar reduction loop does not fuse.
+        let vector_product = shape
+            .iter()
+            .rposition(|&len| len > 1)
+            .is_some_and(|axis| !reduced[axis]);
+        Ok(Self {
+            output_shape,
+            output_count,
+            reduction_count,
+            contiguous_run_len,
+            output_coordinates,
+            vector_product,
+        })
+    }
+
+    fn output_index(&self, input_index: usize) -> usize {
+        self.output_coordinates
+            .iter()
+            .map(|&(input_stride, extent, output_stride)| {
+                ((input_index / input_stride) % extent) * output_stride
+            })
+            .sum()
+    }
 }
 
 // ── numpy datetime/timedelta arithmetic ─────────────────────────────────
@@ -75085,7 +75438,7 @@ print("\n".join(out))
     #[test]
     fn einsum_single_operand_reduction_fast_path_matches_reference_and_golden_sha256() {
         // Single-operand pure axis reductions ('ij->i', 'ij->j', 'ijk->ik', 'ij->')
-        // now route to reduce_sum_axes instead of the general odometer loop. einsum
+        // use descending single-axis kernels instead of the general odometer loop. einsum
         // reduction parity is tolerance-based, so assert allclose vs an INDEPENDENT
         // naive nested-sum reference (sequential, defined order) rather than bit
         // equality, plus a golden sha256 over the deterministic fast-path bits.

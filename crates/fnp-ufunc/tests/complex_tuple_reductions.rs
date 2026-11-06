@@ -1,0 +1,479 @@
+//! Joint-axis complex reductions must follow logical shapes and NumPy's loop order.
+
+use fnp_dtype::DType;
+use fnp_ufunc::{UFuncArray, UFuncError};
+use serde_json::{Value, json};
+use std::process::{Command, Stdio};
+
+fn complex_array(shape: &[usize], values: &[(f64, f64)], dtype: DType) -> UFuncArray {
+    let mut physical_shape = shape.to_vec();
+    physical_shape.push(2);
+    UFuncArray::new(
+        physical_shape,
+        values.iter().flat_map(|&(re, im)| [re, im]).collect(),
+        dtype,
+    )
+    .expect("valid interleaved complex input")
+}
+
+fn dtype_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Complex64 => "complex64",
+        DType::Complex128 => "complex128",
+        DType::F32 => "float32",
+        DType::F64 => "float64",
+        _ => panic!("unexpected complex reduction dtype {dtype:?}"),
+    }
+}
+
+fn reduce_tuple(
+    input: &UFuncArray,
+    op: &str,
+    axes: &[isize],
+    keepdims: bool,
+    ddof: usize,
+) -> Result<UFuncArray, UFuncError> {
+    match op {
+        "sum" => input.reduce_sum_axes(axes, keepdims),
+        "prod" => input.reduce_prod_axes(axes, keepdims),
+        "mean" => input.reduce_mean_axes(axes, keepdims),
+        "var" => input.reduce_var_axes(axes, keepdims, ddof),
+        "std" => input.reduce_std_axes(axes, keepdims, ddof),
+        _ => unreachable!("tuple reduction operation"),
+    }
+}
+
+fn axis_subsets(ndim: usize) -> Vec<Vec<isize>> {
+    let mut result = Vec::new();
+    for mask in 0..1usize << ndim {
+        let axes: Vec<isize> = (0..ndim)
+            .filter(|axis| mask & (1 << axis) != 0)
+            .map(|axis| axis as isize)
+            .collect();
+        result.push(axes.clone());
+        if axes.len() > 1 {
+            result.push(axes.iter().rev().copied().collect());
+        }
+        if !axes.is_empty() {
+            result.push(axes.iter().map(|&axis| axis - ndim as isize).collect());
+        }
+    }
+    result
+}
+
+#[derive(Default)]
+struct OracleBatch {
+    inputs: Vec<Value>,
+    cases: Vec<Value>,
+    actual: Vec<Result<UFuncArray, UFuncError>>,
+}
+
+impl OracleBatch {
+    fn add_input(&mut self, array: &UFuncArray) -> usize {
+        let mut shape = array.shape().to_vec();
+        assert_eq!(shape.pop(), Some(2));
+        let input = self.inputs.len();
+        self.inputs.push(json!({
+            "shape": shape,
+            "dtype": dtype_name(array.dtype()),
+            "values": array.values().as_chunks::<2>().0.iter()
+                .map(|parts| [parts[0].to_string(), parts[1].to_string()])
+                .collect::<Vec<_>>(),
+        }));
+        input
+    }
+
+    fn push(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        op: &str,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) {
+        self.cases.push(json!({
+            "input": input, "op": op, "axes": axes,
+            "keepdims": keepdims, "ddof": ddof,
+        }));
+        self.actual
+            .push(reduce_tuple(array, op, axes, keepdims, ddof));
+    }
+
+    fn push_single_product(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        axis: Option<isize>,
+        keepdims: bool,
+        dtype: Option<DType>,
+    ) {
+        self.cases.push(json!({
+            "input": input, "op": "prod", "axis": axis,
+            "keepdims": keepdims, "dtype": dtype.map(dtype_name),
+        }));
+        self.actual.push(match dtype {
+            Some(dtype) => array.reduce_prod_with_dtype(axis, keepdims, dtype),
+            None => array.reduce_prod(axis, keepdims),
+        });
+    }
+
+    fn assert_matches_numpy(self) {
+        let script = r#"
+import json, sys, warnings
+import numpy as np
+
+warnings.simplefilter('ignore')
+payload = json.load(sys.stdin)
+inputs = []
+for item in payload['inputs']:
+    a = np.empty(len(item['values']), dtype=item['dtype'])
+    a.real = [float(pair[0]) for pair in item['values']]
+    a.imag = [float(pair[1]) for pair in item['values']]
+    inputs.append(a.reshape(item['shape']))
+rows = []
+for case in payload['cases']:
+    axis = tuple(case['axes']) if 'axes' in case else case['axis']
+    kw = dict(axis=axis, keepdims=case['keepdims'])
+    if case.get('dtype') is not None:
+        kw['dtype'] = case['dtype']
+    if case['op'] in ('var', 'std'):
+        kw['ddof'] = case['ddof']
+    try:
+        result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
+        if result.dtype.kind == 'c':
+            parts = np.empty(result.size * 2, dtype=np.float64)
+            parts[0::2] = result.real.ravel()
+            parts[1::2] = result.imag.ravel()
+        else:
+            parts = result.astype(np.float64).ravel()
+        rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                         bits=parts.view(np.uint64).tolist()))
+    except (TypeError, ValueError, IndexError) as error:
+        rows.append(dict(error=type(error).__name__, axis=getattr(error, 'axis', None),
+                         ndim=getattr(error, 'ndim', None)))
+print(json.dumps(rows))
+"#;
+        let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+        let mut child = Command::new(python)
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("launch live NumPy complex tuple oracle");
+        let mut stdin = child.stdin.take().expect("oracle stdin");
+        serde_json::to_writer(
+            &mut stdin,
+            &json!({"inputs": self.inputs, "cases": self.cases}),
+        )
+        .expect("write tuple oracle inputs");
+        drop(stdin);
+        let output = child
+            .wait_with_output()
+            .expect("collect tuple oracle results");
+        assert!(
+            output.status.success(),
+            "NumPy complex tuple oracle: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Vec<Value> = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+        assert_eq!(expected.len(), self.actual.len());
+        for ((case, actual), expected) in self.cases.iter().zip(self.actual).zip(expected) {
+            if expected["error"] == "AxisError" {
+                assert!(
+                    matches!(actual, Err(UFuncError::AxisOutOfBounds { axis, ndim })
+                        if json!(axis) == expected["axis"] && json!(ndim) == expected["ndim"]),
+                    "{case}: expected logical-axis error {expected}, got {actual:?}"
+                );
+                continue;
+            }
+            if expected.get("error").is_some() {
+                assert!(
+                    actual.is_err(),
+                    "{case}: expected {expected}, got {actual:?}"
+                );
+                continue;
+            }
+            let actual = actual.unwrap_or_else(|error| panic!("{case}: {error}"));
+            let mut shape = actual.shape().to_vec();
+            if actual.dtype().is_complex() {
+                assert_eq!(shape.pop(), Some(2), "{case}: complex component dimension");
+            }
+            assert_eq!(json!(shape), expected["shape"], "{case}: shape");
+            assert_eq!(
+                dtype_name(actual.dtype()),
+                expected["dtype"],
+                "{case}: dtype"
+            );
+            let bits = expected["bits"].as_array().expect("result bits");
+            assert_eq!(actual.values().len(), bits.len(), "{case}: length");
+            for (index, (&got, expected)) in actual.values().iter().zip(bits).enumerate() {
+                let expected = f64::from_bits(expected.as_u64().expect("float bits"));
+                if expected.is_nan() {
+                    assert!(
+                        got.is_nan(),
+                        "{case}: element {index} expected NaN, got {got}"
+                    );
+                } else {
+                    assert_eq!(
+                        got.to_bits(),
+                        expected.to_bits(),
+                        "{case}: element {index}: got {got}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn complex_tuple_variance_is_real_and_negative_axes_are_logical() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let a = complex_array(&[2], &[(1.0, 2.0), (3.0, 4.0)], dtype);
+        assert_eq!(
+            a.reduce_sum_axes(&[-1], false).unwrap().values(),
+            &[4.0, 6.0]
+        );
+        assert_eq!(
+            a.reduce_mean_axes(&[-1], false).unwrap().values(),
+            &[2.0, 3.0]
+        );
+        let variance = a.reduce_var_axes(&[0], false, 0).unwrap();
+        assert_eq!(variance.shape(), &[] as &[usize]);
+        assert_eq!(variance.values(), &[2.0]);
+        assert_eq!(
+            variance.dtype(),
+            if dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            }
+        );
+        let large = if dtype == DType::Complex64 { 1e8 } else { 1e16 };
+        let a = complex_array(
+            &[2, 3],
+            &[
+                (large, 0.0),
+                (1.0, 0.0),
+                (-large, 0.0),
+                (1.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 0.0),
+            ],
+            dtype,
+        );
+        assert_eq!(
+            a.reduce_sum_axes(&[0, 1], false).unwrap().values(),
+            &[2.0, 0.0]
+        );
+    }
+}
+
+#[test]
+fn complex_tuple_empty_shapes_do_not_overflow_before_zero_dimensions() {
+    let input = complex_array(&[0, usize::MAX, usize::MAX], &[], DType::Complex128);
+    for op in ["sum", "prod", "mean", "var", "std"] {
+        for keepdims in [false, true] {
+            let reduced = reduce_tuple(&input, op, &[0, 1, 2], keepdims, 0)
+                .unwrap_or_else(|error| panic!("{op}: zero-sized reduction: {error}"));
+            if op == "sum" {
+                assert_eq!(reduced.values(), &[0.0, 0.0]);
+            } else if op == "prod" {
+                assert_eq!(reduced.values(), &[1.0, 0.0]);
+            } else {
+                assert!(reduced.values().iter().all(|value| value.is_nan()));
+            }
+            let mut shape = if keepdims { vec![1, 1, 1] } else { vec![] };
+            if reduced.dtype().is_complex() {
+                shape.push(2);
+            }
+            assert_eq!(reduced.shape(), shape);
+
+            // Variance validates the selected count even without output lanes;
+            // other reductions can return the empty output without forming it.
+            let empty = reduce_tuple(&input, op, &[1, 2], keepdims, 0);
+            if matches!(op, "var" | "std") {
+                assert!(matches!(
+                    empty,
+                    Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+                ));
+                continue;
+            }
+            let empty = empty.unwrap_or_else(|error| panic!("{op}: zero-sized output: {error}"));
+            assert!(empty.values().is_empty());
+            let mut shape = if keepdims { vec![0, 1, 1] } else { vec![0] };
+            if empty.dtype().is_complex() {
+                shape.push(2);
+            }
+            assert_eq!(empty.shape(), shape);
+        }
+    }
+}
+
+#[test]
+fn complex_tuple_shapes_empty_axes_and_axis_errors_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![2],
+            vec![2, 3],
+            vec![2, 1, 3],
+            vec![2, 3, 2, 2],
+            vec![0],
+            vec![0, 3],
+            vec![2, 0, 3],
+            vec![2, 3, 0],
+            vec![0, 0],
+            vec![1, 0, 2, 1],
+            vec![1, 1, 1],
+        ] {
+            let values = (0..shape.iter().product())
+                .map(|i| {
+                    (
+                        [0.25, -1.0, 2.5, 3.0, -0.5][i % 5],
+                        [0.75, -2.0, 1.5, 0.0, 0.25][i % 5],
+                    )
+                })
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, dtype);
+            let input = batch.add_input(&array);
+            let mut tuples = axis_subsets(shape.len());
+            tuples.extend([
+                vec![shape.len() as isize],
+                vec![-(shape.len() as isize) - 1],
+                vec![0, 0],
+                vec![-1, shape.len() as isize - 1],
+                vec![0, 0, shape.len() as isize],
+            ]);
+            for axes in tuples {
+                for keepdims in [false, true] {
+                    for op in ["sum", "prod", "mean", "var", "std"] {
+                        batch.push(input, &array, op, &axes, keepdims, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_tuple_joint_order_and_pairwise_boundaries_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let large = if dtype == DType::Complex64 { 1e8 } else { 1e16 };
+        for n in [3, 4, 63, 64, 65, 127, 128, 129] {
+            for shape in [[2, 3, n], [n, 3, 2]] {
+                let values = (0..shape.iter().product())
+                    .map(|i| {
+                        (
+                            [large, 1.0, -large, 0.25, 3.0, -0.5, -2.0][i % 7],
+                            [-large, 2.0, large, -0.125, 1.0][i % 5],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let array = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&array);
+                for axes in [
+                    vec![0, 2],
+                    vec![2, 0],
+                    vec![-3, -1],
+                    vec![0, 1],
+                    vec![1, 2],
+                    vec![0, 1, 2],
+                ] {
+                    for keepdims in [false, true] {
+                        for op in ["sum", "mean", "var", "std"] {
+                            batch.push(input, &array, op, &axes, keepdims, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_tuple_product_preserves_joint_fold_and_strided_precision() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![5, 3],
+            vec![3, 5],
+            vec![2, 3, 4],
+            vec![2, 4, 3],
+            vec![2, 1, 3, 2],
+            vec![1, 5, 3],
+            vec![5, 1],
+        ] {
+            let values = (0..shape.iter().product())
+                .map(|i| {
+                    (
+                        ((i * 17 % 97) as f64 - 48.0) / 13.0,
+                        ((i * 29 % 89) as f64 - 44.0) / 19.0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, dtype);
+            let input = batch.add_input(&array);
+            for axes in axis_subsets(shape.len()) {
+                for keepdims in [false, true] {
+                    batch.push(input, &array, "prod", &axes, keepdims, 0);
+                }
+            }
+            for axis in [None, Some(0), Some(-1)] {
+                for keepdims in [false, true] {
+                    for accumulator in [None, Some(DType::Complex64), Some(DType::Complex128)] {
+                        batch.push_single_product(input, &array, axis, keepdims, accumulator);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_tuple_nonfinite_signed_zero_and_ddof_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for values in [
+            vec![(-0.0, -0.0), (-0.0, 0.0), (0.0, -0.0), (0.0, 0.0)],
+            vec![
+                (f64::INFINITY, 1.0),
+                (1.0, 2.0),
+                (-f64::INFINITY, 3.0),
+                (4.0, -1.0),
+            ],
+            vec![
+                (1.0, f64::INFINITY),
+                (2.0, -1.0),
+                (f64::NAN, 1.0),
+                (4.0, 3.0),
+            ],
+            vec![(1.0, f64::NAN), (1.0, 2.0), (1.0, 2.0), (1.0, 2.0)],
+            vec![(1.0, 2.0), (3.0, 4.0), (-1.0, -2.0), (1.0, -2.0)],
+        ] {
+            for shape in [vec![2, 2], vec![1, 2, 1, 2]] {
+                let array = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&array);
+                for axes in axis_subsets(shape.len()) {
+                    for keepdims in [false, true] {
+                        for op in ["sum", "prod", "mean"] {
+                            batch.push(input, &array, op, &axes, keepdims, 0);
+                        }
+                        for ddof in [0, 1, 2, 4, 5] {
+                            for op in ["var", "std"] {
+                                batch.push(input, &array, op, &axes, keepdims, ddof);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
