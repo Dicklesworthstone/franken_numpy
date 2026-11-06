@@ -8,13 +8,14 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-const INTEGER_TARGETS: [(DType, &str); 7] = [
+const INTEGER_TARGETS: [(DType, &str); 8] = [
     (DType::I8, "i1"),
     (DType::I16, "i2"),
     (DType::I32, "i4"),
     (DType::I64, "i8"),
     (DType::U8, "u1"),
     (DType::U16, "u2"),
+    (DType::U32, "u4"),
     (DType::U64, "u8"),
 ];
 
@@ -189,6 +190,156 @@ fn source_precision_is_applied_before_integer_conversion() {
     }
 }
 
+fn uint32_sources(values: &[f64]) -> [(ArrayStorage, &'static str); 5] {
+    [
+        (
+            ArrayStorage::F16(values.iter().map(|&value| f16::from_f64(value)).collect()),
+            "f2",
+        ),
+        (
+            ArrayStorage::F32(values.iter().map(|&value| value as f32).collect()),
+            "f4",
+        ),
+        (ArrayStorage::F64(values.to_vec()), "f8"),
+        (
+            ArrayStorage::Complex64(
+                values
+                    .iter()
+                    .map(|&value| (value as f32, f32::NAN))
+                    .collect(),
+            ),
+            "c8",
+        ),
+        (
+            ArrayStorage::Complex128(values.iter().map(|&value| (value, f64::INFINITY)).collect()),
+            "c16",
+        ),
+    ]
+}
+
+#[test]
+fn uint32_scalar_assignments_use_a_signed_64_bit_intermediate() {
+    let two_to_63 = 9_223_372_036_854_775_808.0_f64;
+    let values = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MAX,
+        -f64::MAX,
+        -2_147_483_649.0,
+        4_294_967_297.0,
+        -4_294_967_295.0,
+        two_to_63.next_down(),
+        two_to_63,
+        -two_to_63,
+        (-two_to_63).next_up(),
+    ];
+    let expected = [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2_147_483_647,
+        1,
+        1,
+        4_294_966_272,
+        0,
+        0,
+        1024,
+    ];
+    let mut assigned = ArrayStorage::zeros(DType::U32, values.len());
+    let mut cases = Vec::new();
+    for (index, (&value, &expected)) in values.iter().zip(&expected).enumerate() {
+        assigned.set_f64(index, value).unwrap();
+        assert_eq!(assigned.get_i128(index).unwrap(), expected);
+        cases.push((ArrayStorage::F64(vec![value]), "f8", DType::U32, "u4"));
+    }
+    numpy_float_cast_oracle(&cases);
+}
+
+#[test]
+fn uint32_invalid_casts_preserve_source_specific_vector_tails() {
+    // (length, real vector prefix, complex64 prefix, complex128 prefix).
+    // These independent NumPy fixtures include the different small-complex
+    // thresholds and prove that 8192 does not restart a contiguous cast loop.
+    for (len, real_prefix, complex64_prefix, complex128_prefix) in [
+        (0, 0, 0, 0),
+        (1, 0, 0, 0),
+        (3, 0, 0, 0),
+        (4, 4, 0, 0),
+        (5, 4, 4, 0),
+        (6, 4, 4, 4),
+        (7, 4, 4, 4),
+        (8, 8, 4, 4),
+        (9, 8, 8, 8),
+        (12, 12, 8, 8),
+        (13, 12, 12, 12),
+        (8191, 8188, 8188, 8188),
+        (8192, 8192, 8188, 8188),
+        (8193, 8192, 8192, 8192),
+        (16384, 16384, 16380, 16380),
+        (16385, 16384, 16384, 16384),
+    ] {
+        for (source, _) in uint32_sources(&vec![f64::NAN; len]) {
+            let prefix = match source.dtype() {
+                DType::F16 => 0,
+                DType::F32 | DType::F64 => real_prefix,
+                DType::Complex64 => complex64_prefix,
+                DType::Complex128 => complex128_prefix,
+                _ => unreachable!(),
+            };
+            let mut expected = vec![1_i128 << 31; prefix];
+            expected.resize(len, 0);
+            assert_eq!(
+                integer_values(&source.cast_to(DType::U32).unwrap()),
+                expected,
+                "{:?} -> uint32 at length {len}",
+                source.dtype(),
+            );
+        }
+    }
+}
+
+#[test]
+fn uint32_vector_boundaries_and_disabled_dispatch_match_numpy() {
+    let pattern = [
+        f64::NAN,
+        f64::NEG_INFINITY,
+        -2_147_483_649.0,
+        2_147_483_649.0,
+        f64::INFINITY,
+        4_294_967_297.0,
+        -4_294_967_295.0,
+        f64::MAX,
+        -f64::MAX,
+        -1.9,
+        1.9,
+        -0.0,
+        4_294_967_295.9,
+        -2_147_483_648.9,
+        9_223_372_036_854_775_808.0_f64.next_down(),
+        9_223_372_036_854_775_808.0,
+        -9_223_372_036_854_775_808.0,
+        f64::from_bits(0xfff8_0000_0000_0001),
+        f64::from_bits(0x7ff0_0000_0000_0001),
+    ];
+    let lengths: Vec<usize> = (0..=33)
+        .chain([8191, 8192, 8193, 16383, 16384, 16385])
+        .collect();
+    let mut cases = Vec::new();
+    for len in lengths {
+        let values = (0..len)
+            .map(|index| pattern[index % pattern.len()])
+            .collect::<Vec<_>>();
+        for (source, name) in uint32_sources(&values) {
+            cases.push((source, name, DType::U32, "u4"));
+        }
+    }
+    numpy_float_cast_oracle(&cases);
+    numpy_float_cast_oracle_with_dispatch(&cases, true);
+}
+
 fn raw_bytes(storage: &ArrayStorage) -> Vec<u8> {
     let mut out = Vec::new();
     match storage {
@@ -245,6 +396,13 @@ fn hex_bytes(bytes: &[u8]) -> String {
 }
 
 fn numpy_float_cast_oracle(cases: &[(ArrayStorage, &str, DType, &str)]) {
+    numpy_float_cast_oracle_with_dispatch(cases, false);
+}
+
+fn numpy_float_cast_oracle_with_dispatch(
+    cases: &[(ArrayStorage, &str, DType, &str)],
+    disable_optional_dispatch: bool,
+) {
     let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_owned());
     let available = Command::new(&python)
         .args(["-c", "import numpy"])
@@ -263,6 +421,9 @@ fn numpy_float_cast_oracle(cases: &[(ArrayStorage, &str, DType, &str)]) {
     let script = r#"
 import sys, warnings
 import numpy as np
+if len(sys.argv) > 1:
+    from numpy._core import _multiarray_umath as umath
+    assert not any(umath.__cpu_features__[name] for name in umath.__cpu_dispatch__)
 requests = sys.stdin.read().splitlines()
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
@@ -280,8 +441,23 @@ with warnings.catch_warnings():
         )
         .unwrap();
     }
-    let mut child = Command::new(&python)
-        .args(["-c", script])
+    let mut command = Command::new(&python);
+    command.args(["-c", script]);
+    if disable_optional_dispatch {
+        let features = Command::new(&python)
+            .args([
+                "-c",
+                "from numpy._core import _multiarray_umath as u; print(','.join(u.__cpu_dispatch__))",
+            ])
+            .output()
+            .expect("read NumPy optional dispatch features");
+        assert!(features.status.success());
+        let features = String::from_utf8(features.stdout).unwrap();
+        command
+            .arg("verify-disabled-dispatch")
+            .env("NPY_DISABLE_CPU_FEATURES", features.trim());
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -407,8 +583,8 @@ fn float_and_complex_integer_boundaries_match_numpy() {
             cases.push((source.clone(), name, target, target_name));
         }
     }
-    // uint32 invalid casts are intentionally not asserted: NumPy's SIMD prefix
-    // and scalar tail disagree. Include that width for the fully defined range.
+    // Retain explicit valid-range fixtures in addition to the invalid vector
+    // prefix/tail cases above, including the largest representable uint32.
     for (source, name) in [
         (
             ArrayStorage::F16(vec![f16::ZERO, f16::from_f32(1.9), f16::MAX]),

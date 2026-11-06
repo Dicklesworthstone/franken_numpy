@@ -955,15 +955,47 @@ fn x86_truncating_signed_cast(val: f64, bits: u32) -> i128 {
     }
 }
 
+/// NumPy's Linux/x86-64 baseline cast loops use a signed 64-bit instruction
+/// for one uint32 value, but signed 32-bit instructions with a 2^31 bias in
+/// their four-element SSE2 bodies. Preserve the distinct invalid results
+/// without requiring unsafe instructions or Rust's saturating float casts.
+fn x86_truncating_unsigned32_cast(val: f64, vector_lane: bool) -> u32 {
+    if !vector_lane {
+        return x86_truncating_signed_cast(val, 64) as u32;
+    }
+    let high_bit = 1_u32 << 31;
+    if val >= f64::from(high_bit) {
+        (x86_truncating_signed_cast(val - f64::from(high_bit), 32) as u32) ^ high_bit
+    } else {
+        x86_truncating_signed_cast(val, 32) as u32
+    }
+}
+
+/// The GCC baseline loops generated from NumPy's lowlevel_strided_loops.c.src
+/// have source-specific vector bounds. Half conversion calls a scalar helper;
+/// complex loops leave at least one scalar element, and complex128 vectorizes
+/// only at six elements. These bounds match the NumPy 2.3/2.4 Linux wheels even
+/// with all optional CPU-dispatch features disabled: the body uses baseline
+/// SSE2, not a runtime-selected AVX loop. A contiguous cast has one body/tail
+/// boundary for the whole array, including arrays larger than 8192 elements.
+fn numpy_uint32_vector_prefix(source: DType, len: usize) -> usize {
+    match source {
+        DType::F32 | DType::F64 => len / 4 * 4,
+        DType::Complex64 if len >= 5 => (len - 1) / 4 * 4,
+        DType::Complex128 if len >= 6 => (len - 1) / 4 * 4,
+        _ => 0,
+    }
+}
+
 /// Shared scalar-assignment and bulk-cast policy for floating integer inputs.
 /// Linux/x86-64 follows the NumPy C cast paths for the signed and narrow unsigned
 /// types, and its two-stage unsigned-64 conversion. The intermediate for an
 /// 8/16-bit destination is signed 32-bit, so values outside that intermediate's
 /// range must not first wrap through i128.
 ///
-/// Out-of-range uint32 results depend on NumPy's compiler-generated vector body
-/// and scalar tail. That target and other platforms retain the existing policy
-/// pending their own oracle-backed implementation (franken_numpy-5cf9h).
+/// uint32 uses the scalar conversion here; `cast_to` additionally preserves
+/// NumPy's source-specific vector body. Other platforms retain the existing
+/// policy pending their own oracle-backed implementation (franken_numpy-5cf9h).
 /// This value conversion does not emit warnings or update runtime error policy.
 fn f64_to_integer(val: f64, target: DType) -> i128 {
     if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
@@ -972,6 +1004,7 @@ fn f64_to_integer(val: f64, target: DType) -> i128 {
                 return x86_truncating_signed_cast(val, 32);
             }
             DType::I64 => return x86_truncating_signed_cast(val, 64),
+            DType::U32 => return i128::from(x86_truncating_unsigned32_cast(val, false)),
             DType::U64 => {
                 let high_bit = 1_u64 << 63;
                 let value = if val >= high_bit as f64 {
@@ -1347,8 +1380,25 @@ impl ArrayStorage {
             ));
         }
 
-        let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
+        if cfg!(all(target_arch = "x86_64", target_os = "linux"))
+            && target == DType::U32
+            && !src_is_int
+        {
+            // Source precision and complex layout determine NumPy's vector
+            // prefix. Converting through an undifferentiated f64 slice would
+            // incorrectly vectorize float16 and the complex scalar tails.
+            let prefix = numpy_uint32_vector_prefix(self.dtype(), n);
+            let values = self.to_f64_vec();
+            return Ok(Self::U32(
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| x86_truncating_unsigned32_cast(value, index < prefix))
+                    .collect(),
+            ));
+        }
+        let mut result = Self::zeros(target, n);
 
         // Hoist the per-element enum dispatch out of the conversion loop: read the
         // whole source with a single match into an intermediary `Vec`, then write
@@ -2609,15 +2659,26 @@ mod tests {
     }
 
     #[test]
-    fn cast_to_matches_per_element_reference_bit_exact() {
+    fn cast_to_matches_scalar_reference_and_numpy_vector_casts_bit_exact() {
         for src in cast_source_fixtures() {
             for target in cast_target_dtypes() {
                 let fast = src.cast_to(target).unwrap();
-                let reference = reference_numeric_cast(&src, target);
+                let reference = if cfg!(all(target_arch = "x86_64", target_os = "linux"))
+                    && src.dtype() == DType::F32
+                    && target == DType::U32
+                {
+                    // NumPy's vector body casts this fixture's -inf at index
+                    // three to 2^31; the NaN at index four is in the scalar
+                    // tail and becomes zero. Scalar assignment cannot serve
+                    // as the reference for this independently verified cell.
+                    ArrayStorage::U32(vec![0, 0, 1, 1_u32 << 31, 0])
+                } else {
+                    reference_numeric_cast(&src, target)
+                };
                 assert_eq!(
                     storage_to_bits(&fast),
                     storage_to_bits(&reference),
-                    "cast {:?} -> {:?} diverges from per-element reference",
+                    "cast {:?} -> {:?} diverges from conversion reference",
                     src.dtype(),
                     target
                 );
@@ -2638,9 +2699,11 @@ mod tests {
         // cells: five float/complex sources -> i32/i64, and f32/f64 -> u64.
         // An independent reconstruction reproduces the e4565efc... baseline;
         // replacing only those cells with the NumPy invalid-cast sentinels
-        // gives f2f4b629... . The other 184 cells, including the retained u32
-        // policy, are unchanged. The live boundary conformance test covers
-        // the corrected float-source behavior.
+        // gives f2f4b629... . The other 184 cells were unchanged at that step.
+        // Finally, uint32 vector/tail handling changes only float32 -> uint32
+        // (-inf at index three). A fresh NumPy 2.4.3 reconstruction of all 196
+        // cells gives 8cfd7709...; reverting just that element reproduces
+        // f2f4b629... . The live cast oracle also checks the corrected paths.
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for src in cast_source_fixtures() {
@@ -2655,7 +2718,7 @@ mod tests {
             let _ = write!(&mut hex, "{byte:02x}");
         }
         let expected = if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-            "f2f4b62971431b390b9bcd41873be0cdb90d508641be4643396c3416871cbb90"
+            "8cfd7709297c0dd08870911c3660ffcedee1e6d619da01500d5263d3d5cfd0f2"
         } else {
             "e4565efce75c476284ec05ca8358e5e96de2f984990ef76468351c74c450aab6"
         };

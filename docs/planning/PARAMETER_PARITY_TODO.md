@@ -35,7 +35,7 @@
 - [x] Rust-core `nansum_with_dtype`, `nanprod_with_dtype`, `nanmean_with_dtype`, `nanvar_with_dtype`, and `nanstd_with_dtype` support real/complex accumulators, exact integer inputs, per-lane valid counts, and source-precision in-place deviations; default flattened float64 NaN statistics preserve masked positions and NumPy reduction order
 - [x] Default float16 mean preserves source precision and float32 conversion-buffer ordering; variance/std retain integer count precision through division, including counts above float16's finite range
 - [x] Default float32/64 and complex sum/prod/mean/var/std over axis tuples use joint C-order reductions, preserving logical axes, source precision, NumPy reduction ordering, and real-valued complex variance/std
-- [D] Linux x86_64 floating-to-integer casts now model NumPy's signed/narrow integer conversion intermediates and uint64 invalid-value results; uint32 vector-body/scalar-tail differences, other platforms, and warning/error-policy integration remain open (`franken_numpy-5cf9h`)
+- [D] Linux x86_64 floating-to-integer scalar/bulk casts now model NumPy's signed/narrow conversion intermediates, uint64 invalid values, and source-specific uint32 vector-body/scalar-tail results; other platforms and warning/error-policy integration remain open (`franken_numpy-5cf9h`)
 - [x] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`
 
 ## GROUP 5: percentile/quantile `keepdims` parameter

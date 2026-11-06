@@ -591,8 +591,8 @@ fn conformance_storage_float_integer_boundaries() -> Result<(), String> {
     // NumPy's out-of-range C casts are platform dependent. This matrix locks
     // the Linux/x86-64 paths we implement, including their signed-indefinite
     // values, truncation before narrowing, and the source's stored precision.
-    // uint32 is deliberately separate parity debt: NumPy's auto-vectorized
-    // body and scalar tail can disagree even in the same conversion.
+    // float_integer_casts.rs covers uint32's source-specific vector prefixes
+    // and scalar tails, which can disagree even in the same conversion.
     let values = vec![
         f64::NAN,
         -f64::NAN,
