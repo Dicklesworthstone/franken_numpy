@@ -61217,17 +61217,23 @@ print(json.dumps(payload))
             .collect();
         let arr = UFuncArray::new(vec![len], values.clone(), DType::F64).unwrap();
         let cast = arr.astype(DType::I32);
-        // Invalid float conversions retain ArrayStorage's deterministic zero
-        // policy. Finite values here are all in int32 range. The old golden
-        // recorded i64::MAX in an int32 working buffer for +inf, although
-        // exporting that same array to int32 storage yielded zero.
+        // On Linux/x86-64 NumPy converts these NaN/Inf inputs to i32::MIN.
+        // The previous zero policy disagreed with 505 entries in the live
+        // oracle. The updated digest below was computed from NumPy's int32
+        // result widened to f64, rather than regenerated from this kernel.
+        // Other platforms retain their existing policy pending native probes.
+        let invalid_value = if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            f64::from(i32::MIN)
+        } else {
+            0.0
+        };
         let reference: Vec<f64> = values
             .iter()
             .map(|&value| {
                 if value.is_finite() {
                     value.trunc()
                 } else {
-                    0.0
+                    invalid_value
                 }
             })
             .collect();
@@ -61244,10 +61250,80 @@ print(json.dumps(payload))
         for byte in hasher.finalize() {
             let _ = write!(&mut actual_sha, "{byte:02x}");
         }
-        assert_eq!(
-            actual_sha,
+        let expected_sha = if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            "acff2d1b8b96c05c120ab14ecd3aa1b48e17fb5eabd0f79ef68ed117da9e83c8"
+        } else {
             "60ef46a56d457521dbef583663412bfc8ed422610a87042027944baf4552fcc3"
-        );
+        };
+        assert_eq!(actual_sha, expected_sha);
+
+        if cfg!(all(target_arch = "x86_64", target_os = "linux")) && numpy_oracle_available() {
+            let output = Command::new(oracle_python_bin())
+                .args([
+                    "-c",
+                    r#"
+import hashlib, numpy as np
+i = np.arange(1 << 16, dtype=np.int64)
+values = ((i * 23) % 10003 - 5001).astype(np.float64) + .75
+values[(i % 263 == 0) & (i % 257 != 0)] = np.inf
+values[i % 257 == 0] = np.nan
+with np.errstate(invalid='ignore'):
+    result = values.astype(np.int32).astype('<f8')
+print(hashlib.sha256(result.tobytes()).hexdigest())
+"#,
+                ])
+                .output()
+                .expect("run NumPy cast golden oracle");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected_sha);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn astype_float_invalid_values_keep_wide_integer_sidecars_consistent() {
+        let source = UFuncArray::new(
+            vec![2, 3],
+            vec![
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                2_f64.powi(63).next_down(),
+                2_f64.powi(64).next_down(),
+                -1.9,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let expected = [
+            ArrayStorage::I64(vec![
+                i64::MIN,
+                i64::MIN,
+                i64::MIN,
+                i64::MAX - 1023,
+                i64::MIN,
+                -1,
+            ]),
+            ArrayStorage::U64(vec![
+                1 << 63,
+                0,
+                1 << 63,
+                (1 << 63) - 1024,
+                u64::MAX - 2047,
+                u64::MAX,
+            ]),
+        ];
+        for storage in expected {
+            let cast = source.astype(storage.dtype());
+            assert_eq!(cast.shape(), &[2, 3]);
+            assert!(cast.has_integer_sidecar());
+            assert_eq!(cast.values(), storage.to_f64_vec());
+            assert_eq!(cast.to_storage().unwrap(), storage);
+        }
     }
 
     #[test]

@@ -424,11 +424,43 @@ fn conformance_finfo_float64_tiny() -> Result<(), String> {
     Ok(())
 }
 
-fn floating_storage_hex(storage: fnp_dtype::ArrayStorage) -> String {
+fn storage_hex(storage: fnp_dtype::ArrayStorage) -> String {
     use fnp_dtype::ArrayStorage;
     let mut bytes = Vec::new();
     match storage {
         ArrayStorage::Bool(values) => bytes.extend(values.into_iter().map(u8::from)),
+        ArrayStorage::I8(values) => bytes.extend(values.into_iter().map(|value| value as u8)),
+        ArrayStorage::I16(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::I32(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::I64(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::U8(values) => bytes.extend(values),
+        ArrayStorage::U16(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::U32(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+        ArrayStorage::U64(values) => {
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+        }
         ArrayStorage::F32(values) => {
             for value in values {
                 bytes.extend(value.to_le_bytes());
@@ -500,7 +532,7 @@ with warnings.catch_warnings():
     let mut actual = Vec::new();
     for source in sources {
         for target in [DType::Bool, DType::Complex64, DType::Complex128, DType::F64] {
-            let hex = floating_storage_hex(source.cast_to(target).unwrap());
+            let hex = storage_hex(source.cast_to(target).unwrap());
             actual.push(if hex.is_empty() {
                 "empty".to_owned()
             } else {
@@ -544,9 +576,121 @@ for source in sources:
     let mut actual = Vec::new();
     for source in sources {
         for target in [DType::F32, DType::Complex64] {
-            actual.push(floating_storage_hex(source.cast_to(target).unwrap()));
+            actual.push(storage_hex(source.cast_to(target).unwrap()));
         }
     }
     assert_eq!(actual.join("\n"), numpy);
+    Ok(())
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn conformance_storage_float_integer_boundaries() -> Result<(), String> {
+    use fnp_dtype::{ArrayStorage, DType, f16_from_f64};
+
+    // NumPy's out-of-range C casts are platform dependent. This matrix locks
+    // the Linux/x86-64 paths we implement, including their signed-indefinite
+    // values, truncation before narrowing, and the source's stored precision.
+    // uint32 is deliberately separate parity debt: NumPy's auto-vectorized
+    // body and scalar tail can disagree even in the same conversion.
+    let values = vec![
+        f64::NAN,
+        -f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        0.9999,
+        -0.9999,
+        1.9,
+        -1.9,
+        -129.999,
+        -128.001,
+        -128.0,
+        127.999,
+        128.0,
+        255.999,
+        256.0,
+        -32769.999,
+        -32768.0,
+        32767.999,
+        32768.0,
+        65535.999,
+        65536.0,
+        -2_f64.powi(31) - 1.0,
+        -2_f64.powi(31) - 0.75,
+        -2_f64.powi(31),
+        -2_f64.powi(31) + 1.0,
+        2_f64.powi(31) - 0.5,
+        2_f64.powi(31),
+        2_f64.powi(31) + 1.0,
+        2_f64.powi(32) - 1.0,
+        2_f64.powi(32),
+        2_f64.powi(32) + 257.0,
+        -2_f64.powi(32) - 257.0,
+        (-2_f64.powi(63)).next_down(),
+        -2_f64.powi(63),
+        (-2_f64.powi(63)).next_up(),
+        2_f64.powi(63).next_down(),
+        2_f64.powi(63),
+        2_f64.powi(63).next_up(),
+        2_f64.powi(64).next_down(),
+        2_f64.powi(64),
+        2_f64.powi(64).next_up(),
+        f64::MAX,
+        -f64::MAX,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+    ];
+    let bits: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
+    let numpy = numpy_oracle(&format!(
+        r#"
+import numpy as np
+bits = np.array({bits:?}, dtype='<u8')
+values = bits.view('<f8')
+with np.errstate(all='ignore'):
+    for source_dtype in ['<f2', '<f4', '<f8']:
+        source = values.astype(source_dtype)
+        inputs = [source[:0], source] + [source[i:i+1] for i in range(len(source))]
+        for source_slice in inputs:
+            for target in ['i1', '<i2', '<i4', '<i8', 'u1', '<u2', '<u8']:
+                print(source_slice.astype(target).tobytes().hex() or 'empty')
+"#
+    ))?;
+    let targets = [
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U64,
+    ];
+    let mut expected = numpy.lines();
+    for source_dtype in [DType::F16, DType::F32, DType::F64] {
+        let slices = std::iter::once(&values[..0])
+            .chain(std::iter::once(values.as_slice()))
+            .chain(values.chunks(1));
+        for (slice_index, slice) in slices.enumerate() {
+            let source = match source_dtype {
+                DType::F16 => ArrayStorage::F16(slice.iter().copied().map(f16_from_f64).collect()),
+                DType::F32 => ArrayStorage::F32(slice.iter().map(|&value| value as f32).collect()),
+                DType::F64 => ArrayStorage::F64(slice.to_vec()),
+                _ => unreachable!(),
+            };
+            for target in targets {
+                let actual = storage_hex(source.cast_to(target).unwrap());
+                assert_eq!(
+                    if actual.is_empty() { "empty" } else { &actual },
+                    expected.next().expect("oracle returned every conversion"),
+                    "source={source_dtype:?}, target={target:?}, slice={slice_index}"
+                );
+            }
+        }
+    }
+    assert!(
+        expected.next().is_none(),
+        "every oracle conversion was checked"
+    );
     Ok(())
 }

@@ -940,18 +940,55 @@ pub enum ArrayStorage {
     Structured(StructuredStorage),
 }
 
-/// Truncate f64 toward zero, then allow integer wrapping via `as` casts.
-/// This storage bridge maps NaN and infinity to zero; NumPy's platform-specific
-/// invalid-cast sentinels are not modeled by this helper.
-fn f64_to_wrapping_i128(val: f64) -> i128 {
+/// Model an x86 truncating signed conversion without Rust's saturating cast or
+/// an unchecked float-to-int instruction. `bits` is 32 or 64, and the exclusive
+/// upper bound is exactly representable in f64 (unlike `i64::MAX as f64`).
+fn x86_truncating_signed_cast(val: f64, bits: u32) -> i128 {
+    let truncated = val.trunc();
+    let bound = (1_u64 << (bits - 1)) as f64;
+    if (-bound..bound).contains(&truncated) {
+        truncated as i128
+    } else {
+        // CVTT* returns the signed integer-indefinite value for NaN, infinity,
+        // and a truncated value outside the destination's signed range.
+        -(1_i128 << (bits - 1))
+    }
+}
+
+/// Shared scalar-assignment and bulk-cast policy for floating integer inputs.
+/// Linux/x86-64 follows the NumPy C cast paths for the signed and narrow unsigned
+/// types, and its two-stage unsigned-64 conversion. The intermediate for an
+/// 8/16-bit destination is signed 32-bit, so values outside that intermediate's
+/// range must not first wrap through i128.
+///
+/// Out-of-range uint32 results depend on NumPy's compiler-generated vector body
+/// and scalar tail. That target and other platforms retain the existing policy
+/// pending their own oracle-backed implementation (franken_numpy-5cf9h).
+/// This value conversion does not emit warnings or update runtime error policy.
+fn f64_to_integer(val: f64, target: DType) -> i128 {
+    if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        match target {
+            DType::I8 | DType::I16 | DType::I32 | DType::U8 | DType::U16 => {
+                return x86_truncating_signed_cast(val, 32);
+            }
+            DType::I64 => return x86_truncating_signed_cast(val, 64),
+            DType::U64 => {
+                let high_bit = 1_u64 << 63;
+                let value = if val >= high_bit as f64 {
+                    (x86_truncating_signed_cast(val - high_bit as f64, 64) as u64)
+                        .wrapping_add(high_bit)
+                } else {
+                    x86_truncating_signed_cast(val, 64) as u64
+                };
+                return i128::from(value);
+            }
+            _ => {}
+        }
+    }
     if val.is_nan() || val.is_infinite() {
         return 0;
     }
-    let truncated = val.trunc();
-    // i128 range: roughly ±1.7e38, covering all practical integer results.
-    // Values outside i128 range saturate, which is acceptable since they
-    // exceed any integer dtype's range and will wrap anyway.
-    truncated as i128
+    val.trunc() as i128
 }
 
 /// Error type for storage operations.
@@ -1088,20 +1125,18 @@ impl ArrayStorage {
         if index >= n {
             return Err(StorageError::IndexOutOfBounds { index, len: n });
         }
-        // NumPy-compatible wrapping: float→int casts truncate toward zero then
-        // wrap via two's-complement, matching C semantics. Rust's `f64 as u8`
-        // saturates, so we route through i128 (integer→integer `as` wraps).
-        // NaN and infinity map to 0 (matching NumPy's integer cast behavior).
+        // Share integer conversion and invalid-value handling with cast_to;
+        // narrowing is applied only after the appropriate signed conversion.
         match self {
             Self::Bool(v) => v[index] = val != 0.0,
-            Self::I8(v) => v[index] = f64_to_wrapping_i128(val) as i8,
-            Self::I16(v) => v[index] = f64_to_wrapping_i128(val) as i16,
-            Self::I32(v) => v[index] = f64_to_wrapping_i128(val) as i32,
-            Self::I64(v) => v[index] = f64_to_wrapping_i128(val) as i64,
-            Self::U8(v) => v[index] = f64_to_wrapping_i128(val) as u8,
-            Self::U16(v) => v[index] = f64_to_wrapping_i128(val) as u16,
-            Self::U32(v) => v[index] = f64_to_wrapping_i128(val) as u32,
-            Self::U64(v) => v[index] = f64_to_wrapping_i128(val) as u64,
+            Self::I8(v) => v[index] = f64_to_integer(val, DType::I8) as i8,
+            Self::I16(v) => v[index] = f64_to_integer(val, DType::I16) as i16,
+            Self::I32(v) => v[index] = f64_to_integer(val, DType::I32) as i32,
+            Self::I64(v) => v[index] = f64_to_integer(val, DType::I64) as i64,
+            Self::U8(v) => v[index] = f64_to_integer(val, DType::U8) as u8,
+            Self::U16(v) => v[index] = f64_to_integer(val, DType::U16) as u16,
+            Self::U32(v) => v[index] = f64_to_integer(val, DType::U32) as u32,
+            Self::U64(v) => v[index] = f64_to_integer(val, DType::U64) as u64,
             Self::F16(v) => v[index] = f16_from_f64(val),
             Self::F32(v) => v[index] = val as f32,
             Self::F64(v) => v[index] = val,
@@ -1403,35 +1438,35 @@ impl ArrayStorage {
             Self::I8(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i8),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::I8) as i8),
             Self::I16(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i16),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::I16) as i16),
             Self::I32(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i32),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::I32) as i32),
             Self::I64(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i64),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::I64) as i64),
             Self::U8(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u8),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::U8) as u8),
             Self::U16(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u16),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::U16) as u16),
             Self::U32(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u32),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::U32) as u32),
             Self::U64(out) => out
                 .iter_mut()
                 .zip(vals)
-                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u64),
+                .for_each(|(o, &v)| *o = f64_to_integer(v, DType::U64) as u64),
             Self::F16(out) => out
                 .iter_mut()
                 .zip(vals)
@@ -2596,9 +2631,16 @@ mod tests {
         // cells: complex64/complex128 -> bool and cross-precision complex casts.
         // Independently reconstructing that stream in Python reproduces the old
         // digest; replacing only those four cells with NumPy astype output gives
-        // the digest below. The other 192 cells are byte-for-byte unchanged.
+        // the e4565efc... digest. The other 192 cells were unchanged at that step.
         // conformance_storage_complex_casts_preserve_components_and_truthiness
         // additionally checks the corrected behavior against the live oracle.
+        // On Linux x86_64 the float-to-integer fix changes another twelve
+        // cells: five float/complex sources -> i32/i64, and f32/f64 -> u64.
+        // An independent reconstruction reproduces the e4565efc... baseline;
+        // replacing only those cells with the NumPy invalid-cast sentinels
+        // gives f2f4b629... . The other 184 cells, including the retained u32
+        // policy, are unchanged. The live boundary conformance test covers
+        // the corrected float-source behavior.
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for src in cast_source_fixtures() {
@@ -2612,10 +2654,12 @@ mod tests {
             use std::fmt::Write as _;
             let _ = write!(&mut hex, "{byte:02x}");
         }
-        assert_eq!(
-            hex,
+        let expected = if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            "f2f4b62971431b390b9bcd41873be0cdb90d508641be4643396c3416871cbb90"
+        } else {
             "e4565efce75c476284ec05ca8358e5e96de2f984990ef76468351c74c450aab6"
-        );
+        };
+        assert_eq!(hex, expected);
     }
 
     #[test]
@@ -3500,6 +3544,100 @@ print("\n".join(rows))
         assert_eq!(cast.dtype(), DType::F64);
         assert_eq!(cast.get_f64(0).unwrap(), 10.0);
         assert_eq!(cast.get_f64(2).unwrap(), 30.0);
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn storage_float_integer_casts_preserve_invalid_sentinels() {
+        let values = vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            -f64::MAX,
+            2_f64.powi(63).next_down(),
+            2_f64.powi(63),
+            2_f64.powi(64).next_down(),
+            2_f64.powi(64),
+            -1.9,
+        ];
+        let source = ArrayStorage::F64(values.clone());
+        let expected = [
+            ArrayStorage::I8(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, -1]),
+            ArrayStorage::I16(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, -1]),
+            ArrayStorage::I32(vec![
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                i32::MIN,
+                -1,
+            ]),
+            ArrayStorage::I64(vec![
+                i64::MIN,
+                i64::MIN,
+                i64::MIN,
+                i64::MIN,
+                i64::MIN,
+                i64::MAX - 1023,
+                i64::MIN,
+                i64::MIN,
+                i64::MIN,
+                -1,
+            ]),
+            ArrayStorage::U8(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, u8::MAX]),
+            ArrayStorage::U16(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, u16::MAX]),
+            ArrayStorage::U64(vec![
+                1 << 63,
+                0,
+                1 << 63,
+                0,
+                1 << 63,
+                (1 << 63) - 1024,
+                1 << 63,
+                u64::MAX - 2047,
+                0,
+                u64::MAX,
+            ]),
+        ];
+        for expected_storage in expected {
+            let target = expected_storage.dtype();
+            assert_eq!(source.cast_to(target).unwrap(), expected_storage);
+            let mut assigned = ArrayStorage::zeros(target, values.len());
+            for (index, &value) in values.iter().enumerate() {
+                assigned.set_f64(index, value).unwrap();
+            }
+            assert_eq!(assigned, expected_storage);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn storage_float_integer_casts_truncate_before_checking_intermediate_width() {
+        let source = ArrayStorage::F64(vec![
+            2_f64.powi(31) - 0.25,
+            -2_f64.powi(31) - 0.75,
+            2_f64.powi(31) + 1.0,
+            -2_f64.powi(31) - 1.0,
+            -129.75,
+            256.75,
+        ]);
+        assert_eq!(
+            source.cast_to(DType::I32).unwrap(),
+            ArrayStorage::I32(vec![i32::MAX, i32::MIN, i32::MIN, i32::MIN, -129, 256])
+        );
+        assert_eq!(
+            source.cast_to(DType::I8).unwrap(),
+            ArrayStorage::I8(vec![-1, 0, 0, 0, 127, 0])
+        );
+        assert_eq!(
+            source.cast_to(DType::U8).unwrap(),
+            ArrayStorage::U8(vec![255, 0, 0, 0, 127, 0])
+        );
     }
 
     #[test]
