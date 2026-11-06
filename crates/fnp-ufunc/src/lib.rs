@@ -9978,9 +9978,11 @@ impl UFuncArray {
         let out_dtype = promote_for_mean_reduction(self.dtype);
         if out_dtype == DType::F16 {
             let mut mean = self.reduce_sum_axes(axes, true)?;
-            let count_f32 = f16::from_f64(count as f64).to_f32();
             for m in &mut mean.values {
-                *m = f16::from_f32(f16::from_f64(*m).to_f32() / count_f32).to_f64();
+                // NumPy divides by an integer count in f64, then rounds the
+                // result to f16. Casting the count itself to f16 loses odd
+                // counts above 2048 and overflows to infinity above 65504.
+                *m = f16::from_f64(*m / count as f64).to_f64();
             }
             let mean_broadcast = mean.broadcast_to(&self.shape)?;
             let sq_dev: Vec<f64> = self
@@ -10000,9 +10002,9 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
             let mut sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
-            let denom = f16::from_f64(count.saturating_sub(ddof) as f64).to_f32();
+            let denom = count.saturating_sub(ddof) as f64;
             for v in &mut sum_sq.values {
-                *v = f16::from_f32(f16::from_f64(*v).to_f32() / denom).to_f64();
+                *v = f16::from_f64(*v / denom).to_f64();
             }
             return Ok(sum_sq);
         }
@@ -10760,9 +10762,10 @@ impl UFuncArray {
                 let n = self.values.len();
                 let var = match out_dtype {
                     DType::F16 => {
-                        let rcount = f16::from_f64(n as f64).to_f32();
-                        let sum = f16::from_f64(reduce_sum_values_f16(&self.values)).to_f32();
-                        let mean = f16::from_f32(sum / rcount).to_f32();
+                        // The integer count promotes NumPy's division to f64;
+                        // only the resulting mean is rounded back to f16.
+                        let sum = reduce_sum_values_f16(&self.values);
+                        let mean = f16::from_f64(sum / n as f64).to_f32();
                         let sq: Vec<f64> = self
                             .values
                             .iter()
@@ -10771,9 +10774,9 @@ impl UFuncArray {
                                 f16::from_f32(d * d).to_f64()
                             })
                             .collect();
-                        let sum_sq = f16::from_f64(reduce_sum_values_f16(&sq)).to_f32();
-                        let denom = f16::from_f64(n.saturating_sub(ddof) as f64).to_f32();
-                        f16::from_f32(sum_sq / denom).to_f64()
+                        let sum_sq = reduce_sum_values_f16(&sq);
+                        let denom = n.saturating_sub(ddof) as f64;
+                        f16::from_f64(sum_sq / denom).to_f64()
                     }
                     DType::F32 => {
                         let mean = (reduce_sum_values_f32(&self.values) as f32) / (n as f32);

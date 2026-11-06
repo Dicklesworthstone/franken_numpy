@@ -2182,3 +2182,128 @@ fn statistical_explicit_dtype_reduction_order_matches_numpy() {
 fn statistical_explicit_dtype_edges_and_errors_match_numpy() {
     assert_statistical_dtype_numpy_parity("edges");
 }
+
+#[test]
+fn default_float16_statistics_keep_integer_reduction_counts() {
+    use fnp_dtype::f16;
+    use serde_json::Value;
+    use std::process::Command;
+
+    let script = r#"
+import json, sys, warnings
+try:
+    import numpy as np
+except ImportError:
+    print('null')
+    sys.exit(0)
+
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+cases = []
+# Counts above 2048 need not be exactly representable in float16; counts above
+# its finite range must still divide finite squared-deviation sums normally.
+for n in [2048, 2049, 65504, 65536]:
+    lane = np.resize(np.array([0., 0.125], dtype=np.float16), n)
+    strided = np.column_stack((lane, np.float16(0.25) - lane))
+    for layout, a, axis in [
+        ('flat', lane, None),
+        ('last_axis', np.stack((lane, lane)), -1),
+        ('first_axis', strided, 0),
+        ('tuple', lane.reshape(1, n), (0, 1)),
+        ('strided_tuple', strided.reshape(1, n, 2), (0, 1)),
+    ]:
+        for ddof in [0, 1, n - 1, n, n + 1]:
+            for keepdims in [False, True]:
+                for op in ['var', 'std']:
+                    result = np.asarray(getattr(np, op)(a, axis=axis,
+                                       keepdims=keepdims, ddof=ddof))
+                    cases.append(dict(n=n, layout=layout, op=op, ddof=ddof,
+                                      keepdims=keepdims, shape=list(result.shape),
+                                      dtype=str(result.dtype),
+                                      bits=result.ravel().view(np.uint16).tolist()))
+print(json.dumps(cases))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python)
+        .args(["-c", script])
+        .output()
+        .expect("launch NumPy float16 statistics oracle");
+    assert!(
+        output.status.success(),
+        "NumPy float16 statistics oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: Value = serde_json::from_slice(&output.stdout).expect("float16 oracle JSON");
+    if cases.is_null() {
+        assert!(
+            !matches!(
+                std::env::var("FNP_REQUIRE_REAL_NUMPY_ORACLE").as_deref(),
+                Ok("1" | "true")
+            ),
+            "NumPy oracle is required"
+        );
+        eprintln!("skipping float16 statistics oracle: NumPy is unavailable");
+        return;
+    }
+    let cases = cases.as_array().expect("float16 oracle cases");
+    assert_eq!(cases.len(), 400);
+    for case in cases {
+        let n = case["n"].as_u64().unwrap() as usize;
+        let layout = case["layout"].as_str().unwrap();
+        let lane: Vec<f64> = (0..n)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 0.125 })
+            .collect();
+        let (shape, values, axis) = match layout {
+            "flat" => (vec![n], lane, None),
+            "last_axis" => (vec![2, n], lane.repeat(2), Some(-1)),
+            "first_axis" | "strided_tuple" => {
+                let values = lane.iter().flat_map(|&v| [v, 0.25 - v]).collect();
+                let shape = if layout == "first_axis" {
+                    vec![n, 2]
+                } else {
+                    vec![1, n, 2]
+                };
+                (shape, values, Some(0))
+            }
+            "tuple" => (vec![1, n], lane, None),
+            _ => unreachable!(),
+        };
+        let input = UFuncArray::new(shape, values, DType::F16).unwrap();
+        let keepdims = case["keepdims"].as_bool().unwrap();
+        let ddof = case["ddof"].as_u64().unwrap() as usize;
+        let tuple = matches!(layout, "tuple" | "strided_tuple");
+        let actual = match (case["op"].as_str().unwrap(), tuple) {
+            ("var", false) => input.reduce_var(axis, keepdims, ddof),
+            ("std", false) => input.reduce_std(axis, keepdims, ddof),
+            ("var", true) => input.reduce_var_axes(&[0, 1], keepdims, ddof),
+            ("std", true) => input.reduce_std_axes(&[0, 1], keepdims, ddof),
+            _ => unreachable!(),
+        }
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let shape: Vec<usize> = case["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(case["dtype"], "float16", "{case}");
+        assert_eq!(actual.dtype(), DType::F16, "{case}");
+        assert_eq!(actual.shape(), shape, "{case}");
+        let expected = case["bits"].as_array().unwrap();
+        let ArrayStorage::F16(values) = actual.to_storage().unwrap() else {
+            panic!("{case}: expected float16 storage");
+        };
+        assert_eq!(values.len(), expected.len(), "{case}");
+        for (index, (actual, expected)) in values.iter().zip(expected).enumerate() {
+            let expected = f16::from_bits(expected.as_u64().unwrap() as u16);
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "element {index}: {case}");
+            } else {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "element {index}: {case}"
+                );
+            }
+        }
+    }
+}
