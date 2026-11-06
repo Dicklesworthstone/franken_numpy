@@ -30,6 +30,17 @@ fn reduce(
         ("mean", None) => array.reduce_mean(axis, keepdims),
         ("var", None) => array.reduce_var(axis, keepdims, ddof),
         ("std", None) => array.reduce_std(axis, keepdims, ddof),
+        ("nansum", None) => array.nansum(axis, keepdims),
+        ("nanprod", None) => array.nanprod(axis, keepdims),
+        ("nanmean", None) => array.nanmean(axis, keepdims),
+        ("nanvar", None) => array.nanvar(axis, keepdims, ddof),
+        ("nanstd", None) => array.nanstd(axis, keepdims, ddof),
+        ("cumsum", None) => array.cumsum(axis),
+        ("cumprod", None) => array.cumprod(axis),
+        ("nancumsum", None) => array.nancumsum(axis),
+        ("nancumprod", None) => array.nancumprod(axis),
+        ("cumulative_sum", None) => array.cumulative_sum(axis),
+        ("cumulative_prod", None) => array.cumulative_prod(axis),
         ("sum", Some(dtype)) => array.reduce_sum_with_dtype(axis, keepdims, dtype),
         ("prod", Some(dtype)) => array.reduce_prod_with_dtype(axis, keepdims, dtype),
         ("mean", Some(dtype)) => array.reduce_mean_with_dtype(axis, keepdims, dtype),
@@ -141,9 +152,11 @@ for item in payload['inputs']:
 rows = []
 for case in payload['cases']:
     kw = dict(axis=case['axis'], keepdims=case['keepdims'])
+    if 'cum' in case['op']:
+        del kw['keepdims']
     if case['dtype'] is not None:
         kw['dtype'] = case['dtype']
-    if case['op'] in ('var', 'std'):
+    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
         result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
@@ -467,6 +480,252 @@ fn complex_signed_zeros_and_nonfinite_values_match_numpy() {
                 ] {
                     batch.push(input, &a, operation, dtype, None, false, 0);
                 }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_reductions_skip_whole_elements_and_keep_logical_shapes() {
+    let a = complex_array(
+        &[2, 2],
+        &[(1.0, 2.0), (f64::NAN, 100.0), (50.0, f64::NAN), (3.0, 4.0)],
+        DType::Complex128,
+    );
+    let sum = a.nansum(None, false).unwrap();
+    assert_eq!(sum.shape(), &[2]);
+    assert_eq!(sum.values(), &[4.0, 6.0]);
+    assert_eq!(a.nanprod(None, false).unwrap().values(), &[-5.0, 10.0]);
+    assert_eq!(a.nanmean(None, false).unwrap().values(), &[2.0, 3.0]);
+    let variance = a.nanvar(None, true, 0).unwrap();
+    assert_eq!(variance.shape(), &[1, 1]);
+    assert_eq!(variance.dtype(), DType::F64);
+    assert_eq!(variance.values(), &[2.0]);
+    let rows = a.nanmean(Some(-1), true).unwrap();
+    assert_eq!(rows.shape(), &[2, 1, 2]);
+    assert_eq!(rows.values(), &[1.0, 2.0, 3.0, 4.0]);
+    assert!(a.nanvar(None, false, 2).unwrap().values()[0].is_nan());
+    for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+        assert!(reduce(&a, operation, None, Some(2), false, 0).is_err());
+        let malformed = UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex128).unwrap();
+        assert!(reduce(&malformed, operation, None, None, false, 0).is_err());
+    }
+}
+
+#[test]
+fn complex_nan_reductions_match_numpy_across_axes_empty_lanes_and_ddof() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![7],
+            vec![2, 3],
+            vec![2, 3, 4],
+            vec![0],
+            vec![2, 0, 3],
+            vec![0, 2],
+        ] {
+            for pattern in [
+                vec![
+                    (1.25, 2.5),
+                    (f64::NAN, 100.0),
+                    (-3.0, 0.5),
+                    (50.0, f64::NAN),
+                    (5.5, -1.0),
+                ],
+                vec![(f64::NAN, 1.0), (2.0, f64::NAN)],
+                vec![(-0.0, -0.0), (-0.0, 0.0)],
+                vec![(f64::INFINITY, 1.0), (1.0, f64::INFINITY), (f64::NAN, 0.0)],
+            ] {
+                let count = shape.iter().product();
+                let values = (0..count)
+                    .map(|i| pattern[i % pattern.len()])
+                    .collect::<Vec<_>>();
+                let a = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&a);
+                for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    for axis in [None, Some(0), Some(-1), Some(1), Some(2), Some(-3)] {
+                        for keepdims in [false, true] {
+                            for ddof in if matches!(operation, "nanvar" | "nanstd") {
+                                &[0, 1, 7][..]
+                            } else {
+                                &[0][..]
+                            } {
+                                batch.push(input, &a, operation, None, axis, keepdims, *ddof);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_reductions_preserve_pairwise_positions_and_component_precision() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let large = if dtype == DType::Complex64 { 1e8 } else { 1e16 };
+        for len in [3, 4, 63, 64, 65, 127, 129, 8193] {
+            let pattern = [
+                (large, -large),
+                (f64::NAN, 5.0),
+                (1.0, 2.0),
+                (-large, large),
+                (3.0, f64::NAN),
+                (0.25, -0.125),
+            ];
+            let values = (0..len * 2)
+                .map(|i| pattern[i % pattern.len()])
+                .collect::<Vec<_>>();
+            for shape in [[2, len], [len, 2]] {
+                let a = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&a);
+                for operation in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                    for axis in [None, Some(0), Some(1)] {
+                        batch.push(input, &a, operation, None, axis, false, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_cumulative_operations_preserve_pairs_and_first_element_bits() {
+    let a = complex_array(&[2], &[(1.0, 2.0), (3.0, 4.0)], DType::Complex128);
+    let sums = a.cumsum(None).unwrap();
+    assert_eq!(sums.shape(), &[2, 2]);
+    assert_eq!(sums.values(), &[1.0, 2.0, 4.0, 6.0]);
+    assert_eq!(a.cumprod(None).unwrap().values(), &[1.0, 2.0, -5.0, 10.0]);
+    for first in [(-0.0, -0.0), (f64::INFINITY, 1.0), (1.0, f64::INFINITY)] {
+        let a = complex_array(&[1], &[first], DType::Complex128);
+        for result in [a.cumsum(None).unwrap(), a.cumprod(None).unwrap()] {
+            assert_eq!(result.values()[0].to_bits(), first.0.to_bits());
+            assert_eq!(result.values()[1].to_bits(), first.1.to_bits());
+        }
+    }
+    let a = complex_array(
+        &[3],
+        &[(f64::NAN, 10.0), (3.0, 4.0), (5.0, f64::NAN)],
+        DType::Complex128,
+    );
+    assert_eq!(
+        a.nancumsum(None).unwrap().values(),
+        &[0.0, 0.0, 3.0, 4.0, 3.0, 4.0]
+    );
+    assert_eq!(
+        a.nancumprod(None).unwrap().values(),
+        &[1.0, 0.0, 3.0, 4.0, 3.0, 4.0]
+    );
+
+    let empty = complex_array(&[0, usize::MAX, usize::MAX], &[], DType::Complex64);
+    for operation in ["cumsum", "cumprod", "nancumsum", "nancumprod"] {
+        let flattened = reduce(&empty, operation, None, None, false, 0).unwrap();
+        assert_eq!(flattened.shape(), &[0, 2]);
+        assert!(
+            reduce(&empty, operation, None, Some(0), false, 0)
+                .unwrap()
+                .values()
+                .is_empty()
+        );
+        assert!(reduce(&empty, operation, None, Some(3), false, 0).is_err());
+        let malformed = UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex128).unwrap();
+        assert!(reduce(&malformed, operation, None, None, false, 0).is_err());
+    }
+    let matrix = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+    assert!(matrix.cumulative_sum(None).is_err());
+    assert!(matrix.cumulative_prod(None).is_err());
+    assert_eq!(
+        matrix.cumsum(None).unwrap().values(),
+        &[1.0, 3.0, 6.0, 10.0]
+    );
+}
+
+#[test]
+fn complex_cumulative_operations_match_numpy_on_logical_axes_and_missing_values() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![7],
+            vec![2, 3],
+            vec![2, 3, 4],
+            vec![0],
+            vec![2, 0, 3],
+            vec![0, 2],
+        ] {
+            for pattern in [
+                vec![(1.25, 2.5), (-3.0, 0.5), (0.0, -4.25), (5.5, 1.0)],
+                vec![(f64::NAN, 1.0), (2.0, 3.0), (50.0, f64::NAN)],
+                vec![(-0.0, -0.0), (0.0, 0.0), (-0.0, 0.0)],
+                vec![(f64::INFINITY, 1.0), (1.0, f64::INFINITY), (f64::NAN, 0.0)],
+                vec![
+                    (16_777_217.0, -16_777_217.0),
+                    (1.0, 1.0),
+                    (-16_777_216.0, 16_777_216.0),
+                ],
+            ] {
+                let count = shape.iter().product();
+                let values = (0..count)
+                    .map(|i| pattern[i % pattern.len()])
+                    .collect::<Vec<_>>();
+                let a = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&a);
+                for operation in [
+                    "cumsum",
+                    "cumprod",
+                    "nancumsum",
+                    "nancumprod",
+                    "cumulative_sum",
+                    "cumulative_prod",
+                ] {
+                    for axis in [None, Some(0), Some(-1), Some(1), Some(2), Some(-3)] {
+                        batch.push(input, &a, operation, None, axis, false, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn cumulative_scalar_axes_match_numpy_across_numeric_dtypes() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+    ] {
+        let a = UFuncArray::from_storage(
+            vec![],
+            ArrayStorage::F64(vec![3.25]).cast_to(dtype).unwrap(),
+        )
+        .unwrap();
+        let input = batch.add_input(&a);
+        for operation in [
+            "cumsum",
+            "cumprod",
+            "nancumsum",
+            "nancumprod",
+            "cumulative_sum",
+            "cumulative_prod",
+        ] {
+            for axis in [None, Some(0), Some(-1), Some(1), Some(-2)] {
+                batch.push(input, &a, operation, None, axis, false, 0);
             }
         }
     }

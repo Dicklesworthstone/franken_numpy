@@ -30,8 +30,9 @@
 
 ## GROUP 4: sum/prod/mean/var/std `dtype` parameter
 - [x] Rust-core `reduce_sum_with_dtype` and `reduce_prod_with_dtype` select both accumulator and result dtype for bool, all signed/unsigned integer widths, and float16/32/64; inputs are cast before accumulation, integer overflow wraps at the requested width, and exact wide-integer sidecars survive the result
-- [D] Rust-core explicit `dtype` for mean/var/std and complex reductions remains parity debt; the real-valued array bridge rejects complex inputs and accumulator dtypes explicitly
-- [D] Invalid and out-of-range floating-to-integer conversions inherit `ArrayStorage`'s conversion policy, including zero for nonfinite inputs; platform-specific NumPy invalid-cast parity remains open
+- [x] Rust-core `reduce_mean_with_dtype`, `reduce_var_with_dtype`, and `reduce_std_with_dtype` preserve accumulator/result precision, source-precision deviations, axis/keepdims, empty inputs, and ddof; interleaved complex sum/prod/mean/var/std support logical axes and real or complex accumulator dtypes
+- [x] Complex nansum/nanprod/nanmean/nanvar/nanstd exclude an entire logical element when either component is NaN; complex cumsum/cumprod and their NaN-aware variants preserve component precision, logical axes, and first-element bits
+- [D] Linux x86_64 floating-to-integer casts now model NumPy's signed/narrow integer conversion intermediates and uint64 invalid-value results; uint32 vector-body/scalar-tail differences, other platforms, and warning/error-policy integration remain open (`franken_numpy-5cf9h`)
 - [x] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`
 
 ## GROUP 5: percentile/quantile `keepdims` parameter
@@ -60,4 +61,4 @@
 - [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
 - [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
 - [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces
-- [D] `dtype` on mean/var/std and complex reductions — explicit real-valued sum/prod accumulator dtypes are implemented; the remaining reductions still need their own result and accumulator dtype handling
+- [D] Multi-axis complex reductions and explicit accumulator dtypes on tuple-axis/NaN-aware reduction methods still need dedicated parity coverage; the completed dtype methods above accept a single axis or all axes
