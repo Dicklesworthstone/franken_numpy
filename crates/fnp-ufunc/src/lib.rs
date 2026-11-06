@@ -10545,6 +10545,11 @@ impl UFuncArray {
         let axis_len = out_shape[axis];
         let inner = element_count(&out_shape[axis + 1..]).map_err(UFuncError::Shape)?;
         let outer = inputs.len() / (axis_len * inner);
+        // A two-element lane leaves one disjoint multiply after the initial
+        // copy, so NumPy uses its SIMD loop (including fused arithmetic).
+        // Longer lanes overlap the accumulator input and output, forcing the
+        // non-fused scalar loop for every step, even the first multiplication.
+        let fused_product = product && axis_len == 2 && Self::complex_multiply_uses_fma();
         let mut values = vec![0.0; self.values.len()];
         for outer_index in 0..outer {
             for inner_index in 0..inner {
@@ -10556,7 +10561,13 @@ impl UFuncArray {
                 values[2 * base + 1] = accumulator.1;
                 for offset in 1..axis_len {
                     let index = base + offset * inner;
-                    accumulator = if product {
+                    accumulator = if fused_product {
+                        Self::complex_cumulative_fused_multiply(
+                            accumulator,
+                            inputs[index],
+                            self.dtype,
+                        )
+                    } else if product {
                         Self::complex_reduction_multiply(accumulator, inputs[index], self.dtype)
                     } else {
                         Self::complex_reduction_add(accumulator, inputs[index], self.dtype)
@@ -10568,6 +10579,28 @@ impl UFuncArray {
         }
         out_shape.push(2);
         Self::new(out_shape, values, self.dtype)
+    }
+
+    fn complex_cumulative_fused_multiply(
+        lhs: (f64, f64),
+        rhs: (f64, f64),
+        dtype: DType,
+    ) -> (f64, f64) {
+        // Match NumPy's complex SIMD multiply: the products involving the
+        // imaginary part of the accumulator round before the fused operation.
+        if dtype == DType::Complex64 {
+            let (ar, ai) = (lhs.0 as f32, lhs.1 as f32);
+            let (br, bi) = (rhs.0 as f32, rhs.1 as f32);
+            (
+                f64::from(ar.mul_add(br, -(ai * bi))),
+                f64::from(ar.mul_add(bi, ai * br)),
+            )
+        } else {
+            (
+                lhs.0.mul_add(rhs.0, -(lhs.1 * rhs.1)),
+                lhs.0.mul_add(rhs.1, lhs.1 * rhs.0),
+            )
+        }
     }
 
     /// General accumulate: applies a binary function cumulatively along axis=0 of the
@@ -16747,6 +16780,23 @@ impl UFuncArray {
         }
     }
 
+    fn complex_multiply_uses_fma() -> bool {
+        // Match the default NumPy SIMD dispatch, without enabling automatic
+        // multiply/add contraction in the rest of the numerical core.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            std::arch::is_aarch64_feature_detected!("neon")
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            false
+        }
+    }
+
     /// NumPy's complex pairwise tree has four complex lanes and 64-element
     /// leaves, rather than the eight lanes and 128-element leaves of real sums.
     fn complex_pairwise_sum(values: &[(f64, f64)], dtype: DType) -> (f64, f64) {
@@ -16880,27 +16930,34 @@ impl UFuncArray {
         if !self.dtype.is_complex() {
             return self.divide_reduction_by_count(count);
         }
-        let denominator = count as f64;
         for parts in self.values.as_chunks_mut::<2>().0 {
-            let (re, im) = (parts[0], parts[1]);
-            // An integer count promotes NumPy's division loop to complex128.
-            // Even with a real denominator, complex division couples the
-            // components through zero products, affecting NaNs and signed zero.
-            let (re, im) = if count == 0 {
-                (re / denominator, im / denominator)
-            } else {
-                let reciprocal = 1.0 / denominator;
-                ((re + im * 0.0) * reciprocal, (im - re * 0.0) * reciprocal)
-            };
-            if self.dtype == DType::Complex64 {
-                parts[0] = f64::from(re as f32);
-                parts[1] = f64::from(im as f32);
-            } else {
-                parts[0] = re;
-                parts[1] = im;
-            }
+            let value =
+                Self::divide_complex_value_by_count((parts[0], parts[1]), count, self.dtype);
+            *parts = [value.0, value.1];
         }
         Ok(self)
+    }
+
+    fn divide_complex_value_by_count(
+        (re, im): (f64, f64),
+        count: usize,
+        dtype: DType,
+    ) -> (f64, f64) {
+        // An integer count promotes NumPy's division loop to complex128.
+        // Even with a real denominator, complex division couples the
+        // components through zero products, affecting NaNs and signed zero.
+        let denominator = count as f64;
+        let (re, im) = if count == 0 {
+            (re / denominator, im / denominator)
+        } else {
+            let reciprocal = 1.0 / denominator;
+            ((re + im * 0.0) * reciprocal, (im - re * 0.0) * reciprocal)
+        };
+        if dtype == DType::Complex64 {
+            (f64::from(re as f32), f64::from(im as f32))
+        } else {
+            (re, im)
+        }
     }
 
     fn reduce_complex_mean(
@@ -28662,7 +28719,9 @@ impl UFuncArray {
     /// `np.nansum` — sum ignoring NaN values.
     pub fn nansum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
-            return self.nan_filtered_fill(0.0).reduce_sum(axis, keepdims);
+            return self
+                .complex_nan_filtered_fill(0.0)?
+                .reduce_sum(axis, keepdims);
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_sum(axis, keepdims);
@@ -28720,7 +28779,7 @@ impl UFuncArray {
     /// `np.nanmean` — mean ignoring NaN values.
     pub fn nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
-            return self.reduce_complex_nan_statistic(axis, keepdims, None);
+            return self.complex_nanmean(axis, keepdims);
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_mean(axis, keepdims);
@@ -28839,7 +28898,7 @@ impl UFuncArray {
         ddof: usize,
     ) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
-            return self.reduce_complex_nan_statistic(axis, keepdims, Some(ddof));
+            return self.complex_nanvar(axis, keepdims, ddof);
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_var(axis, keepdims, ddof);
@@ -29568,6 +29627,11 @@ impl UFuncArray {
 
     /// `np.nanprod` — product of elements ignoring NaN values (treated as 1).
     pub fn nanprod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(1.0)?
+                .reduce_prod(axis, keepdims);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_prod(axis, keepdims);
         }
@@ -29577,6 +29641,9 @@ impl UFuncArray {
 
     /// `np.nancumsum` — cumulative sum ignoring NaN (treated as 0).
     pub fn nancumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.complex_nan_filtered_fill(0.0)?.cumsum(axis);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.cumsum(axis);
         }
@@ -29586,6 +29653,9 @@ impl UFuncArray {
 
     /// `np.nancumprod` — cumulative product ignoring NaN (treated as 1).
     pub fn nancumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.complex_nan_filtered_fill(1.0)?.cumprod(axis);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.cumprod(axis);
         }
@@ -29593,142 +29663,151 @@ impl UFuncArray {
         filled.cumprod(axis)
     }
 
-    /// Complex NaN statistics count logical elements: a NaN in either component
-    /// excludes the entire element. Keep excluded positions as zeroes in the
-    /// reduction tree so cancellation and pairwise rounding match NumPy.
-    fn reduce_complex_nan_statistic(
-        &self,
-        axis: Option<isize>,
-        keepdims: bool,
-        variance_ddof: Option<usize>,
-    ) -> Result<Self, UFuncError> {
-        let logical_shape = self.complex_logical_shape("NaN reduction")?;
-        // Unlike mean/var, nanmean/nanvar count through sum, which accepts
-        // axis=0 and axis=-1 on a scalar.
-        let axis = if logical_shape.is_empty() && matches!(axis, Some(0 | -1)) {
+    /// Replace a whole complex element when either component is NaN. The
+    /// replacement is a real scalar (`fill + 0j`), not two independent fills.
+    fn complex_nan_filtered_fill(&self, fill: f64) -> Result<Self, UFuncError> {
+        self.complex_logical_shape("NaN reduction")?;
+        let values = self
+            .complex_reduction_values(self.dtype)?
+            .into_iter()
+            .flat_map(|(re, im)| {
+                if re.is_nan() || im.is_nan() {
+                    [fill, 0.0]
+                } else {
+                    [re, im]
+                }
+            })
+            .collect();
+        Self::new(self.shape.clone(), values, self.dtype)
+    }
+
+    fn complex_nan_reduction_counts(&self, axis: Option<isize>) -> Result<Vec<usize>, UFuncError> {
+        let shape = self.complex_logical_shape("NaN reduction")?;
+        let axis = if shape.is_empty() && matches!(axis, Some(0 | -1)) {
             None
         } else {
             axis
         };
-        let valid = Self::new(
-            logical_shape.clone(),
-            self.values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|parts| {
-                    if parts[0].is_nan() || parts[1].is_nan() {
-                        0.0
-                    } else {
-                        1.0
-                    }
-                })
-                .collect(),
-            DType::Bool,
-        )?;
-        let counts = valid.reduce_sum(axis, true)?;
-        let filled = self.nan_filtered_fill(0.0);
-        let mut mean = filled.reduce_sum(axis, keepdims || variance_ddof.is_some())?;
-        for (parts, &count) in mean
-            .values
-            .as_chunks_mut::<2>()
-            .0
-            .iter_mut()
-            .zip(&counts.values)
-        {
-            let (re, im) = (parts[0], parts[1]);
-            // NumPy divides by an integer count through a complex128 loop,
-            // then casts back. The zero cross-products matter for infinities.
-            let (re, im) = if count == 0.0 {
-                (re / count, im / count)
-            } else {
-                let reciprocal = 1.0 / count;
-                ((re + im * 0.0) * reciprocal, (im - re * 0.0) * reciprocal)
-            };
-            if self.dtype == DType::Complex64 {
-                parts[0] = f64::from(re as f32);
-                parts[1] = f64::from(im as f32);
-            } else {
-                parts[0] = re;
-                parts[1] = im;
-            }
-        }
-        let Some(ddof) = variance_ddof else {
-            return Ok(mean);
-        };
-
-        let (axis_len, inner) = match axis {
-            Some(axis) if !self.values.is_empty() => {
-                let axis = normalize_axis(axis, logical_shape.len())?;
-                (
-                    logical_shape[axis],
-                    element_count(&logical_shape[axis + 1..]).map_err(UFuncError::Shape)?,
-                )
-            }
-            _ => (self.values.len() / 2, 1),
-        };
-        let component_dtype = if self.dtype == DType::Complex64 {
-            DType::F32
-        } else {
-            DType::F64
-        };
-        let squared = self
+        let valid = self
             .values
             .as_chunks::<2>()
             .0
             .iter()
+            .map(|parts| {
+                if parts[0].is_nan() || parts[1].is_nan() {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let counts = Self::new(shape, valid, DType::Bool)?.reduce_sum(axis, false)?;
+        Ok(counts
+            .values
+            .into_iter()
+            .map(|count| count as usize)
+            .collect())
+    }
+
+    fn complex_nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        let counts = self.complex_nan_reduction_counts(axis)?;
+        let mut result = self
+            .complex_nan_filtered_fill(0.0)?
+            .reduce_sum(axis, keepdims)?;
+        for (parts, count) in result.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
+            let value =
+                Self::divide_complex_value_by_count((parts[0], parts[1]), count, self.dtype);
+            *parts = [value.0, value.1];
+        }
+        Ok(result)
+    }
+
+    fn complex_nanvar(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("nanvar")?;
+        // NaN statistics count with sum(), so NumPy permits axis=0/-1 on a
+        // complex scalar even though its ordinary mean/var reject those axes.
+        let axis = if shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
+        let counts = self.complex_nan_reduction_counts(axis)?;
+        let mean = self.complex_nanmean(axis, true)?;
+        let (axis_len, inner) = match axis {
+            Some(axis) if !self.values.is_empty() => {
+                let axis = normalize_axis(axis, shape.len())?;
+                (
+                    shape[axis],
+                    element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                )
+            }
+            _ => (self.values.len() / 2, 1),
+        };
+        let dtype = if self.dtype == DType::Complex64 {
+            DType::F32
+        } else {
+            DType::F64
+        };
+        // nanvar computes multiply(deviation, conjugate(deviation)), unlike
+        // var's two separate real squares. NumPy's SIMD complex multiplication
+        // rounds the imaginary product first and fuses the real product with
+        // that sum on FMA-capable targets. Preserve this observable rounding
+        // without enabling contraction for unrelated kernels.
+        let fused_magnitude = Self::complex_multiply_uses_fma();
+        let squared = self
+            .complex_reduction_values(self.dtype)?
+            .into_iter()
             .enumerate()
-            .map(|(index, parts)| {
-                if valid.values[index] == 0.0 {
+            .map(|(index, (re, im))| {
+                if re.is_nan() || im.is_nan() {
+                    // Keep masked positions in the reduction tree. Removing
+                    // them changes floating-point addition order.
                     return 0.0;
                 }
-                let lane = if axis.is_some() {
+                let output = if axis.is_some() {
                     (index / (axis_len * inner)) * inner + index % inner
                 } else {
                     0
                 };
-                let average = mean.logical_complex_value(lane);
-                if self.dtype == DType::Complex64 {
-                    let re = (parts[0] as f32) - (average.0 as f32);
-                    let im = (parts[1] as f32) - (average.1 as f32);
-                    f64::from(re * re + im * im)
+                let average = mean.logical_complex_value(output);
+                if dtype == DType::F32 {
+                    let re = (re as f32) - (average.0 as f32);
+                    let im = (im as f32) - (average.1 as f32);
+                    f64::from(if fused_magnitude {
+                        re.mul_add(re, im * im)
+                    } else {
+                        re * re + im * im
+                    })
                 } else {
-                    let re = parts[0] - average.0;
-                    let im = parts[1] - average.1;
-                    re * re + im * im
+                    let re = re - average.0;
+                    let im = im - average.1;
+                    if fused_magnitude {
+                        re.mul_add(re, im * im)
+                    } else {
+                        re * re + im * im
+                    }
                 }
             })
             .collect();
-        let mut variance = Self::new(logical_shape, squared, component_dtype)?
-            .reduce_sum_with_dtype(axis, keepdims, component_dtype)?;
-        for (value, &count) in variance.values.iter_mut().zip(&counts.values) {
-            *value = if count <= ddof as f64 {
+        let mut result =
+            Self::new(shape, squared, dtype)?.reduce_sum_with_dtype(axis, keepdims, dtype)?;
+        for (value, count) in result.values.iter_mut().zip(counts) {
+            *value = if count <= ddof {
                 f64::NAN
             } else {
-                round_narrow_float_or_nan(*value / (count - ddof as f64), component_dtype)
+                round_narrow_float_or_nan(*value / (count - ddof) as f64, dtype)
             };
         }
-        Ok(variance)
+        Ok(result)
     }
 
-    /// Replace NaN values with a specified real fill value. A complex value is
-    /// missing when either component is NaN; replace both components together.
+    /// Replace NaN values with a specified fill value.
     fn nan_filtered_fill(&self, fill: f64) -> Self {
-        if self.dtype.is_complex() {
-            let mut values = self.values.clone();
-            for parts in values.as_chunks_mut::<2>().0 {
-                if parts[0].is_nan() || parts[1].is_nan() {
-                    parts[0] = fill;
-                    parts[1] = 0.0;
-                }
-            }
-            return Self {
-                shape: self.shape.clone(),
-                values,
-                dtype: self.dtype,
-                integer_sidecar: None,
-            };
-        }
         let values: Vec<f64> = self
             .values
             .iter()

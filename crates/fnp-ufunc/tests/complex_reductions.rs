@@ -731,3 +731,166 @@ fn cumulative_scalar_axes_match_numpy_across_numeric_dtypes() {
     }
     batch.assert_matches_numpy();
 }
+
+#[test]
+fn complex_nan_reductions_discard_entire_elements_and_preserve_logical_shape() {
+    let a = complex_array(
+        &[2, 3],
+        &[
+            (f64::NAN, 100.0),
+            (100.0, f64::NAN),
+            (1.0, 2.0),
+            (3.0, 4.0),
+            (f64::NAN, f64::NAN),
+            (5.0, 6.0),
+        ],
+        DType::Complex128,
+    );
+    let sum = a.nansum(Some(1), true).unwrap();
+    assert_eq!(sum.shape(), &[2, 1, 2]);
+    assert_eq!(sum.values(), &[1.0, 2.0, 8.0, 10.0]);
+    assert_eq!(a.nanprod(None, false).unwrap().values(), &[-85.0, 20.0]);
+    let mean = a.nanmean(Some(1), false).unwrap();
+    assert_eq!(mean.shape(), &[2, 2]);
+    assert_eq!(mean.values(), &[1.0, 2.0, 4.0, 5.0]);
+    let variance = a.nanvar(Some(1), true, 0).unwrap();
+    assert_eq!(variance.shape(), &[2, 1]);
+    assert_eq!(variance.dtype(), DType::F64);
+    assert_eq!(variance.values(), &[0.0, 2.0]);
+    assert!(a.nanvar(Some(1), false, 1).unwrap().values()[0].is_nan());
+    assert_eq!(a.nanvar(Some(1), false, 1).unwrap().values()[1], 4.0);
+
+    let all_nan = complex_array(&[1], &[(1.0, f64::NAN)], DType::Complex64);
+    assert_eq!(all_nan.nansum(None, false).unwrap().values(), &[0.0, 0.0]);
+    assert_eq!(all_nan.nanprod(None, false).unwrap().values(), &[1.0, 0.0]);
+    for operation in ["nanmean", "nanvar", "nanstd"] {
+        assert!(
+            reduce(&all_nan, operation, None, None, false, 0)
+                .unwrap()
+                .values()
+                .iter()
+                .all(|value| value.is_nan())
+        );
+    }
+}
+
+#[test]
+fn complex_nan_reductions_validate_storage_and_logical_axes() {
+    for malformed in [
+        UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+    ] {
+        for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+            assert!(reduce(&malformed, operation, None, None, false, 0).is_err());
+        }
+    }
+    let scalar = complex_array(&[], &[(3.0, 4.0)], DType::Complex64);
+    for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+        for axis in [None, Some(0), Some(-1)] {
+            let output = reduce(&scalar, operation, None, axis, true, 0).unwrap();
+            if matches!(operation, "nanvar" | "nanstd") {
+                assert_eq!(output.shape(), &[] as &[usize]);
+                assert_eq!(output.values(), &[0.0]);
+            } else {
+                assert_eq!(output.shape(), &[2]);
+                assert_eq!(output.values(), &[3.0, 4.0]);
+            }
+        }
+        assert!(reduce(&scalar, operation, None, Some(1), false, 0).is_err());
+        let vector = complex_array(&[2], &[(1.0, 2.0), (3.0, 4.0)], DType::Complex64);
+        assert!(reduce(&vector, operation, None, Some(1), false, 0).is_err());
+    }
+}
+
+#[test]
+fn complex_nan_reduction_axes_empty_and_ddof_matrix_matches_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![2, 3], vec![2, 0, 3], vec![0, 2], vec![2, 2, 3]] {
+            let count = shape.iter().product();
+            let pattern = [
+                (1.25, 2.5),
+                (f64::NAN, 3.0),
+                (2.0, f64::NAN),
+                (f64::NAN, f64::NAN),
+                (-3.0, 0.5),
+                (5.5, 1.0),
+            ];
+            let values = (0..count)
+                .map(|i| pattern[i % pattern.len()])
+                .collect::<Vec<_>>();
+            let a = complex_array(&shape, &values, dtype);
+            let input = batch.add_input(&a);
+            for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                for axis in [None, Some(0), Some(-1), Some(1), Some(-3)] {
+                    for keepdims in [false, true] {
+                        for &ddof in if matches!(operation, "nanvar" | "nanstd") {
+                            &[0, 1, 7][..]
+                        } else {
+                            &[0][..]
+                        } {
+                            batch.push(input, &a, operation, None, axis, keepdims, ddof);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_reduction_precision_and_pairwise_order_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let large = if dtype == DType::Complex64 { 1e8 } else { 1e16 };
+        for len in [3, 4, 63, 64, 65, 127, 128, 129, 8191, 8192, 8193] {
+            let pattern = [
+                (large, -large),
+                (1.001, 2.003),
+                (f64::NAN, 7.0),
+                (-large, large),
+                (0.25, -0.125),
+                (7.0, f64::NAN),
+                (3.0, 1.0),
+            ];
+            let values = (0..2 * len)
+                .map(|i| pattern[i % pattern.len()])
+                .collect::<Vec<_>>();
+            for shape in [[2, len], [len, 2]] {
+                let a = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&a);
+                for operation in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                    for axis in [None, Some(0), Some(1)] {
+                        batch.push(input, &a, operation, None, axis, false, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_reduction_infinities_and_signed_zeros_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for values in [
+            vec![(-0.0, -0.0), (-0.0, 0.0)],
+            vec![(f64::INFINITY, 1.0), (1.0, 2.0)],
+            vec![(1.0, f64::INFINITY), (2.0, 3.0)],
+            vec![(f64::INFINITY, f64::NAN), (2.0, 3.0)],
+            vec![(f64::NAN, f64::INFINITY), (2.0, 3.0)],
+            vec![(f64::NAN, 1.0), (1.0, f64::NAN)],
+        ] {
+            let a = complex_array(&[2], &values, dtype);
+            let input = batch.add_input(&a);
+            for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                for keepdims in [false, true] {
+                    batch.push(input, &a, operation, None, None, keepdims, 0);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}

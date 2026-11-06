@@ -32,6 +32,7 @@
 - [x] Rust-core `reduce_sum_with_dtype` and `reduce_prod_with_dtype` select both accumulator and result dtype for bool, all signed/unsigned integer widths, and float16/32/64; inputs are cast before accumulation, integer overflow wraps at the requested width, and exact wide-integer sidecars survive the result
 - [x] Rust-core `reduce_mean_with_dtype`, `reduce_var_with_dtype`, and `reduce_std_with_dtype` preserve accumulator/result precision, source-precision deviations, axis/keepdims, empty inputs, and ddof; interleaved complex sum/prod/mean/var/std support logical axes and real or complex accumulator dtypes
 - [x] Complex nansum/nanprod/nanmean/nanvar/nanstd exclude an entire logical element when either component is NaN; complex cumsum/cumprod and their NaN-aware variants preserve component precision, logical axes, and first-element bits
+- [x] Default float16 variance/std retain integer count precision through division, including counts above float16's finite range
 - [D] Linux x86_64 floating-to-integer casts now model NumPy's signed/narrow integer conversion intermediates and uint64 invalid-value results; uint32 vector-body/scalar-tail differences, other platforms, and warning/error-policy integration remain open (`franken_numpy-5cf9h`)
 - [x] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`
 
