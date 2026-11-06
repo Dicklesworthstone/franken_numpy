@@ -64,4 +64,4 @@
 - [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
 - [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
 - [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces
-- [D] Explicit accumulator dtype variants on tuple-axis reduction methods remain open; default float32/64 and complex tuple-axis reductions now have dedicated joint-ordering coverage
+- [x] Rust-core `reduce_sum_axes_with_dtype`, `reduce_prod_axes_with_dtype`, `reduce_mean_axes_with_dtype`, `reduce_var_axes_with_dtype`, and `reduce_std_axes_with_dtype` support joint tuple reductions across all numeric accumulator dtypes; dedicated coverage includes exact integer wrapping, complex-to-real deviations, conversion buffers, float16 source precision, and impossible output capacities

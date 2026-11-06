@@ -9758,6 +9758,9 @@ impl UFuncArray {
     /// Mimics `np.sum(a, axis=(0, 2))`. Floating and complex inputs use a
     /// joint traversal so their accumulation order matches NumPy.
     pub fn reduce_sum_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype == DType::F16 {
+            return self.reduce_sum_axes_with_dtype(axes, keepdims, DType::F16);
+        }
         if self.dtype.is_complex() {
             return self.reduce_complex_sum_prod_axes(axes, keepdims, false);
         }
@@ -9813,6 +9816,9 @@ impl UFuncArray {
 
     /// Reduce prod over multiple axes simultaneously.
     pub fn reduce_prod_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype == DType::F16 {
+            return self.reduce_prod_axes_with_dtype(axes, keepdims, DType::F16);
+        }
         if self.dtype.is_complex() {
             return self.reduce_complex_sum_prod_axes(axes, keepdims, true);
         }
@@ -9859,6 +9865,263 @@ impl UFuncArray {
             result = result.reduce_prod(Some(ax as isize), keepdims)?;
         }
         Ok(result)
+    }
+
+    /// Sum over an axis tuple with an explicit accumulator and result dtype.
+    ///
+    /// All selected axes share one reduction, including conversion-buffer and
+    /// pairwise-summation boundaries. An empty tuple still casts each element
+    /// and applies the additive identity.
+    pub fn reduce_sum_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_axes_with_dtype(axes, keepdims, dtype, false, false)
+    }
+
+    /// Product over an axis tuple with an explicit accumulator and result dtype.
+    pub fn reduce_prod_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_axes_with_dtype(axes, keepdims, dtype, true, false)
+    }
+
+    fn reduce_arithmetic_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+        product: bool,
+        force_conversion_buffer: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if product { "prod" } else { "sum" };
+        let numeric = |dt: DType| {
+            dt.is_integer()
+                || dt.is_complex()
+                || matches!(dt, DType::Bool | DType::F16 | DType::F32 | DType::F64)
+        };
+        for (role, dt) in [("input", self.dtype), ("accumulator", dtype)] {
+            if !numeric(dt) {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: unsupported {role} dtype {dt:?}"
+                )));
+            }
+        }
+        let logical_shape = self.complex_logical_shape(operation)?;
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        if dtype.is_complex() {
+            let values = self.complex_reduction_values(dtype)?;
+            let result = Self::reduce_complex_tuple_values(
+                &values,
+                &plan,
+                dtype,
+                product,
+                self.dtype != dtype,
+            )?;
+            let mut shape = plan.output_shape;
+            shape.push(2);
+            return Self::new(
+                shape,
+                result.into_iter().flat_map(|(re, im)| [re, im]).collect(),
+                dtype,
+            );
+        }
+        if self.dtype.is_complex() {
+            let component_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            let values = self
+                .complex_reduction_values(self.dtype)?
+                .into_iter()
+                .map(|(re, im)| {
+                    if dtype == DType::Bool {
+                        if re != 0.0 || im != 0.0 { 1.0 } else { 0.0 }
+                    } else {
+                        re
+                    }
+                })
+                .collect();
+            // Extracting a component is itself a conversion, even if its real
+            // precision agrees with the requested accumulator precision.
+            return Self::new(logical_shape, values, component_dtype)?
+                .reduce_arithmetic_axes_with_dtype(axes, keepdims, dtype, product, true);
+        }
+
+        let storage = self.to_storage()?.cast_to(dtype).map_err(|err| {
+            UFuncError::Msg(format!("{operation}: input cast failed: {err}"))
+        })?;
+        let casted = Self::from_storage(self.shape.clone(), storage)?;
+        if dtype == DType::Bool {
+            let mut values = vec![if product { 1.0 } else { 0.0 }; plan.output_count];
+            for (index, &value) in casted.values.iter().enumerate() {
+                let output = &mut values[plan.output_index(index)];
+                let truth = if product {
+                    *output != 0.0 && value != 0.0
+                } else {
+                    *output != 0.0 || value != 0.0
+                };
+                *output = if truth { 1.0 } else { 0.0 };
+            }
+            return Self::new(plan.output_shape, values, dtype);
+        }
+        if matches!(dtype, DType::F16 | DType::F32 | DType::F64) {
+            let values = Self::reduce_real_tuple_values(
+                &casted.values,
+                &plan,
+                dtype,
+                product,
+                force_conversion_buffer || self.dtype != dtype,
+            );
+            return Self::new(plan.output_shape, values, dtype);
+        }
+
+        // Keep exact source integers in one joint traversal. Besides avoiding
+        // f64 rounding, this needs no intermediate array for an empty input
+        // whose unselected dimensions may have an unrepresentable product.
+        // Narrowing the final modular result is equivalent to wrapping every
+        // addition or multiplication at the requested integer width.
+        let sidecar = casted.promoting_reduction_sidecar().ok_or_else(|| {
+            UFuncError::Msg(format!("{operation}: missing integer accumulator storage"))
+        })?;
+        let storage = match sidecar {
+            IntegerSidecar::I64(values) => {
+                let mut output = vec![if product { 1_i64 } else { 0 }; plan.output_count];
+                for (index, value) in values.into_iter().enumerate() {
+                    let accumulator = &mut output[plan.output_index(index)];
+                    *accumulator = if product {
+                        accumulator.wrapping_mul(value)
+                    } else {
+                        accumulator.wrapping_add(value)
+                    };
+                }
+                ArrayStorage::I64(output)
+            }
+            IntegerSidecar::U64(values) => {
+                let mut output = vec![if product { 1_u64 } else { 0 }; plan.output_count];
+                for (index, value) in values.into_iter().enumerate() {
+                    let accumulator = &mut output[plan.output_index(index)];
+                    *accumulator = if product {
+                        accumulator.wrapping_mul(value)
+                    } else {
+                        accumulator.wrapping_add(value)
+                    };
+                }
+                ArrayStorage::U64(output)
+            }
+        };
+        let storage = storage.cast_to(dtype).map_err(|err| {
+            UFuncError::Msg(format!("{operation}: result cast failed: {err}"))
+        })?;
+        Self::from_storage(plan.output_shape, storage)
+    }
+
+    /// Mean over an axis tuple with an explicit accumulator and result dtype.
+    pub fn reduce_mean_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("mean")?;
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        self.reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
+            .divide_complex_reduction_by_count(plan.reduction_count)
+    }
+
+    /// Variance over an axis tuple with an explicit accumulator/result dtype.
+    ///
+    /// Only the reductions use `dtype`; deviations retain the promotion of
+    /// the original input and the mean, including original imaginary parts.
+    pub fn reduce_var_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("var")?;
+        let normalized = normalize_reduction_axes(axes, logical_shape.len())?;
+        let count = if normalized.iter().any(|&axis| logical_shape[axis] == 0) {
+            0
+        } else {
+            normalized.iter().try_fold(1usize, |count, &axis| {
+                count
+                    .checked_mul(logical_shape[axis])
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
+            })?
+        };
+        let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
+        let mean = self.reduce_mean_axes_with_dtype(axes, true, dtype)?;
+        let squared = if self.dtype.is_complex() || dtype.is_complex() {
+            let deviation_dtype = promote(self.dtype, dtype);
+            let inputs = self.complex_reduction_values(deviation_dtype)?;
+            let magnitude = self.dtype.is_complex() || self.dtype == DType::Bool;
+            let mut values = Vec::with_capacity(if magnitude {
+                inputs.len()
+            } else {
+                inputs.len().saturating_mul(2)
+            });
+            for (index, value) in inputs.into_iter().enumerate() {
+                let average = mean.logical_complex_value(plan.output_index(index));
+                let deviation = Self::complex_reduction_add(
+                    value,
+                    (-average.0, -average.1),
+                    deviation_dtype,
+                );
+                if magnitude {
+                    let square = if deviation_dtype == DType::Complex64 {
+                        let (re, im) = (deviation.0 as f32, deviation.1 as f32);
+                        f64::from(re * re + im * im)
+                    } else {
+                        deviation.0 * deviation.0 + deviation.1 * deviation.1
+                    };
+                    values.push(square);
+                } else {
+                    let square = Self::complex_reduction_multiply(
+                        deviation,
+                        deviation,
+                        deviation_dtype,
+                    );
+                    values.extend([square.0, square.1]);
+                }
+            }
+            let mut shape = logical_shape;
+            let squared_dtype = if magnitude {
+                if deviation_dtype == DType::Complex64 {
+                    DType::F32
+                } else {
+                    DType::F64
+                }
+            } else {
+                shape.push(2);
+                deviation_dtype
+            };
+            Self::new(shape, values, squared_dtype)?
+        } else {
+            self.squared_real_reduction_deviations(&mean)?
+        };
+        squared
+            .reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
+            .divide_complex_reduction_by_count(count.saturating_sub(ddof))
+    }
+
+    /// Standard deviation over an axis tuple with an explicit result dtype.
+    pub fn reduce_std_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_var_axes_with_dtype(axes, keepdims, ddof, dtype)?
+            .sqrt_statistical_reduction()
     }
 
     /// Reduce min over multiple axes simultaneously.
@@ -9978,36 +10241,9 @@ impl UFuncArray {
         }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         if out_dtype == DType::F16 {
-            let mut mean = self.reduce_sum_axes(axes, true)?;
-            for m in &mut mean.values {
-                // NumPy divides by an integer count in f64, then rounds the
-                // result to f16. Casting the count itself to f16 loses odd
-                // counts above 2048 and overflows to infinity above 65504.
-                *m = f16::from_f64(*m / count as f64).to_f64();
-            }
-            let mean_broadcast = mean.broadcast_to(&self.shape)?;
-            let sq_dev: Vec<f64> = self
-                .values
-                .iter()
-                .zip(&mean_broadcast.values)
-                .map(|(&v, &m)| {
-                    let d = f16::from_f32(f16::from_f64(v).to_f32() - f16::from_f64(m).to_f32())
-                        .to_f32();
-                    f16::from_f32(d * d).to_f64()
-                })
-                .collect();
-            let sq_arr = Self {
-                shape: self.shape.clone(),
-                values: sq_dev,
-                dtype: DType::F16,
-                integer_sidecar: None,
-            };
-            let mut sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
-            let denom = count.saturating_sub(ddof) as f64;
-            for v in &mut sum_sq.values {
-                *v = f16::from_f64(*v / denom).to_f64();
-            }
-            return Ok(sum_sq);
+            // Reuse the typed path so source values are rounded directly to
+            // half before subtraction and every selected axis shares one sum.
+            return self.reduce_var_axes_with_dtype(axes, keepdims, ddof, DType::F16);
         }
         if out_dtype == DType::F32 {
             let mean = self.reduce_mean_axes(axes, true)?;
@@ -10779,7 +11015,13 @@ impl UFuncArray {
         }
         let count = self.statistical_reduction_count(axis)?;
         let mean = self.reduce_mean_with_dtype(axis, true, dtype)?;
-        if self.dtype == DType::Bool && dtype == DType::Bool {
+        self.squared_real_reduction_deviations(&mean)?
+            .reduce_sum_with_dtype(axis, keepdims, dtype)?
+            .divide_reduction_by_count(count.saturating_sub(ddof))
+    }
+
+    fn squared_real_reduction_deviations(&self, mean: &Self) -> Result<Self, UFuncError> {
+        if self.dtype == DType::Bool && mean.dtype == DType::Bool {
             return Err(UFuncError::Msg(
                 "var: boolean subtraction is not supported".to_string(),
             ));
@@ -10787,7 +11029,7 @@ impl UFuncArray {
         // Normalize the f64 working buffer to the declared source precision,
         // while keeping exact integer sidecars for mixed integer arithmetic.
         let input = Self::from_storage(self.shape.clone(), self.to_storage()?)?;
-        let deviations = input.elementwise_binary(&mean, BinaryOp::Sub)?;
+        let deviations = input.elementwise_binary(mean, BinaryOp::Sub)?;
         let squared = match deviations.synthesized_integer_sidecar("var")? {
             Some(sidecar) => {
                 // Even an int32 deviation can have a square wider than f64's
@@ -10814,9 +11056,7 @@ impl UFuncArray {
             }
             None => deviations.elementwise_binary(&deviations, BinaryOp::Mul)?,
         };
-        squared
-            .reduce_sum_with_dtype(axis, keepdims, dtype)?
-            .divide_reduction_by_count(count.saturating_sub(ddof))
+        Ok(squared)
     }
 
     /// Standard deviation with an explicit accumulator and result dtype.
@@ -10830,27 +11070,8 @@ impl UFuncArray {
         ddof: usize,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
-        if self.dtype.is_complex() || dtype.is_complex() {
-            return self.reduce_complex_std(axis, keepdims, ddof, Some(dtype));
-        }
-        let variance = self.reduce_var_with_dtype(axis, keepdims, ddof, dtype)?;
-        if (dtype.is_integer() || dtype == DType::Bool) && !variance.shape.is_empty() {
-            return Err(UFuncError::Msg(format!(
-                "std: cannot cast floating square root to {dtype:?} with same_kind casting"
-            )));
-        }
-        let values = variance
-            .values
-            .iter()
-            .map(|&value| match dtype {
-                DType::Bool | DType::I8 | DType::U8 | DType::F16 => {
-                    f16::from_f32(f16::from_f64(value).to_f32().sqrt()).to_f64()
-                }
-                DType::I16 | DType::U16 | DType::F32 => f64::from((value as f32).sqrt()),
-                _ => value.sqrt(),
-            })
-            .collect();
-        Self::from_values_with_dtype(variance.shape, values, dtype)
+        self.reduce_var_with_dtype(axis, keepdims, ddof, dtype)?
+            .sqrt_statistical_reduction()
     }
 
     /// Compute population variance along `axis` (ddof=0 by default, matching `numpy.var`).
@@ -10864,28 +11085,14 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_var(axis, keepdims, ddof, None);
         }
+        if self.dtype == DType::F16 {
+            return self.reduce_var_with_dtype(axis, keepdims, ddof, DType::F16);
+        }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
                 let n = self.values.len();
                 let var = match out_dtype {
-                    DType::F16 => {
-                        // The integer count promotes NumPy's division to f64;
-                        // only the resulting mean is rounded back to f16.
-                        let sum = reduce_sum_values_f16(&self.values);
-                        let mean = f16::from_f64(sum / n as f64).to_f32();
-                        let sq: Vec<f64> = self
-                            .values
-                            .iter()
-                            .map(|&v| {
-                                let d = f16::from_f32(f16::from_f64(v).to_f32() - mean).to_f32();
-                                f16::from_f32(d * d).to_f64()
-                            })
-                            .collect();
-                        let sum_sq = reduce_sum_values_f16(&sq);
-                        let denom = n.saturating_sub(ddof) as f64;
-                        f16::from_f64(sum_sq / denom).to_f64()
-                    }
                     DType::F32 => {
                         let mean = (reduce_sum_values_f32(&self.values) as f32) / (n as f32);
                         let sq: Vec<f64> = self
@@ -10923,7 +11130,7 @@ impl UFuncArray {
                 })
             }
             Some(axis) => {
-                if matches!(out_dtype, DType::F16 | DType::F32) {
+                if out_dtype == DType::F32 {
                     return self.reduce_var_axes(&[axis], keepdims, ddof);
                 }
                 let axis = normalize_axis(axis, self.shape.len())?;
@@ -16831,7 +17038,20 @@ impl UFuncArray {
         buffered: bool,
     ) -> Vec<f64> {
         let mut result = vec![if product { 1.0 } else { 0.0 }; plan.output_count];
-        if product {
+        if product && dtype == DType::F16 {
+            // HALF_multiply keeps an f32 accumulator within one inner loop,
+            // then rounds to half when a run or conversion buffer ends.
+            for (run_index, run) in values.chunks(plan.contiguous_run_len).enumerate() {
+                let output = plan.output_index(run_index * plan.contiguous_run_len);
+                let buffer_len = if buffered { 8192 } else { run.len() };
+                for buffer in run.chunks(buffer_len) {
+                    let product = buffer
+                        .iter()
+                        .fold(result[output] as f32, |acc, &value| acc * value as f32);
+                    result[output] = f16::from_f32(product).to_f64();
+                }
+            }
+        } else if product {
             // A tuple product keeps one accumulator across all selected axes;
             // independently reduced runs would reassociate its multiplication.
             for (index, &value) in values.iter().enumerate() {
@@ -16849,6 +17069,15 @@ impl UFuncArray {
                 // A retained dimension separates runs, which add in C order.
                 let buffer_len = if buffered { 8192 } else { run.len() };
                 for buffer in run.chunks(buffer_len) {
+                    if dtype == DType::F16 {
+                        // The f32 partial is added before HALF_add rounds back
+                        // to half; rounding the partial first loses low bits.
+                        result[output] = f16::from_f32(
+                            result[output] as f32 + pairwise_sum_f16_values(buffer),
+                        )
+                        .to_f64();
+                        continue;
+                    }
                     let partial = Self::reduce_float_lane_with_dtype(buffer, dtype, false, false);
                     // Cast buffers resume the existing output accumulator;
                     // summing their partials into a run total reassociates it.
@@ -16943,10 +17172,13 @@ impl UFuncArray {
         plan: &AxesReductionPlan,
         dtype: DType,
         product: bool,
+        buffered: bool,
     ) -> Result<Vec<(f64, f64)>, UFuncError> {
-        plan.output_count
-            .checked_mul(2)
-            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        // Vec's allocation bound is measured in bytes, not logical elements.
+        // The real-output plan guard cannot account for both complex components.
+        if plan.output_count > isize::MAX as usize / std::mem::size_of::<(f64, f64)>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
         let identity = if product { (1.0, 0.0) } else { (0.0, 0.0) };
         let mut result = vec![identity; plan.output_count];
         if product {
@@ -16967,11 +17199,14 @@ impl UFuncArray {
             // gathering a whole output lane changes NumPy's pairwise tree.
             for (run_index, run) in values.chunks(plan.contiguous_run_len).enumerate() {
                 let output = plan.output_index(run_index * plan.contiguous_run_len);
-                result[output] = Self::complex_reduction_add(
-                    result[output],
-                    Self::complex_pairwise_sum(run, dtype),
-                    dtype,
-                );
+                let buffer_len = if buffered { 8192 } else { run.len() };
+                for buffer in run.chunks(buffer_len) {
+                    result[output] = Self::complex_reduction_add(
+                        result[output],
+                        Self::complex_pairwise_sum(buffer, dtype),
+                        dtype,
+                    );
+                }
             }
         }
         Ok(result)
@@ -16986,7 +17221,8 @@ impl UFuncArray {
         let logical_shape = self.complex_logical_shape(if product { "prod" } else { "sum" })?;
         let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
         let values = self.complex_reduction_values(self.dtype)?;
-        let reduced = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, product)?;
+        let reduced =
+            Self::reduce_complex_tuple_values(&values, &plan, self.dtype, product, false)?;
         let mut output_shape = plan.output_shape;
         output_shape.push(2);
         Self::new(
@@ -17000,7 +17236,7 @@ impl UFuncArray {
         let logical_shape = self.complex_logical_shape("mean")?;
         let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
         let values = self.complex_reduction_values(self.dtype)?;
-        let reduced = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false)?;
+        let reduced = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false, false)?;
         let values = reduced
             .into_iter()
             .flat_map(|value| {
@@ -17023,7 +17259,8 @@ impl UFuncArray {
         let logical_shape = self.complex_logical_shape("var")?;
         let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
         let values = self.complex_reduction_values(self.dtype)?;
-        let mut means = Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false)?;
+        let mut means =
+            Self::reduce_complex_tuple_values(&values, &plan, self.dtype, false, false)?;
         for mean in &mut means {
             *mean = Self::divide_complex_value_by_count(*mean, plan.reduction_count, self.dtype);
         }
@@ -39941,6 +40178,12 @@ impl AxesReductionPlan {
             retained_shape.clone()
         };
         let output_count = count_elements(&output_shape)?;
+        // Every reduction output uses an f64, i64, or u64 working buffer.
+        // Reject structurally impossible Vec capacities before an empty input
+        // can request such an output, without imposing a RAM admission limit.
+        if output_count > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
         let input_count = count_elements(shape)?;
         let reduction_count = if output_count == 0 {
             // An empty output has no lanes; large unused selected dimensions
