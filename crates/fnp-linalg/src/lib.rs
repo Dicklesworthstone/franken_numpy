@@ -12281,21 +12281,35 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
             v[2 * i + 1] = r[2 * ((col + i) * n + col) + 1];
         }
 
-        // Compute norm of v
+        // A Householder reflector is unchanged by positive scaling. Form it
+        // from bounded components so neither squaring a large column nor
+        // squaring a tiny (including subnormal) column loses its direction.
+        // Scale only the reflector: unrelated columns of R may have entirely
+        // different magnitudes and must retain their own small components.
+        let scale = v.iter().fold(0.0_f64, |scale, x| scale.max(x.abs()));
+        if scale == 0.0 {
+            continue;
+        }
+        for component in &mut v {
+            *component /= scale;
+        }
+
+        // At least one component now has magnitude one.
         let mut norm_sq = 0.0;
         for i in 0..sub_len {
             norm_sq += cabs2(v[2 * i], v[2 * i + 1]);
         }
         let norm = norm_sq.sqrt();
 
-        if norm < f64::MIN_POSITIVE {
-            continue;
-        }
-
-        // Phase: e^{iθ} where θ = arg(v[0])
-        let v0_abs = cabs2(v[0], v[1]).sqrt();
-        let (phase_re, phase_im) = if v0_abs > f64::MIN_POSITIVE {
-            (v[0] / v0_abs, v[1] / v0_abs)
+        // Phase: e^{iθ} where θ = arg(v[0]). The leading entry can still
+        // be subnormal relative to the column, so normalize it separately
+        // before taking its magnitude to preserve a unit-modulus phase.
+        let v0_scale = v[0].abs().max(v[1].abs());
+        let (phase_re, phase_im) = if v0_scale != 0.0 {
+            let re = v[0] / v0_scale;
+            let im = v[1] / v0_scale;
+            let magnitude = re.hypot(im);
+            (re / magnitude, im / magnitude)
         } else {
             (1.0, 0.0)
         };
@@ -12311,9 +12325,6 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
             v_norm_sq += cabs2(v[2 * i], v[2 * i + 1]);
         }
         let v_norm = v_norm_sq.sqrt();
-        if v_norm < f64::MIN_POSITIVE {
-            continue;
-        }
         for i in 0..sub_len {
             v[2 * i] /= v_norm;
             v[2 * i + 1] /= v_norm;
@@ -22280,6 +22291,181 @@ for col in range(n):
                 "QR tall reconstruction mismatch at {i}"
             );
         }
+    }
+
+    fn complex_qr_scale_cases() -> Vec<(usize, usize, Vec<f64>)> {
+        let base = [
+            [(1.0, 2.0), (3.0, -1.0), (2.0, 0.5)],
+            [(2.0, 1.0), (-1.0, 4.0), (3.0, -2.0)],
+            [(3.0, -2.0), (2.0, 3.0), (-2.0, 1.0)],
+        ];
+        let mut cases = Vec::new();
+        for (m, n) in [(2, 2), (3, 2), (2, 3)] {
+            for scale in [1e-200, 1.0, 1e200] {
+                let a = base[..m]
+                    .iter()
+                    .flat_map(|row| {
+                        row[..n]
+                            .iter()
+                            .flat_map(|&(re, im)| [re * scale, im * scale])
+                    })
+                    .collect();
+                cases.push((m, n, a));
+            }
+        }
+        // Normalizing the whole matrix would erase the second column.
+        let scales = [1e200, 1e-200, 1e100];
+        let mixed = base
+            .iter()
+            .flat_map(|row| {
+                row.iter()
+                    .zip(scales)
+                    .flat_map(|(&(re, im), scale)| [re * scale, im * scale])
+            })
+            .collect();
+        cases.push((3, 3, mixed));
+        cases
+    }
+
+    fn assert_complex_qr_contract(a: &[f64], m: usize, n: usize, tol: f64) {
+        let (q, r) = complex_qr_mxn(a, m, n).expect("complex QR");
+        assert_eq!(q.len(), 2 * m * m);
+        assert_eq!(r.len(), 2 * m * n);
+        assert!(q.iter().chain(&r).all(|x| x.is_finite()));
+
+        // Check relative error in each column independently; a large column
+        // must not hide a failed decomposition of a much smaller one.
+        let mut scaled_a = a.to_vec();
+        let mut scaled_r = r;
+        for j in 0..n {
+            let scale = (0..m)
+                .flat_map(|i| [a[2 * (i * n + j)].abs(), a[2 * (i * n + j) + 1].abs()])
+                .fold(0.0_f64, f64::max);
+            if scale != 0.0 {
+                for i in 0..m {
+                    for part in 0..2 {
+                        let index = 2 * (i * n + j) + part;
+                        scaled_a[index] /= scale;
+                        scaled_r[index] /= scale;
+                    }
+                }
+            }
+            for i in (j + 1)..m {
+                assert!(
+                    scaled_r[2 * (i * n + j)].abs() < tol
+                        && scaled_r[2 * (i * n + j) + 1].abs() < tol,
+                    "R is not upper triangular at ({i}, {j}): {scaled_r:?}"
+                );
+            }
+        }
+        let reconstruction = complex_matmul(&q, &scaled_r, m, m, n);
+        for (index, (&got, &want)) in reconstruction.iter().zip(&scaled_a).enumerate() {
+            assert!(
+                (got - want).abs() < tol,
+                "QR reconstruction at {index}: got {got}, expected {want}"
+            );
+        }
+
+        let qh = complex_conjugate_transpose(&q, m, m);
+        let gram = complex_matmul(&qh, &q, m, m, m);
+        for i in 0..m {
+            for j in 0..m {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((gram[2 * (i * m + j)] - expected).abs() < 1e-12);
+                assert!(gram[2 * (i * m + j) + 1].abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn complex_qr_extreme_and_mixed_column_scales() {
+        for (m, n, a) in complex_qr_scale_cases() {
+            assert_complex_qr_contract(&a, m, n, 1e-12);
+        }
+    }
+
+    #[test]
+    fn complex_qr_zero_and_subnormal_columns() {
+        assert_complex_qr_contract(&[0.0; 12], 2, 3, 1e-12);
+        assert_complex_qr_contract(
+            &[0.0, 0.0, 3.0, -1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, -2.0, 1.0],
+            3,
+            2,
+            1e-12,
+        );
+        // A zero leading entry exercises phase selection independently of the
+        // column norm; every nonzero entry here is below MIN_POSITIVE.
+        assert_complex_qr_contract(
+            &[
+                0.0, 0.0, 1e-310, -2e-310, 1e-310, 2e-310, 2e-310, 1e-310, -2e-310, 1e-310, 0.0,
+                1e-310,
+            ],
+            3,
+            2,
+            2e-12,
+        );
+    }
+
+    #[test]
+    fn complex_qr_subnormal_leading_phase() {
+        // A direct hypot of (tiny, tiny) rounds back to tiny; dividing by
+        // that rounded norm would produce phase 1+i instead of a unit phase.
+        let tiny = f64::from_bits(1);
+        for (re, im) in [(tiny, tiny), (-tiny, tiny), (tiny, -2.0 * tiny)] {
+            assert_complex_qr_contract(&[re, im, 1.0, 0.0], 2, 1, 1e-12);
+        }
+    }
+
+    #[test]
+    fn complex_qr_extreme_scales_match_live_numpy() {
+        if !numpy_oracle_available() {
+            eprintln!("NumPy unavailable; complex QR oracle test skipped");
+            return;
+        }
+        let cases = complex_qr_scale_cases()
+            .into_iter()
+            .map(|(m, n, a)| {
+                let (q, r) = complex_qr_mxn(&a, m, n).expect("complex QR");
+                assert!(q.iter().chain(&r).all(|x| x.is_finite()));
+                format!("[{m}, {n}, {a:?}, {q:?}, {r:?}]")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+def matrix(values, rows, cols):
+    return np.array(values, dtype=np.float64).view(np.complex128).reshape(rows, cols)
+
+def canonicalize(q, r):
+    k = min(r.shape)
+    diagonal = r[np.arange(k), np.arange(k)]
+    phases = diagonal / np.abs(diagonal)
+    return q[:, :k] * phases, r[:k, :] * phases.conj()[:, None]
+
+for m, n, a, q, r in json.loads(sys.argv[1]):
+    a = matrix(a, m, n)
+    q = matrix(q, m, m)
+    r = matrix(r, m, n)
+    expected_q, expected_r = np.linalg.qr(a, mode="complete")
+    actual_q, actual_r = canonicalize(q, r)
+    expected_q, expected_r = canonicalize(expected_q, expected_r)
+    scales = np.maximum(np.abs(a.real), np.abs(a.imag)).max(axis=0)
+    np.testing.assert_allclose(actual_q, expected_q, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(actual_r / scales, expected_r / scales,
+                               rtol=1e-12, atol=1e-12)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", script, &format!("[{cases}]")])
+            .output()
+            .expect("NumPy complex QR oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy complex QR comparison failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
