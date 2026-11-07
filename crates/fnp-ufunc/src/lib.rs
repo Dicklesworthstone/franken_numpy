@@ -19441,6 +19441,10 @@ impl UFuncArray {
     /// Cast the array to a different dtype (np.ndarray.astype).
     /// Integer-to-integer casts wrap to the destination width, preserving exact
     /// sidecar values. For bool, non-zero becomes 1.0.
+    ///
+    /// This infallible value-conversion API does not consult floating-point error
+    /// policy. Use [`Self::astype_with_casting`] for invalid-cast warnings,
+    /// callbacks, and errors from real floating-point inputs.
     pub fn astype(&self, dtype: DType) -> Self {
         if self.dtype == dtype {
             return self.clone();
@@ -19557,12 +19561,31 @@ impl UFuncArray {
     ///
     /// Validates the cast using `fnp_dtype::can_cast` before performing it.
     /// `casting` must be one of `"no"`, `"equiv"`, `"safe"`, `"same_kind"`, or `"unsafe"`.
+    /// Real floating-to-integer casts also honor the current `invalid` error
+    /// mode, reporting at most one event for the whole cast. This includes NaN,
+    /// infinity, and overflow of the conversion intermediate; ordinary narrow
+    /// integer wrapping does not itself report invalid.
     pub fn astype_with_casting(&self, dtype: DType, casting: &str) -> Result<Self, UFuncError> {
         if !fnp_dtype::can_cast(self.dtype, dtype, casting) {
             return Err(UFuncError::Msg(format!(
                 "Cannot cast {:?} to {:?} according to the rule '{casting}'",
                 self.dtype, dtype
             )));
+        }
+        if matches!(self.dtype, DType::F16 | DType::F32 | DType::F64) && dtype.is_integer() {
+            // Quantize to the effective input precision before checking status.
+            // Reuse this storage for the conversion so uint32 sees the same
+            // vector body/tail and wide integer results retain their exact bits.
+            let source = self.to_storage()?;
+            if geterr().invalid != FloatErrorMode::Ignore
+                && source.has_invalid_float_to_integer_cast(dtype)
+            {
+                dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
+            }
+            let converted = source
+                .cast_to(dtype)
+                .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+            return Self::from_storage(self.shape.clone(), converted);
         }
         Ok(self.astype(dtype))
     }
@@ -89211,6 +89234,184 @@ print(json.dumps(rows))
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.astype_with_casting(DType::F64, "no").is_ok());
         assert!(a.astype_with_casting(DType::I32, "no").is_err());
+    }
+
+    #[test]
+    fn astype_with_casting_records_one_invalid_event_for_the_whole_array() {
+        let a = UFuncArray::new(
+            vec![5],
+            vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 3.9, -4.9],
+            DType::F64,
+        )
+        .unwrap();
+        for mode in [FloatErrorMode::Warn, FloatErrorMode::Log, FloatErrorMode::Print] {
+            take_float_error_events();
+            let _guard = errstate(None, None, None, None, Some(mode));
+            let converted = a.astype_with_casting(DType::I64, "unsafe").unwrap();
+            assert_eq!(converted.shape(), &[5]);
+            assert_eq!(converted.dtype(), DType::I64);
+            assert_eq!(&converted.values()[3..], &[3.0, -4.0]);
+            let events = take_float_error_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, FloatErrorKind::Invalid);
+            assert_eq!(events[0].mode, mode);
+            assert_eq!(events[0].op, "cast");
+            assert_eq!(events[0].message, "invalid value encountered in cast");
+        }
+    }
+
+    #[test]
+    fn astype_with_casting_raises_invalid_for_every_integer_destination() {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        for source in [DType::F16, DType::F32, DType::F64] {
+            let a = UFuncArray::new(vec![2], vec![f64::NAN, f64::INFINITY], source).unwrap();
+            for target in [
+                DType::I8,
+                DType::I16,
+                DType::I32,
+                DType::I64,
+                DType::U8,
+                DType::U16,
+                DType::U32,
+                DType::U64,
+            ] {
+                let err = a.astype_with_casting(target, "unsafe").unwrap_err();
+                assert!(
+                    matches!(err, UFuncError::FloatingPoint {
+                        kind: FloatErrorKind::Invalid, ref detail
+                    } if detail == "invalid value encountered in cast"),
+                    "{source:?} -> {target:?}: {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn astype_with_casting_ignore_preserves_values_and_infallible_api_stays_value_only() {
+        let storage = ArrayStorage::F64(vec![f64::NAN, f64::INFINITY, -1.9, 4.9]);
+        let expected = storage.cast_to(DType::U64).unwrap();
+        let a = UFuncArray::from_storage(vec![4], storage).unwrap();
+        take_float_error_events();
+        {
+            let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Ignore));
+            let converted = a.astype_with_casting(DType::U64, "unsafe").unwrap();
+            assert_eq!(converted.to_storage().unwrap(), expected);
+        }
+        {
+            let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+            assert_eq!(a.astype(DType::U64).to_storage().unwrap(), expected);
+        }
+        assert!(take_float_error_events().is_empty());
+    }
+
+    #[test]
+    fn astype_with_casting_calls_invalid_callback_once() {
+        let a = UFuncArray::new(vec![4], vec![f64::NAN; 4], DType::F32).unwrap();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let callback_sink = Arc::clone(&sink);
+        let previous_callback = seterrcall(Some(Arc::new(move |event| {
+            callback_sink.lock().unwrap().push(event);
+        })));
+        take_float_error_events();
+        let result = {
+            let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Call));
+            a.astype_with_casting(DType::I32, "unsafe")
+        };
+        let _ = seterrcall(previous_callback);
+        result.unwrap();
+        let events = sink.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FloatErrorKind::Invalid);
+        assert_eq!(events[0].mode, FloatErrorMode::Call);
+        assert_eq!(events[0].op, "cast");
+        assert!(take_float_error_events().is_empty());
+    }
+
+    #[test]
+    fn astype_with_casting_validates_policy_before_float_status() {
+        let a = UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).unwrap();
+        take_float_error_events();
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        for policy in ["safe", "same_kind", "no", "unknown"] {
+            assert!(matches!(
+                a.astype_with_casting(DType::I32, policy),
+                Err(UFuncError::Msg(_))
+            ));
+        }
+        assert!(a.astype_with_casting(DType::F64, "no").is_ok());
+        assert!(a.astype_with_casting(DType::Bool, "unsafe").is_ok());
+        let empty = UFuncArray::new(vec![0], Vec::new(), DType::F64).unwrap();
+        assert!(empty.astype_with_casting(DType::U32, "unsafe").is_ok());
+        let integer = UFuncArray::new(vec![1], vec![257.0], DType::I32).unwrap();
+        assert_eq!(
+            integer.astype_with_casting(DType::I8, "unsafe").unwrap().values(),
+            &[1.0]
+        );
+        assert!(take_float_error_events().is_empty());
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn astype_with_casting_invalid_status_uses_source_precision_and_intermediate_width() {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        for (dtype, value, invalid) in [
+            (DType::F64, 2_147_483_647.0, false),
+            (DType::F32, 2_147_483_647.0, true),
+            (DType::F64, -2_147_483_649.0, true),
+            (DType::F32, -2_147_483_649.0, false),
+            (DType::F16, 65_535.0, true),
+            (DType::F32, 65_535.0, false),
+        ] {
+            let a = UFuncArray::new(vec![1], vec![value], dtype).unwrap();
+            assert_eq!(a.astype_with_casting(DType::I32, "unsafe").is_err(), invalid);
+        }
+        let a = UFuncArray::new(
+            vec![7],
+            vec![
+                -257.9,
+                -129.9,
+                127.9,
+                255.9,
+                65_535.9,
+                2_147_483_647.9,
+                -2_147_483_648.9,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(
+            a.astype_with_casting(DType::I8, "unsafe").unwrap().values(),
+            &[-1.0, 127.0, 127.0, -1.0, -1.0, -1.0, 0.0]
+        );
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn astype_with_casting_uint32_status_follows_vector_body_and_scalar_tail() {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        let body = UFuncArray::new(
+            vec![5],
+            vec![-4_294_967_295.0, 0.0, 0.0, 0.0, 0.0],
+            DType::F64,
+        )
+        .unwrap();
+        assert!(matches!(
+            body.astype_with_casting(DType::U32, "unsafe"),
+            Err(UFuncError::FloatingPoint {
+                kind: FloatErrorKind::Invalid,
+                ..
+            })
+        ));
+        let tail = UFuncArray::new(
+            vec![5],
+            vec![0.0, 0.0, 0.0, 0.0, -4_294_967_295.0],
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(
+            tail.astype_with_casting(DType::U32, "unsafe").unwrap().values(),
+            &[0.0, 0.0, 0.0, 0.0, 1.0]
+        );
     }
 
     // ── MaskedArray cov/corrcoef tests (br-a2j) ────────────────
