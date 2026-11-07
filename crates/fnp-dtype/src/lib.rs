@@ -943,15 +943,18 @@ pub enum ArrayStorage {
 /// Model an x86 truncating signed conversion without Rust's saturating cast or
 /// an unchecked float-to-int instruction. `bits` is 32 or 64, and the exclusive
 /// upper bound is exactly representable in f64 (unlike `i64::MAX as f64`).
-fn x86_truncating_signed_cast(val: f64, bits: u32) -> i128 {
-    let truncated = val.trunc();
+fn x86_signed_cast_is_invalid(val: f64, bits: u32) -> bool {
     let bound = (1_u64 << (bits - 1)) as f64;
-    if (-bound..bound).contains(&truncated) {
-        truncated as i128
-    } else {
+    !(-bound..bound).contains(&val.trunc())
+}
+
+fn x86_truncating_signed_cast(val: f64, bits: u32) -> i128 {
+    if x86_signed_cast_is_invalid(val, bits) {
         // CVTT* returns the signed integer-indefinite value for NaN, infinity,
         // and a truncated value outside the destination's signed range.
         -(1_i128 << (bits - 1))
+    } else {
+        val.trunc() as i128
     }
 }
 
@@ -1022,6 +1025,35 @@ fn f64_to_integer(val: f64, target: DType) -> i128 {
         return 0;
     }
     val.trunc() as i128
+}
+
+/// Status of the same intermediate conversion used by `f64_to_integer` and
+/// the uint32 vector body. Narrow integer wrapping does not itself set invalid.
+fn float_integer_cast_is_invalid(val: f64, target: DType, vector_lane: bool) -> bool {
+    if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        return match target {
+            DType::I8 | DType::I16 | DType::I32 | DType::U8 | DType::U16 => {
+                x86_signed_cast_is_invalid(val, 32)
+            }
+            DType::I64 => x86_signed_cast_is_invalid(val, 64),
+            DType::U32 if vector_lane => {
+                let high_bit = f64::from(1_u32 << 31);
+                let intermediate = if val >= high_bit { val - high_bit } else { val };
+                x86_signed_cast_is_invalid(intermediate, 32)
+            }
+            DType::U32 => x86_signed_cast_is_invalid(val, 64),
+            DType::U64 => {
+                let high_bit = (1_u64 << 63) as f64;
+                let intermediate = if val >= high_bit { val - high_bit } else { val };
+                x86_signed_cast_is_invalid(intermediate, 64)
+            }
+            _ => false,
+        };
+    }
+    // Other hosts still use the existing i128 intermediate in f64_to_integer.
+    // Report invalid values for that policy without claiming native NumPy parity.
+    let bound = 2_f64.powi(127);
+    !(-bound..bound).contains(&val.trunc())
 }
 
 /// Error type for storage operations.
@@ -1273,6 +1305,52 @@ impl ArrayStorage {
             }
         }
         Ok(())
+    }
+
+    /// Whether casting this storage to an integer encounters an invalid float
+    /// conversion. This is a pure status query; it does not emit warnings or
+    /// change the runtime's floating-point error state.
+    ///
+    /// On Linux/x86-64, status follows the same NumPy conversion intermediates
+    /// and source-specific uint32 vector prefix as [`Self::cast_to`]. Values are
+    /// read at their stored precision, and only a complex value's real component
+    /// participates. Empty arrays and other kinds of cast return false.
+    /// Other hosts report invalid values for the current i128 fallback policy;
+    /// native NumPy behavior remains unverified there.
+    #[must_use]
+    pub fn has_invalid_float_to_integer_cast(&self, target: DType) -> bool {
+        if !target.is_integer() {
+            return false;
+        }
+        let prefix = if target == DType::U32 {
+            numpy_uint32_vector_prefix(self.dtype(), self.len())
+        } else {
+            0
+        };
+        let invalid = |index, value| float_integer_cast_is_invalid(value, target, index < prefix);
+        match self {
+            Self::F16(values) => values
+                .iter()
+                .enumerate()
+                .any(|(index, &value)| invalid(index, f64::from(value))),
+            Self::F32(values) => values
+                .iter()
+                .enumerate()
+                .any(|(index, &value)| invalid(index, f64::from(value))),
+            Self::F64(values) => values
+                .iter()
+                .enumerate()
+                .any(|(index, &value)| invalid(index, value)),
+            Self::Complex64(values) => values
+                .iter()
+                .enumerate()
+                .any(|(index, &(real, _))| invalid(index, f64::from(real))),
+            Self::Complex128(values) => values
+                .iter()
+                .enumerate()
+                .any(|(index, &(real, _))| invalid(index, real)),
+            _ => false,
+        }
     }
 
     /// Cast this storage to a different dtype.

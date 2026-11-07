@@ -190,6 +190,93 @@ fn source_precision_is_applied_before_integer_conversion() {
     }
 }
 
+#[test]
+fn invalid_status_distinguishes_conversion_overflow_from_narrow_wrapping() {
+    for target in [DType::I8, DType::I16, DType::I32, DType::U8, DType::U16] {
+        for (value, invalid) in [
+            (-2_147_483_649.0, true),
+            (-2_147_483_648.9, false),
+            (-257.9, false),
+            (65_535.9, false),
+            (2_147_483_647.9, false),
+            (2_147_483_648.0, true),
+            (f64::NAN, true),
+            (f64::INFINITY, true),
+            (f64::NEG_INFINITY, true),
+        ] {
+            assert_eq!(
+                ArrayStorage::F64(vec![value]).has_invalid_float_to_integer_cast(target),
+                invalid,
+                "{value:?} -> {target:?}"
+            );
+        }
+    }
+    let two_to_63 = 9_223_372_036_854_775_808.0_f64;
+    let two_to_64 = 18_446_744_073_709_551_616.0_f64;
+    for (value, signed_invalid, unsigned_invalid) in [
+        ((-two_to_63).next_down(), true, true),
+        (-two_to_63, false, false),
+        (-1.9, false, false),
+        (two_to_63.next_down(), false, false),
+        (two_to_63, true, false),
+        (two_to_64.next_down(), true, false),
+        (two_to_64, true, true),
+    ] {
+        let source = ArrayStorage::F64(vec![value]);
+        assert_eq!(
+            source.has_invalid_float_to_integer_cast(DType::I64),
+            signed_invalid
+        );
+        assert_eq!(
+            source.has_invalid_float_to_integer_cast(DType::U32),
+            signed_invalid
+        );
+        assert_eq!(
+            source.has_invalid_float_to_integer_cast(DType::U64),
+            unsigned_invalid
+        );
+    }
+}
+
+#[test]
+fn invalid_status_only_inspects_stored_real_floating_values() {
+    let finite_half = ArrayStorage::F16(
+        (0..=u16::MAX)
+            .map(f16::from_bits)
+            .filter(|value| value.is_finite())
+            .collect(),
+    );
+    for (target, _) in INTEGER_TARGETS {
+        // Every finite float16 fits the signed 32-bit conversion intermediate,
+        // even when it wraps after narrowing to an 8-bit destination.
+        assert!(!finite_half.has_invalid_float_to_integer_cast(target));
+        for source in [
+            ArrayStorage::F64(Vec::new()),
+            ArrayStorage::I64(vec![i64::MIN, i64::MAX]),
+            ArrayStorage::U64(vec![u64::MAX]),
+            ArrayStorage::Bool(vec![true]),
+            ArrayStorage::String(vec!["nan".into()]),
+            ArrayStorage::Complex64(vec![(1.9, f32::from_bits(0x7f80_0001)); 8]),
+            ArrayStorage::Complex128(vec![(1.9, f64::INFINITY); 8]),
+        ] {
+            assert!(!source.has_invalid_float_to_integer_cast(target));
+        }
+    }
+    let invalid = ArrayStorage::F64(vec![f64::NAN, f64::INFINITY]);
+    for target in [
+        DType::Bool,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+        DType::Str,
+        DType::Structured,
+    ] {
+        assert!(!invalid.has_invalid_float_to_integer_cast(target));
+    }
+}
+
 fn uint32_sources(values: &[f64]) -> [(ArrayStorage, &'static str); 5] {
     [
         (
@@ -430,7 +517,18 @@ with warnings.catch_warnings():
     for request in requests:
         source, target, payload = request.split(':')
         array = np.frombuffer(bytes.fromhex(payload), dtype=np.dtype('<' + source))
-        print(array.astype(np.dtype('<' + target)).tobytes().hex())
+        dtype = np.dtype('<' + target)
+        with np.errstate(all='ignore'):
+            converted = array.astype(dtype)
+        try:
+            with np.errstate(all='ignore', invalid='raise'):
+                array.astype(dtype)
+        except FloatingPointError as error:
+            assert str(error) == 'invalid value encountered in cast', str(error)
+            invalid = True
+        else:
+            invalid = False
+        print(f'{int(invalid)}:{converted.tobytes().hex()}')
 "#;
     let mut request = String::new();
     for (source, source_name, _, target_name) in cases {
@@ -478,7 +576,16 @@ with warnings.catch_warnings():
     let actual = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<_> = actual.lines().collect();
     assert_eq!(lines.len(), cases.len(), "incomplete NumPy oracle response");
-    for ((source, _, target, _), expected) in cases.iter().zip(lines) {
+    for ((source, _, target, _), response) in cases.iter().zip(lines) {
+        let (invalid, expected) = response.split_once(':').expect("status and cast bytes");
+        assert!(matches!(invalid, "0" | "1"), "unexpected status: {invalid}");
+        assert_eq!(
+            source.has_invalid_float_to_integer_cast(*target),
+            invalid == "1",
+            "{:?} -> {target:?}, length {}: invalid-cast status disagrees with NumPy",
+            source.dtype(),
+            source.len(),
+        );
         let converted = source.cast_to(*target).unwrap();
         let bytes = hex_bytes(&raw_bytes(&converted));
         if bytes != expected {
@@ -498,6 +605,70 @@ with warnings.catch_warnings():
             );
         }
     }
+}
+
+#[test]
+fn invalid_status_matches_numpy_at_boundaries_and_each_uint32_vector_lane() {
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.9,
+        -1.9,
+        257.9,
+        -257.9,
+        65_504.0,
+        65_519.0,
+        65_520.0,
+        65_535.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MAX,
+        -f64::MAX,
+    ];
+    for exponent in [31, 32, 63, 64, 127] {
+        for sign in [-1.0, 1.0] {
+            let value = sign * 2_f64.powi(exponent);
+            values.extend([
+                value.next_down(),
+                value,
+                value.next_up(),
+                value - 1.0,
+                value + 1.0,
+                value - 0.5,
+                value + 0.5,
+            ]);
+        }
+    }
+    let mut cases = Vec::new();
+    // Singleton requests prevent one NaN or overflow from hiding an incorrect
+    // status for a different value in a large array.
+    for value in values {
+        for (source, source_name) in uint32_sources(&[value]) {
+            for (target, target_name) in INTEGER_TARGETS {
+                cases.push((source.clone(), source_name, target, target_name));
+            }
+        }
+    }
+    // These finite values are valid in a uint32 scalar tail's signed 64-bit
+    // intermediate but invalid in the vector body's biased signed 32-bit one.
+    // Place exactly one such value at each position across every small boundary.
+    for len in 0..=10 {
+        for (source, source_name) in uint32_sources(&vec![0.0; len]) {
+            cases.push((source, source_name, DType::U32, "u4"));
+        }
+        for index in 0..len {
+            for value in [-4_294_967_296.0, 4_294_967_296.0] {
+                let mut values = vec![0.0; len];
+                values[index] = value;
+                for (source, source_name) in uint32_sources(&values) {
+                    cases.push((source, source_name, DType::U32, "u4"));
+                }
+            }
+        }
+    }
+    numpy_float_cast_oracle(&cases);
+    numpy_float_cast_oracle_with_dispatch(&cases, true);
 }
 
 #[test]
