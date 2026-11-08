@@ -1,9 +1,36 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-10-07 (latest pass); 2026-09-11
+**Date:** 2026-11-08 (latest pass); 2026-10-07; 2026-09-11
 **Project:** franken_numpy
 **Language:** Rust
 **Manifest:** Cargo.toml / Cargo.lock
+
+---
+
+## 2026-11-08 — asupersync `=0.5.0` → `=0.6.2`
+
+- Workspace pin is now `asupersync = { version = "=0.6.2", default-features = false }`. The
+  exact-pin style is kept. Consumers: `fnp-runtime` (optional `asupersync` feature) and
+  `fnp-conformance`. This puts the workspace on the asupersync release shared by the rest of the
+  franken* suite.
+- `cargo update -p asupersync` changed only `asupersync` 0.5.0 → 0.6.2 and its sibling crates
+  `franken-decision`, `franken-evidence` and `franken-kernel` 0.5.0 → 0.6.0. No other lockfile
+  entry moved.
+- No source change was needed. None of the six breaking changes listed in asupersync's v0.6.0
+  notes touches the names this workspace uses (`raptorq` encoder/decoder, `EncodingPipeline`,
+  `EncodingConfig`, `SymbolPool`, `ObjectId`, `LabRuntime`, `Cx`, `Outcome`).
+
+The bump landed as `a6c4e875`. The gates below ran on that exact tree (an rch clean overlay of
+`Cargo.toml` and `Cargo.lock` on `20159e89`).
+
+**Gate (rch):** `cargo check --workspace --all-targets` and
+`cargo clippy -j2 -p fnp-runtime -p fnp-conformance --all-targets --all-features -- -D warnings`
+are clean. `cargo test -j2 -p fnp-runtime -p fnp-conformance --all-features --no-fail-fast`
+passed 545 and failed 2. Both failures are ripgrep scans of files this bump does not touch, so
+they do not depend on the asupersync version: `codebase_hygiene::no_arch_intrinsics_in_crate_sources` counts
+`std::arch::is_aarch64_feature_detected!` in `crates/fnp-ufunc/src/lib.rs` (added by
+`e0b95351`), and `ledger_hygiene::new_keep_rows_declare_one_campaign_result_class` flags the
+2026-10-28 union1d SHIP row in `docs/NEGATIVE_EVIDENCE.md` (added by `27c31abb`).
 
 ---
 
