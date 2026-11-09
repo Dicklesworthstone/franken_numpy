@@ -49,6 +49,11 @@ fn reduce_tuple(
         "mean" => input.reduce_mean_axes(axes, keepdims),
         "var" => input.reduce_var_axes(axes, keepdims, ddof),
         "std" => input.reduce_std_axes(axes, keepdims, ddof),
+        "nansum" => input.nansum_axes(axes, keepdims),
+        "nanprod" => input.nanprod_axes(axes, keepdims),
+        "nanmean" => input.nanmean_axes(axes, keepdims),
+        "nanvar" => input.nanvar_axes(axes, keepdims, ddof),
+        "nanstd" => input.nanstd_axes(axes, keepdims, ddof),
         _ => unreachable!("tuple reduction operation"),
     }
 }
@@ -148,6 +153,11 @@ impl OracleBatch {
             "mean" => array.reduce_mean_axes_with_dtype(axes, keepdims, dtype),
             "var" => array.reduce_var_axes_with_dtype(axes, keepdims, ddof, dtype),
             "std" => array.reduce_std_axes_with_dtype(axes, keepdims, ddof, dtype),
+            "nansum" => array.nansum_axes_with_dtype(axes, keepdims, dtype),
+            "nanprod" => array.nanprod_axes_with_dtype(axes, keepdims, dtype),
+            "nanmean" => array.nanmean_axes_with_dtype(axes, keepdims, dtype),
+            "nanvar" => array.nanvar_axes_with_dtype(axes, keepdims, ddof, dtype),
+            "nanstd" => array.nanstd_axes_with_dtype(axes, keepdims, ddof, dtype),
             _ => unreachable!("typed complex tuple operation"),
         });
     }
@@ -171,7 +181,7 @@ for case in payload['cases']:
     kw = dict(axis=axis, keepdims=case['keepdims'])
     if case.get('dtype') is not None:
         kw['dtype'] = case['dtype']
-    if case['op'] in ('var', 'std'):
+    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
         result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
@@ -246,7 +256,11 @@ print(json.dumps(rows))
                 let integers: Vec<String> = (0..storage.len())
                     .map(|index| storage.get_i128(index).unwrap().to_string())
                     .collect();
-                assert_eq!(json!(integers), expected["integers"], "{case}: exact integers");
+                assert_eq!(
+                    json!(integers),
+                    expected["integers"],
+                    "{case}: exact integers"
+                );
             }
             let bits = expected["bits"].as_array().expect("result bits");
             assert_eq!(actual.values().len(), bits.len(), "{case}: length");
@@ -267,6 +281,242 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn complex_nan_tuple_masks_counts_and_real_variance_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        // Each NaN in either component excludes its entire logical element.
+        // The retained middle axis includes an all-NaN lane and unequal counts.
+        let array = complex_array(
+            &[2, 3, 2],
+            &[
+                (1.25, 2.5),
+                (f64::NAN, 100.0),
+                (f64::NAN, 4.0),
+                (5.0, f64::NAN),
+                (-0.0, -0.0),
+                (3.75, 1.5),
+                (100.0, f64::NAN),
+                (8.5, -2.0),
+                (f64::NAN, f64::NAN),
+                (1.0, f64::NAN),
+                (2.5, 3.0),
+                (f64::NAN, 2.0),
+            ],
+            dtype,
+        );
+        let input = batch.add_input(&array);
+        for axes in [
+            vec![],
+            vec![0, 2],
+            vec![2, 0],
+            vec![-1, -3],
+            vec![0, 1],
+            vec![1, 2],
+            vec![0, 1, 2],
+        ] {
+            for keepdims in [false, true] {
+                for op in ["nansum", "nanprod", "nanmean"] {
+                    batch.push(input, &array, op, &axes, keepdims, 0);
+                }
+                for ddof in [0, 1, 2, 12] {
+                    for op in ["nanvar", "nanstd"] {
+                        batch.push(input, &array, op, &axes, keepdims, ddof);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_tuple_explicit_dtypes_and_statistical_rejections_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source in [DType::Complex64, DType::Complex128] {
+        for has_nan in [false, true] {
+            let values = (0..12)
+                .map(|i| {
+                    let re = [0.0, 1.25, -0.0, -3.0, 2.75, 1.0004882812500002][i % 6];
+                    let im = [1.0, -2.5, 3.0, -0.0, 4.0][i % 5];
+                    if has_nan && i % 4 == 1 {
+                        (f64::NAN, im)
+                    } else if has_nan && i % 4 == 2 {
+                        (re, f64::NAN)
+                    } else {
+                        (re, im)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let array = complex_array(&[2, 3, 2], &values, source);
+            let input = batch.add_input(&array);
+            for dtype in [
+                DType::Bool,
+                DType::I8,
+                DType::I16,
+                DType::I32,
+                DType::I64,
+                DType::U8,
+                DType::U16,
+                DType::U32,
+                DType::U64,
+                DType::F16,
+                DType::F32,
+                DType::F64,
+                DType::Complex64,
+                DType::Complex128,
+            ] {
+                for axes in [vec![], vec![0, 2], vec![0, 1, 2]] {
+                    for keepdims in [false, true] {
+                        for op in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                            batch.push_with_dtype(input, &array, (op, 1), &axes, keepdims, dtype);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_tuple_empty_scalar_nonfinite_and_axis_errors_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![0], vec![2, 0, 3], vec![2, 3, 0], vec![2, 2]] {
+            for pattern in [
+                [(f64::NAN, 2.0), (3.0, f64::NAN), (-0.0, -0.0), (0.0, 0.0)],
+                [
+                    (f64::INFINITY, 1.0),
+                    (1.0, -f64::INFINITY),
+                    (f64::NAN, 3.0),
+                    (4.0, 5.0),
+                ],
+            ] {
+                let values = (0..shape.iter().product())
+                    .map(|i| pattern[i % 4])
+                    .collect::<Vec<_>>();
+                let array = complex_array(&shape, &values, source);
+                let input = batch.add_input(&array);
+                let mut tuples = axis_subsets(shape.len());
+                tuples.extend([
+                    vec![shape.len() as isize],
+                    vec![-(shape.len() as isize) - 1],
+                    vec![0, 0],
+                    vec![-1, shape.len() as isize - 1],
+                    vec![0, 0, shape.len() as isize],
+                ]);
+                for axes in tuples {
+                    for keepdims in [false, true] {
+                        for op in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                            batch.push(input, &array, op, &axes, keepdims, 0);
+                            for dtype in [DType::I8, DType::F32, DType::Complex128] {
+                                batch.push_with_dtype(
+                                    input,
+                                    &array,
+                                    (op, 0),
+                                    &axes,
+                                    keepdims,
+                                    dtype,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_tuple_reduction_order_and_conversion_buffers_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for (source, dtype) in [
+        (DType::Complex64, DType::Complex64),
+        (DType::Complex64, DType::Complex128),
+        (DType::Complex64, DType::F64),
+        (DType::Complex128, DType::Complex64),
+        (DType::Complex128, DType::F32),
+    ] {
+        let large = if source == DType::Complex64 {
+            1e8
+        } else {
+            1e16
+        };
+        for n in [63, 64, 65, 8191, 8192, 8193] {
+            for shape in [vec![2, 3, n], vec![n, 3, 2]] {
+                let values = (0..shape.iter().product())
+                    .map(|i| {
+                        let re = if i % 17 == 3 {
+                            f64::NAN
+                        } else {
+                            [large, 1.0, -large, 0.25, 3.1, -0.7, -2.0][i % 7]
+                        };
+                        let im = if i % 19 == 5 {
+                            f64::NAN
+                        } else {
+                            [-large, 2.0, large, -0.125, 1.25][i % 5]
+                        };
+                        (re, im)
+                    })
+                    .collect::<Vec<_>>();
+                let array = complex_array(&shape, &values, source);
+                let input = batch.add_input(&array);
+                for axes in [vec![0, 2], vec![2, 0], vec![0, 1, 2]] {
+                    for op in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                        batch.push(input, &array, op, &axes, false, 1);
+                        batch.push_with_dtype(input, &array, (op, 1), &axes, false, dtype);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_nan_tuple_products_preserve_identity_positions_and_joint_rounding() {
+    let mut batch = OracleBatch::default();
+    for source in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![2, 3, 4], vec![4, 3, 2], vec![2, 1, 3, 2]] {
+            let values = (0..shape.iter().product())
+                .map(|i| {
+                    let re = if i % 7 == 1 {
+                        f64::NAN
+                    } else {
+                        ((i * 17 % 97) as f64 - 48.0) / 130.0
+                    };
+                    let im = if i % 11 == 3 {
+                        f64::NAN
+                    } else {
+                        ((i * 11 % 61) as f64 - 30.0) / 170.0
+                    };
+                    (re, im)
+                })
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, source);
+            let input = batch.add_input(&array);
+            for axes in axis_subsets(shape.len()) {
+                for keepdims in [false, true] {
+                    batch.push(input, &array, "nanprod", &axes, keepdims, 0);
+                    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+                        batch.push_with_dtype(
+                            input,
+                            &array,
+                            ("nanprod", 0),
+                            &axes,
+                            keepdims,
+                            dtype,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]
@@ -638,6 +888,11 @@ fn complex_tuple_rejects_unrepresentable_physical_output_capacity() {
                     array.reduce_mean_axes_with_dtype(&[0], keepdims, dtype),
                     array.reduce_var_axes_with_dtype(&[0], keepdims, 0, dtype),
                     array.reduce_std_axes_with_dtype(&[0], keepdims, 0, dtype),
+                    array.nansum_axes_with_dtype(&[0], keepdims, dtype),
+                    array.nanprod_axes_with_dtype(&[0], keepdims, dtype),
+                    array.nanmean_axes_with_dtype(&[0], keepdims, dtype),
+                    array.nanvar_axes_with_dtype(&[0], keepdims, 0, dtype),
+                    array.nanstd_axes_with_dtype(&[0], keepdims, 0, dtype),
                 ] {
                     assert!(matches!(
                         result,
@@ -645,7 +900,12 @@ fn complex_tuple_rejects_unrepresentable_physical_output_capacity() {
                     ));
                 }
             }
-            for op in ["sum", "prod", "mean", "var", "std"] {
+            // Default complex nanvar/nanstd have real results, but their
+            // intermediate complex mean must also fit before counts allocate.
+            for op in [
+                "sum", "prod", "mean", "var", "std", "nansum", "nanprod", "nanmean", "nanvar",
+                "nanstd",
+            ] {
                 assert!(matches!(
                     reduce_tuple(&array, op, &[0], keepdims, 0),
                     Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))

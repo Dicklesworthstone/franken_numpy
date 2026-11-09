@@ -1,7 +1,7 @@
 //! Floating tuple reductions preserve NumPy's joint traversal and source precision.
 
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, UFuncError};
+use fnp_ufunc::{BinaryOp, UFuncArray, UFuncError};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
 
@@ -25,6 +25,39 @@ fn dtype_name(dtype: DType) -> &'static str {
     }
 }
 
+#[test]
+fn uint64_boolean_arithmetic_preserves_exact_unsigned_sidecars() {
+    let values = vec![(1_u64 << 53) + 1, (1_u64 << 63) + 1, u64::MAX];
+    let array = UFuncArray::from_storage(vec![3], ArrayStorage::U64(values.clone())).unwrap();
+    let truth = UFuncArray::scalar(1.0, DType::Bool);
+    let extract = |array: UFuncArray| {
+        assert_eq!(array.dtype(), DType::U64);
+        match array.to_storage().unwrap() {
+            ArrayStorage::U64(values) => values,
+            other => panic!("expected unsigned sidecar, got {:?}", other.dtype()),
+        }
+    };
+    let added = vec![(1_u64 << 53) + 2, (1_u64 << 63) + 2, 0];
+    for (lhs, rhs) in [(&array, &truth), (&truth, &array)] {
+        assert_eq!(
+            extract(lhs.elementwise_binary(rhs, BinaryOp::Add).unwrap()),
+            added
+        );
+        assert_eq!(
+            extract(lhs.elementwise_binary(rhs, BinaryOp::Mul).unwrap()),
+            values
+        );
+    }
+    assert_eq!(
+        extract(array.elementwise_binary(&truth, BinaryOp::Sub).unwrap()),
+        vec![1_u64 << 53, 1_u64 << 63, u64::MAX - 1]
+    );
+    assert_eq!(
+        extract(truth.elementwise_binary(&array, BinaryOp::Sub).unwrap()),
+        vec![u64::MAX - (1_u64 << 53) + 1, 1_u64 << 63, 2]
+    );
+}
+
 fn reduce_tuple(
     array: &UFuncArray,
     op: &str,
@@ -38,6 +71,11 @@ fn reduce_tuple(
         "mean" => array.reduce_mean_axes(axes, keepdims),
         "var" => array.reduce_var_axes(axes, keepdims, ddof),
         "std" => array.reduce_std_axes(axes, keepdims, ddof),
+        "nansum" => array.nansum_axes(axes, keepdims),
+        "nanprod" => array.nanprod_axes(axes, keepdims),
+        "nanmean" => array.nanmean_axes(axes, keepdims),
+        "nanvar" => array.nanvar_axes(axes, keepdims, ddof),
+        "nanstd" => array.nanstd_axes(axes, keepdims, ddof),
         _ => unreachable!("real tuple operation"),
     }
 }
@@ -144,6 +182,11 @@ impl OracleBatch {
             "mean" => array.reduce_mean_axes_with_dtype(axes, keepdims, dtype),
             "var" => array.reduce_var_axes_with_dtype(axes, keepdims, ddof, dtype),
             "std" => array.reduce_std_axes_with_dtype(axes, keepdims, ddof, dtype),
+            "nansum" => array.nansum_axes_with_dtype(axes, keepdims, dtype),
+            "nanprod" => array.nanprod_axes_with_dtype(axes, keepdims, dtype),
+            "nanmean" => array.nanmean_axes_with_dtype(axes, keepdims, dtype),
+            "nanvar" => array.nanvar_axes_with_dtype(axes, keepdims, ddof, dtype),
+            "nanstd" => array.nanstd_axes_with_dtype(axes, keepdims, ddof, dtype),
             _ => unreachable!("typed real tuple operation"),
         });
     }
@@ -166,7 +209,7 @@ for case in payload['cases']:
     kw = dict(axis=axis, keepdims=case['keepdims'])
     if case.get('dtype') is not None:
         kw['dtype'] = case['dtype']
-    if case['op'] in ('var', 'std'):
+    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
         result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
@@ -239,7 +282,11 @@ print(json.dumps(rows))
                 let integers: Vec<String> = (0..storage.len())
                     .map(|index| storage.get_i128(index).unwrap().to_string())
                     .collect();
-                assert_eq!(json!(integers), expected["integers"], "{case}: exact integers");
+                assert_eq!(
+                    json!(integers),
+                    expected["integers"],
+                    "{case}: exact integers"
+                );
             }
             let bits = expected["bits"].as_array().expect("result bits");
             assert_eq!(actual.values().len(), bits.len(), "{case}: length");
@@ -260,6 +307,252 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn real_nan_tuple_masks_counts_and_ddof_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        // Reducing axes 0 and 2 leaves lanes with two, zero, and three valid
+        // elements. A mean of intermediate means would weight them incorrectly.
+        let array = UFuncArray::new(
+            vec![2, 3, 2],
+            vec![
+                1.25,
+                f64::NAN,
+                f64::NAN,
+                f64::NAN,
+                -0.0,
+                3.75,
+                f64::NAN,
+                8.5,
+                f64::NAN,
+                f64::NAN,
+                2.5,
+                f64::NAN,
+            ],
+            dtype,
+        )
+        .unwrap();
+        let input = batch.add_input(&array);
+        for axes in [
+            vec![],
+            vec![0, 2],
+            vec![2, 0],
+            vec![-1, -3],
+            vec![0, 1],
+            vec![1, 2],
+            vec![0, 1, 2],
+        ] {
+            for keepdims in [false, true] {
+                for op in ["nansum", "nanprod", "nanmean"] {
+                    batch.push(input, &array, op, &axes, keepdims, 0);
+                }
+                for ddof in [0, 1, 2, 12] {
+                    for op in ["nanvar", "nanstd"] {
+                        batch.push(input, &array, op, &axes, keepdims, ddof);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_nan_tuple_explicit_dtypes_and_statistical_rejections_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source in [DType::F16, DType::F32, DType::F64] {
+        for has_nan in [false, true] {
+            let values = (0..12)
+                .map(|i| {
+                    if has_nan && i % 4 == 1 {
+                        f64::NAN
+                    } else {
+                        [0.25, -1.1, 2.5, 3.7, -0.5, 1.0004882812500002][i % 6]
+                    }
+                })
+                .collect();
+            let array = UFuncArray::new(vec![2, 3, 2], values, source).unwrap();
+            let input = batch.add_input(&array);
+            for dtype in reduction_dtypes() {
+                for axes in [vec![], vec![0, 2], vec![0, 1, 2]] {
+                    for keepdims in [false, true] {
+                        for op in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                            batch.push_with_dtype(input, &array, (op, 1), &axes, keepdims, dtype);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_nan_tuple_empty_scalar_nonfinite_and_axis_errors_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for shape in [
+        vec![],
+        vec![0],
+        vec![2, 0, 3],
+        vec![2, 3, 0],
+        vec![1, 1, 1],
+        vec![2, 2],
+    ] {
+        for pattern in [
+            [f64::NAN, -0.0, 0.0, f64::NAN],
+            [f64::INFINITY, 1.0, -f64::INFINITY, f64::NAN],
+        ] {
+            let array = UFuncArray::new(
+                shape.clone(),
+                (0..shape.iter().product())
+                    .map(|i| pattern[i % 4])
+                    .collect(),
+                DType::F64,
+            )
+            .unwrap();
+            let input = batch.add_input(&array);
+            let mut tuples = axis_subsets(shape.len());
+            tuples.extend([
+                vec![shape.len() as isize],
+                vec![-(shape.len() as isize) - 1],
+                vec![0, 0],
+                vec![0, 0, shape.len() as isize],
+            ]);
+            for axes in tuples {
+                for keepdims in [false, true] {
+                    for op in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                        batch.push(input, &array, op, &axes, keepdims, 0);
+                        for dtype in [DType::I8, DType::F32, DType::Complex64] {
+                            batch.push_with_dtype(input, &array, (op, 0), &axes, keepdims, dtype);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_nan_tuple_integer_inputs_preserve_exact_storage() {
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::Bool(vec![true, false, true, true, false, false]),
+        ArrayStorage::I64(vec![
+            9_007_199_254_740_993,
+            9_007_199_254_740_995,
+            -9_007_199_254_740_993,
+            -9_007_199_254_740_995,
+            i64::MIN + 1,
+            i64::MAX - 1,
+        ]),
+        ArrayStorage::U64(vec![
+            9_007_199_254_740_993,
+            9_007_199_254_740_995,
+            9_007_199_254_740_997,
+            u64::MAX,
+            u64::MAX - 2,
+            u64::MAX - 4,
+        ]),
+    ] {
+        let array = UFuncArray::from_storage(vec![2, 1, 3], storage).unwrap();
+        let input = batch.add_input(&array);
+        for axes in [vec![], vec![0, 2], vec![-1, -3], vec![1, 2]] {
+            for keepdims in [false, true] {
+                for op in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    batch.push(input, &array, op, &axes, keepdims, 0);
+                    for dtype in [
+                        DType::Bool,
+                        DType::I8,
+                        DType::I64,
+                        DType::U64,
+                        DType::F32,
+                        DType::F64,
+                        DType::Complex64,
+                    ] {
+                        batch.push_with_dtype(input, &array, (op, 0), &axes, keepdims, dtype);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_nan_tuple_reduction_order_and_conversion_buffers_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for (source, dtype) in [
+        (DType::F16, DType::F16),
+        (DType::F16, DType::F32),
+        (DType::F32, DType::F64),
+        (DType::F64, DType::F32),
+        (DType::F64, DType::Complex64),
+    ] {
+        let large = if source == DType::F16 {
+            2048.0
+        } else if dtype == DType::F64 {
+            1e16
+        } else {
+            1e8
+        };
+        for n in [127, 128, 129, 8191, 8192, 8193] {
+            for shape in [vec![2, 3, n], vec![n, 3, 2]] {
+                let values = (0..shape.iter().product())
+                    .map(|i| {
+                        if i % 19 == 3 {
+                            f64::NAN
+                        } else {
+                            [large, 1.0, -large, 0.25, 3.1, -0.7, -2.0][i % 7]
+                        }
+                    })
+                    .collect();
+                let array = UFuncArray::new(shape, values, source).unwrap();
+                let input = batch.add_input(&array);
+                for axes in [vec![0, 2], vec![2, 0], vec![0, 1, 2]] {
+                    for op in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                        batch.push(input, &array, op, &axes, false, 1);
+                        batch.push_with_dtype(input, &array, (op, 1), &axes, false, dtype);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_nan_tuple_half_source_rounding_and_large_counts_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let above_midpoint = f64::from_bits(1.00048828125_f64.to_bits() + 1);
+    for (shape, values) in [
+        (vec![1, 3], vec![above_midpoint, 1.0, f64::NAN]),
+        (vec![1, 3], vec![65504.0, 65504.0, f64::NAN]),
+        (
+            vec![2, 32769],
+            (0..65538)
+                .map(|i| match i {
+                    0 | 65537 => f64::NAN,
+                    _ if i % 2 == 0 => 0.25,
+                    _ => -0.25,
+                })
+                .collect(),
+        ),
+    ] {
+        let array = UFuncArray::new(shape, values, DType::F16).unwrap();
+        let input = batch.add_input(&array);
+        for keepdims in [false, true] {
+            for op in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                batch.push(input, &array, op, &[0, 1], keepdims, 0);
+                for dtype in [DType::F16, DType::F32, DType::F64] {
+                    batch.push_with_dtype(input, &array, (op, 0), &[0, 1], keepdims, dtype);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]
@@ -551,6 +844,27 @@ fn real_tuple_explicit_dtypes_reject_unrepresentable_output_capacity() {
                 array.reduce_mean_axes_with_dtype(&[0], keepdims, dtype),
                 array.reduce_var_axes_with_dtype(&[0], keepdims, 0, dtype),
                 array.reduce_std_axes_with_dtype(&[0], keepdims, 0, dtype),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+                ));
+            }
+        }
+    }
+
+    // This count fits the real plan's capacity bound but not a complex
+    // accumulator. NaN statistics must reject it before allocating counts.
+    let too_many_pairs = isize::MAX as usize / std::mem::size_of::<(f64, f64)>() + 1;
+    let array = UFuncArray::new(vec![0, too_many_pairs], vec![], DType::F64).unwrap();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for keepdims in [false, true] {
+            for result in [
+                array.nansum_axes_with_dtype(&[0], keepdims, dtype),
+                array.nanprod_axes_with_dtype(&[0], keepdims, dtype),
+                array.nanmean_axes_with_dtype(&[0], keepdims, dtype),
+                array.nanvar_axes_with_dtype(&[0], keepdims, 0, dtype),
+                array.nanstd_axes_with_dtype(&[0], keepdims, 0, dtype),
             ] {
                 assert!(matches!(
                     result,

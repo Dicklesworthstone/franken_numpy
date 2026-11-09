@@ -8191,7 +8191,7 @@ impl UFuncArray {
             }
             if matches!(out_dtype, DType::I64 | DType::U64)
                 && let Some(sidecar) =
-                    binary_op_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
+                    binary_op_sidecar(&l, &r, op, out_dtype, &out_shape, &self.shape, &rhs.shape)
             {
                 let exact_values = sidecar.as_f64_vec();
                 return Ok(Self {
@@ -9954,9 +9954,10 @@ impl UFuncArray {
                 .reduce_arithmetic_axes_with_dtype(axes, keepdims, dtype, product, true);
         }
 
-        let storage = self.to_storage()?.cast_to(dtype).map_err(|err| {
-            UFuncError::Msg(format!("{operation}: input cast failed: {err}"))
-        })?;
+        let storage = self
+            .to_storage()?
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?;
         let casted = Self::from_storage(self.shape.clone(), storage)?;
         if dtype == DType::Bool {
             let mut values = vec![if product { 1.0 } else { 0.0 }; plan.output_count];
@@ -10016,9 +10017,9 @@ impl UFuncArray {
                 ArrayStorage::U64(output)
             }
         };
-        let storage = storage.cast_to(dtype).map_err(|err| {
-            UFuncError::Msg(format!("{operation}: result cast failed: {err}"))
-        })?;
+        let storage = storage
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{operation}: result cast failed: {err}")))?;
         Self::from_storage(plan.output_shape, storage)
     }
 
@@ -10070,11 +10071,8 @@ impl UFuncArray {
             });
             for (index, value) in inputs.into_iter().enumerate() {
                 let average = mean.logical_complex_value(plan.output_index(index));
-                let deviation = Self::complex_reduction_add(
-                    value,
-                    (-average.0, -average.1),
-                    deviation_dtype,
-                );
+                let deviation =
+                    Self::complex_reduction_add(value, (-average.0, -average.1), deviation_dtype);
                 if magnitude {
                     let square = if deviation_dtype == DType::Complex64 {
                         let (re, im) = (deviation.0 as f32, deviation.1 as f32);
@@ -10084,11 +10082,8 @@ impl UFuncArray {
                     };
                     values.push(square);
                 } else {
-                    let square = Self::complex_reduction_multiply(
-                        deviation,
-                        deviation,
-                        deviation_dtype,
-                    );
+                    let square =
+                        Self::complex_reduction_multiply(deviation, deviation, deviation_dtype);
                     values.extend([square.0, square.1]);
                 }
             }
@@ -17072,10 +17067,9 @@ impl UFuncArray {
                     if dtype == DType::F16 {
                         // The f32 partial is added before HALF_add rounds back
                         // to half; rounding the partial first loses low bits.
-                        result[output] = f16::from_f32(
-                            result[output] as f32 + pairwise_sum_f16_values(buffer),
-                        )
-                        .to_f64();
+                        result[output] =
+                            f16::from_f32(result[output] as f32 + pairwise_sum_f16_values(buffer))
+                                .to_f64();
                         continue;
                     }
                     let partial = Self::reduce_float_lane_with_dtype(buffer, dtype, false, false);
@@ -29238,6 +29232,148 @@ impl UFuncArray {
         })
     }
 
+    /// Sum ignoring NaNs over a tuple of logical axes.
+    ///
+    /// All selected axes share NumPy's C-order reduction tree. Masked values
+    /// remain in that tree as zero; removing them would change rounding.
+    pub fn nansum_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        self.nansum_axes_with_dtype(axes, keepdims, promote_for_sum_reduction(self.dtype))
+    }
+
+    /// NaN-aware tuple sum with an explicit accumulator and result dtype.
+    /// Complex elements are masked when either component is NaN, before any
+    /// cast to a real, integer, Boolean, or complex accumulator.
+    pub fn nansum_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(0.0)?
+                .reduce_sum_axes_with_dtype(axes, keepdims, dtype);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_sum_axes_with_dtype(axes, keepdims, dtype);
+        }
+        self.nan_filtered_fill(0.0)
+            .reduce_sum_axes_with_dtype(axes, keepdims, dtype)
+    }
+
+    /// Product ignoring NaNs over a tuple of logical axes.
+    pub fn nanprod_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        self.nanprod_axes_with_dtype(axes, keepdims, promote_for_sum_reduction(self.dtype))
+    }
+
+    /// NaN-aware tuple product with an explicit accumulator and result dtype.
+    /// NaNs become one before conversion; the remaining factors retain one
+    /// joint multiplication order across every selected axis.
+    pub fn nanprod_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(1.0)?
+                .reduce_prod_axes_with_dtype(axes, keepdims, dtype);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_prod_axes_with_dtype(axes, keepdims, dtype);
+        }
+        self.nan_filtered_fill(1.0)
+            .reduce_prod_axes_with_dtype(axes, keepdims, dtype)
+    }
+
+    /// Mean ignoring NaNs over a tuple of logical axes.
+    /// Each output lane divides by its own joint valid-element count, rather
+    /// than averaging independently reduced means with different NaN masks.
+    pub fn nanmean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_mean_axes(axes, keepdims);
+        }
+        self.nanmean_axes_with_dtype(axes, keepdims, self.dtype)
+    }
+
+    /// NaN-aware tuple mean with an explicit accumulator and result dtype.
+    /// Inexact inputs require an inexact accumulator, even without any NaNs.
+    pub fn nanmean_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_mean_axes_with_dtype(axes, keepdims, dtype);
+        }
+        self.validate_nan_statistical_dtype(dtype, "nanmean")?;
+        let shape = self.complex_logical_shape("nanmean")?;
+        let plan = AxesReductionPlan::new(&shape, axes, keepdims)?;
+        // The sum also validates the two-component output capacity before we
+        // allocate per-lane counts for a requested complex accumulator.
+        let sum = self.nansum_axes_with_dtype(axes, keepdims, dtype)?;
+        let counts = self.nan_reduction_counts_axes(&plan);
+        Ok(sum.divide_nan_reduction_by_counts(&counts, None))
+    }
+
+    /// Variance ignoring NaNs over a tuple of logical axes.
+    /// Complex inputs produce real squared magnitudes by default; each output
+    /// lane applies `ddof` to its own number of non-NaN logical elements.
+    pub fn nanvar_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_var_axes(axes, keepdims, ddof);
+        }
+        self.validate_nan_statistical_dtype(self.dtype, "nanvar")?;
+        self.nanvar_axes_inexact(axes, keepdims, ddof, None)
+    }
+
+    /// NaN-aware tuple variance with an explicit accumulator and result dtype.
+    /// As in NumPy, deviations and squares are stored in the source precision
+    /// before the second joint reduction casts to the requested accumulator.
+    pub fn nanvar_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_var_axes_with_dtype(axes, keepdims, ddof, dtype);
+        }
+        self.validate_nan_statistical_dtype(dtype, "nanvar")?;
+        self.nanvar_axes_inexact(axes, keepdims, ddof, Some(dtype))
+    }
+
+    /// Standard deviation ignoring NaNs over a tuple of logical axes.
+    pub fn nanstd_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        self.nanvar_axes(axes, keepdims, ddof)?
+            .sqrt_statistical_reduction()
+    }
+
+    /// NaN-aware tuple standard deviation with an explicit accumulator/result dtype.
+    pub fn nanstd_axes_with_dtype(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.nanvar_axes_with_dtype(axes, keepdims, ddof, dtype)?
+            .sqrt_statistical_reduction()
+    }
+
     /// Sum ignoring NaNs with an explicit accumulator and result dtype.
     ///
     /// Replace NaNs before converting to the accumulator. For complex inputs,
@@ -30361,6 +30497,24 @@ impl UFuncArray {
             .collect())
     }
 
+    fn nan_reduction_counts_axes(&self, plan: &AxesReductionPlan) -> Vec<usize> {
+        let mut counts = vec![0usize; plan.output_count];
+        if self.dtype.is_complex() {
+            for (index, parts) in self.values.as_chunks::<2>().0.iter().enumerate() {
+                if !parts[0].is_nan() && !parts[1].is_nan() {
+                    counts[plan.output_index(index)] += 1;
+                }
+            }
+        } else {
+            for (index, value) in self.values.iter().enumerate() {
+                if !value.is_nan() {
+                    counts[plan.output_index(index)] += 1;
+                }
+            }
+        }
+        counts
+    }
+
     fn divide_nan_reduction_by_counts(mut self, counts: &[usize], ddof: Option<usize>) -> Self {
         if self.dtype.is_complex() {
             for (parts, &count) in self.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
@@ -30407,6 +30561,28 @@ impl UFuncArray {
         self.nanvar_inexact(axis, keepdims, ddof, None)
     }
 
+    fn nanvar_axes_inexact(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+        dtype: Option<DType>,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("nanvar")?;
+        let plan = AxesReductionPlan::new(&shape, axes, keepdims)?;
+        // A complex mean needs two stored components even when the final
+        // variance is real. Reject an impossible capacity before making counts.
+        let sum = self.nansum_axes_with_dtype(axes, true, dtype.unwrap_or(self.dtype))?;
+        let counts = self.nan_reduction_counts_axes(&plan);
+        let mean = sum.divide_nan_reduction_by_counts(&counts, None);
+        let squared =
+            self.squared_nan_reduction_deviations(&mean, |index| plan.output_index(index))?;
+        let dtype = dtype.unwrap_or(squared.dtype);
+        Ok(squared
+            .reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
+            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+    }
+
     fn nanvar_inexact(
         &self,
         axis: Option<isize>,
@@ -30424,17 +30600,38 @@ impl UFuncArray {
         };
         let counts = self.nan_reduction_counts(axis)?;
         let mean = self.nanmean_with_dtype(axis, true, dtype.unwrap_or(self.dtype))?;
-        let inputs = self.complex_reduction_values(self.dtype)?;
         let (axis_len, inner) = match axis {
-            Some(axis) if !inputs.is_empty() => {
+            Some(axis) if !self.values.is_empty() => {
                 let axis = normalize_axis(axis, shape.len())?;
                 (
                     shape[axis],
                     element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
                 )
             }
-            _ => (inputs.len(), 1),
+            _ => (0, 1),
         };
+        let squared = self.squared_nan_reduction_deviations(&mean, |index| {
+            if axis.is_some() {
+                (index / (axis_len * inner)) * inner + index % inner
+            } else {
+                0
+            }
+        })?;
+        let dtype = dtype.unwrap_or(squared.dtype);
+        Ok(squared
+            .reduce_sum_with_dtype(axis, keepdims, dtype)?
+            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+    }
+
+    /// Both single-axis and tuple-axis NaN variance use the same source-typed
+    /// subtraction and squaring. Only the mapping to the joint mean differs.
+    fn squared_nan_reduction_deviations(
+        &self,
+        mean: &Self,
+        output_index: impl Fn(usize) -> usize,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("nanvar")?;
+        let inputs = self.complex_reduction_values(self.dtype)?;
         let component_dtype = match self.dtype {
             DType::Complex64 => DType::F32,
             DType::Complex128 => DType::F64,
@@ -30456,12 +30653,7 @@ impl UFuncArray {
                     // them changes floating-point addition order.
                     return 0.0;
                 }
-                let output = if axis.is_some() {
-                    (index / (axis_len * inner)) * inner + index % inner
-                } else {
-                    0
-                };
-                let average = mean.logical_complex_value(output);
+                let average = mean.logical_complex_value(output_index(index));
                 // Subtraction uses the input/mean promotion, then its `out`
                 // buffer casts back to the original source dtype. Squaring
                 // also happens in that source buffer, before either reduction
@@ -30503,9 +30695,7 @@ impl UFuncArray {
                 }
             })
             .collect();
-        Ok(Self::new(shape, squared, component_dtype)?
-            .reduce_sum_with_dtype(axis, keepdims, dtype.unwrap_or(component_dtype))?
-            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+        Self::new(shape, squared, component_dtype)
     }
 
     /// Replace NaN values with a specified fill value.
@@ -37227,6 +37417,7 @@ fn binary_op_sidecar(
     lhs: &IntegerSidecar,
     rhs: &IntegerSidecar,
     op: BinaryOp,
+    out_dtype: DType,
     out_shape: &[usize],
     lhs_orig_shape: &[usize],
     rhs_orig_shape: &[usize],
@@ -37274,6 +37465,33 @@ fn binary_op_sidecar(
             |a, b| apply_binary_op_u64(op, a, b),
         )
         .map(IntegerSidecar::U64),
+        // Boolean operands synthesize signed sidecars, but promotion with a
+        // uint64 operand selects an unsigned loop. Follow that resolved dtype
+        // even above i64::MAX instead of falling back to rounded f64 values.
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v)) if out_dtype == DType::U64 => {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0u64,
+                |a, b| apply_binary_op_u64(op, a as u64, b),
+            )
+            .map(IntegerSidecar::U64)
+        }
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::I64(rhs_v)) if out_dtype == DType::U64 => {
+            eval_broadcast_pair(
+                lhs_v,
+                rhs_v,
+                out_shape,
+                lhs_orig_shape,
+                rhs_orig_shape,
+                0u64,
+                |a, b| apply_binary_op_u64(op, a, b as u64),
+            )
+            .map(IntegerSidecar::U64)
+        }
         (IntegerSidecar::I64(lhs_v), IntegerSidecar::U64(rhs_v))
             if rhs_v.iter().all(|&u| i64::try_from(u).is_ok()) =>
         {
