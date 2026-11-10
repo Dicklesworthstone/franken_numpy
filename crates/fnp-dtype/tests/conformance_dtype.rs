@@ -94,6 +94,64 @@ fn conformance_result_type_triple() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn conformance_result_type_all_numeric_triples_and_quadruples() -> Result<(), String> {
+    use fnp_dtype::DType;
+
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    // One oracle process covers every ordering, including signed/unsigned
+    // combinations whose pairwise intermediate would lose half/single precision.
+    let numpy_result = numpy_oracle(
+        r#"
+import itertools
+import numpy as np
+
+names = ['bool', 'int8', 'int16', 'int32', 'int64', 'uint8', 'uint16',
+         'uint32', 'uint64', 'float16', 'float32', 'float64',
+         'complex64', 'complex128']
+types = [np.dtype(name) for name in names]
+for length in (3, 4):
+    for inputs in itertools.product(types, repeat=length):
+        print(np.result_type(*inputs))
+"#,
+    )?;
+    let mut expected = numpy_result.lines();
+    for length in [3, 4] {
+        for encoded in 0..dtypes.len().pow(length as u32) {
+            let mut remaining = encoded;
+            let mut inputs = vec![DType::Bool; length];
+            for dtype in inputs.iter_mut().rev() {
+                *dtype = dtypes[remaining % dtypes.len()];
+                remaining /= dtypes.len();
+            }
+            let expected_name = expected.next().expect("one oracle row per dtype tuple");
+            let expected_dtype = DType::parse(expected_name).expect("numeric NumPy dtype");
+            assert_eq!(
+                fnp_dtype::result_type(&inputs),
+                expected_dtype,
+                "result_type({inputs:?}) differs from NumPy"
+            );
+        }
+    }
+    assert!(expected.next().is_none(), "unconsumed oracle rows");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // can_cast conformance
 // ─────────────────────────────────────────────────────────────────────────────

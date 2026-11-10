@@ -52,21 +52,26 @@ fn mr_result_type_idempotence() {
 }
 
 #[test]
-fn mr_result_type_left_associativity() {
-    // result_type uses left-fold: ((init op a) op b) op c
-    // Verify left-associative grouping is consistent
-    for &a in &[DType::I32, DType::F32, DType::U8] {
-        for &b in &[DType::I64, DType::F64, DType::Bool] {
-            for &c in &[DType::I16, DType::U16, DType::F16] {
-                let abc = result_type(&[a, b, c]);
-                let ab_c = result_type(&[result_type(&[a, b]), c]);
-                // Left-associativity should hold: ((a op b) op c) == fold([a,b,c])
-                assert_eq!(
-                    abc, ab_c,
-                    "result_type is not left-associative: [{a:?},{b:?},{c:?}] gave {abc:?} but ((a,b),c) gave {ab_c:?}"
-                );
-            }
-        }
+fn mr_result_type_does_not_invent_intermediate_integer_precision() {
+    // NumPy's n-ary result_type considers the original operands together.
+    // A left fold creates a wider integer that was never an input, so grouping
+    // pairwise promotions is deliberately NOT an invariant of result_type.
+    for (signed, unsigned, floating, expected, grouped) in [
+        (DType::I8, DType::U8, DType::F16, DType::F16, DType::F32),
+        (DType::I16, DType::U16, DType::F32, DType::F32, DType::F64),
+        (
+            DType::I16,
+            DType::U16,
+            DType::Complex64,
+            DType::Complex64,
+            DType::Complex128,
+        ),
+    ] {
+        assert_eq!(result_type(&[signed, unsigned, floating]), expected);
+        assert_eq!(
+            result_type(&[result_type(&[signed, unsigned]), floating]),
+            grouped
+        );
     }
 }
 
@@ -83,9 +88,9 @@ fn mr_result_type_single_element() {
 
 #[test]
 fn mr_result_type_triple_permutation() {
-    for &a in &[DType::I32, DType::F32, DType::U8] {
-        for &b in &[DType::I64, DType::F64, DType::Bool] {
-            for &c in &[DType::I16, DType::U16, DType::F16] {
+    for &a in ALL_DTYPES {
+        for &b in ALL_DTYPES {
+            for &c in ALL_DTYPES {
                 let abc = result_type(&[a, b, c]);
                 let acb = result_type(&[a, c, b]);
                 let bac = result_type(&[b, a, c]);

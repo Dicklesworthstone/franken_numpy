@@ -492,13 +492,40 @@ pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
     }
 }
 
-/// Determines the result dtype from promotion across a list of dtypes
-/// (np.result_type).
+/// Determines the common result dtype for a list of dtypes (np.result_type).
+///
+/// Numeric promotion is not associative: promoting int8 and uint8 first
+/// invents an int16 intermediate, which unnecessarily widens a later float16
+/// operand to float32. Start with an input from the highest numeric category
+/// so each original operand is considered in the final kind's domain.
 #[must_use]
 pub fn result_type(dtypes: &[DType]) -> DType {
     let Some((&first, rest)) = dtypes.split_first() else {
         return DType::Bool;
     };
+    if dtypes
+        .iter()
+        .all(|dtype| dtype.is_numeric() || *dtype == DType::Bool)
+    {
+        let main = dtypes
+            .iter()
+            .copied()
+            .max_by_key(|dtype| match dtype {
+                DType::Complex64 | DType::Complex128 => 3,
+                DType::F16 | DType::F32 | DType::F64 => 2,
+                DType::I8
+                | DType::I16
+                | DType::I32
+                | DType::I64
+                | DType::U8
+                | DType::U16
+                | DType::U32
+                | DType::U64 => 1,
+                _ => 0,
+            })
+            .unwrap_or(first);
+        return dtypes.iter().copied().fold(main, promote);
+    }
     rest.iter().copied().fold(first, promote)
 }
 
