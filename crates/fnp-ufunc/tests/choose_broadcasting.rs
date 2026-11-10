@@ -422,7 +422,11 @@ fn choose_preserves_homogeneous_temporal_ticks_and_metadata() {
         for mode in ["raise", "wrap", "clip"] {
             batch.push(&indices, &[wide.clone(), scalar.clone()], mode);
             batch.push(&indices, &[scalar.clone(), wide.clone()], mode);
-            batch.push(&UFuncArray::scalar(0.0, DType::I8), &[scalar.clone()], mode);
+            batch.push(
+                &UFuncArray::scalar(0.0, DType::I8),
+                std::slice::from_ref(&scalar),
+                mode,
+            );
             batch.push(
                 &UFuncArray::scalar(99.0, DType::I8),
                 &[empty.clone(), scalar.clone()],

@@ -33610,6 +33610,206 @@ impl UFuncArray {
         self.elementwise_unary(UnaryOp::Degrees)
     }
 
+    /// Copy numeric logical elements, preserving the cast loop's broadcast and
+    /// mask-run boundaries. Those boundaries matter for NumPy's uint32 casts.
+    fn copyto_numeric(&mut self, src: &Self, mask: Option<&Self>) -> Result<(), UFuncError> {
+        let dst_shape = self.complex_logical_shape("copyto")?;
+        let original_src_shape = src.complex_logical_shape("copyto")?;
+        let extra_axes = original_src_shape.len().saturating_sub(dst_shape.len());
+        let src_shape = &original_src_shape[extra_axes..];
+        let broadcasts_into = |shape: &[usize]| {
+            shape.len() <= dst_shape.len()
+                && shape
+                    .iter()
+                    .rev()
+                    .zip(dst_shape.iter().rev())
+                    .all(|(&source, &destination)| source == 1 || source == destination)
+        };
+        // Assignment accepts extra leading singleton source axes. The where
+        // mask follows the stricter broadcast_to rule, including for scalars.
+        if original_src_shape[..extra_axes].iter().any(|&dim| dim != 1)
+            || !broadcasts_into(src_shape)
+        {
+            return Err(UFuncError::Msg(format!(
+                "copyto: could not broadcast input array from shape {:?} into shape {:?}",
+                original_src_shape, dst_shape
+            )));
+        }
+
+        fn cast_flags(source: &ArrayStorage, converted: &ArrayStorage) -> FloatErrorFlags {
+            let dtype = converted.dtype();
+            let mut flags = FloatErrorFlags {
+                invalid: source.has_invalid_float_to_integer_cast(dtype),
+                ..FloatErrorFlags::default()
+            };
+            let tiny_boundary = match dtype {
+                DType::F16 => f64::from(f16::MIN_POSITIVE),
+                DType::F32 | DType::Complex64 => {
+                    f64::from(f32::MIN_POSITIVE) - f64::from(f32::from_bits(1)) * 0.25
+                }
+                _ => return flags,
+            };
+            for ((real, imaginary), (cast_real, cast_imaginary)) in source
+                .to_complex128_vec()
+                .into_iter()
+                .zip(converted.to_complex128_vec())
+            {
+                let components = [(real, cast_real), (imaginary, cast_imaginary)];
+                for &(before, after) in &components[..if dtype.is_complex() { 2 } else { 1 }] {
+                    if before.is_finite() {
+                        flags.over |= after.is_infinite();
+                        flags.under |= before != after && before.abs() < tiny_boundary;
+                    }
+                }
+            }
+            flags
+        }
+
+        fn source_run(source: &ArrayStorage, start: usize, count: usize) -> ArrayStorage {
+            macro_rules! copy_run {
+                ($($variant:ident),+ $(,)?) => {
+                    match source {
+                        $(ArrayStorage::$variant(values) => {
+                            ArrayStorage::$variant(values[start..start + count].to_vec())
+                        },)+
+                        _ => unreachable!("copyto_numeric accepts numeric storage"),
+                    }
+                };
+            }
+            copy_run!(
+                Bool, I8, I16, I32, I64, U8, U16, U32, U64, F16, F32, F64, Complex64, Complex128
+            )
+        }
+
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let count = self.values.len() / components;
+        // NumPy pre-casts a true scalar when it will fill multiple elements.
+        // Its warning/error precedes mask broadcasting and any destination
+        // writes, even for an all-false mask. A length-one array is different.
+        let mut precast_scalar = None;
+        if original_src_shape.is_empty() && count > 1 && src.dtype != self.dtype {
+            let (_, source) = src.numeric_cast_source()?;
+            let converted = source
+                .cast_to(self.dtype)
+                .map_err(|err| UFuncError::Msg(format!("copyto: storage cast failed: {err}")))?;
+            dispatch_float_error_flags(cast_flags(&source, &converted), "cast")?;
+            precast_scalar = Some(converted);
+        }
+        if let Some(mask) = mask
+            && !broadcasts_into(&mask.shape)
+        {
+            return Err(UFuncError::Msg(format!(
+                "copyto: could not broadcast where mask from shape {:?} into shape {:?}",
+                mask.shape, dst_shape
+            )));
+        }
+        if count == 0 || mask.is_some_and(|mask| mask.values.iter().all(|&value| value == 0.0)) {
+            return Ok(());
+        }
+
+        let source = match precast_scalar {
+            Some(source) => source,
+            None => src.numeric_cast_source()?.1,
+        };
+        let dst_strides = c_strides_elems(&dst_shape);
+        let src_steps =
+            aligned_broadcast_axis_steps(dst_shape.len(), src_shape, &c_strides_elems(src_shape));
+        let mask_steps = mask.map_or_else(
+            || vec![0; dst_shape.len()],
+            |mask| {
+                aligned_broadcast_axis_steps(
+                    dst_shape.len(),
+                    &mask.shape,
+                    &c_strides_elems(&mask.shape),
+                )
+            },
+        );
+        // Coalesce consecutive C-order axes only when both source and mask
+        // strides permit it. Broadcasting a row or column starts a new loop.
+        let mut inner_count = 1;
+        let mut source_step = 0;
+        let mut mask_step = 0;
+        for axis in (0..dst_shape.len())
+            .rev()
+            .filter(|&axis| dst_shape[axis] != 1)
+        {
+            if inner_count == 1 {
+                source_step = src_steps[axis];
+                mask_step = mask_steps[axis];
+            } else if src_steps[axis] != source_step * inner_count
+                || mask_steps[axis] != mask_step * inner_count
+            {
+                break;
+            }
+            inner_count *= dst_shape[axis];
+        }
+        debug_assert!(source_step <= 1);
+        let offset = |flat: usize, steps: &[usize]| -> usize {
+            dst_shape
+                .iter()
+                .zip(&dst_strides)
+                .zip(steps)
+                .map(|((&dim, &stride), &step)| (flat / stride % dim) * step)
+                .sum()
+        };
+        let mut flags = FloatErrorFlags::default();
+        for base in (0..count).step_by(inner_count) {
+            let source_base = offset(base, &src_steps);
+            let mask_base = offset(base, &mask_steps);
+            let selected = |index: usize| {
+                mask.is_none_or(|mask| mask.values[mask_base + index * mask_step] != 0.0)
+            };
+            let mut cursor = 0;
+            while cursor < inner_count {
+                if !selected(cursor) {
+                    cursor += 1;
+                    continue;
+                }
+                let start = cursor;
+                while cursor < inner_count && selected(cursor) {
+                    cursor += 1;
+                }
+                let run_length = cursor - start;
+                // A broadcast scalar uses the scalar conversion, regardless of
+                // how many destination elements receive it.
+                let cast_count = if source_step == 0 { 1 } else { run_length };
+                let selected_source =
+                    source_run(&source, source_base + start * source_step, cast_count);
+                let converted = selected_source.cast_to(self.dtype).map_err(|err| {
+                    UFuncError::Msg(format!("copyto: storage cast failed: {err}"))
+                })?;
+                flags = flags.merged(cast_flags(&selected_source, &converted));
+                if self.dtype.is_complex() {
+                    let values = converted.to_complex128_vec();
+                    for index in 0..run_length {
+                        let (real, imaginary) = values[index * source_step];
+                        let destination = 2 * (base + start + index);
+                        self.values[destination] = real;
+                        self.values[destination + 1] = imaginary;
+                    }
+                } else {
+                    let converted = Self::from_storage(vec![cast_count], converted)?;
+                    for index in 0..run_length {
+                        let source_index = index * source_step;
+                        let destination = base + start + index;
+                        let value = converted.values[source_index];
+                        self.write_integer_mutation(
+                            destination,
+                            value,
+                            converted.integer_sidecar.as_ref(),
+                            source_index,
+                            "copyto",
+                        )?;
+                        self.values[destination] = value;
+                    }
+                }
+            }
+        }
+        // Array casts report once after completing all selected writes, also
+        // when the caller configured floating-point errors to raise.
+        dispatch_float_error_flags(flags, "cast")
+    }
+
     /// Copy values from src into self at positions where mask is true (np.copyto).
     ///
     /// `casting` controls dtype compatibility: "no", "equiv", "safe", "same_kind", "unsafe".
@@ -33621,11 +33821,33 @@ impl UFuncArray {
         casting: Option<&str>,
     ) -> Result<(), UFuncError> {
         let casting = casting.unwrap_or("same_kind");
+        if !matches!(casting, "no" | "equiv" | "safe" | "same_kind" | "unsafe") {
+            return Err(UFuncError::Msg(format!(
+                "copyto: invalid casting rule '{casting}'"
+            )));
+        }
+        if mask.is_some_and(|mask| mask.dtype != DType::Bool) {
+            return Err(UFuncError::Msg(
+                "copyto: where mask must have boolean dtype".to_string(),
+            ));
+        }
         if !Self::can_cast(src.dtype, self.dtype, casting) {
             return Err(UFuncError::Msg(format!(
                 "copyto: cannot cast from {:?} to {:?} with casting='{casting}'",
                 src.dtype, self.dtype,
             )));
+        }
+        if (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (src.dtype.is_numeric() || src.dtype == DType::Bool)
+            && !(self.dtype == DType::F64
+                && src.dtype == DType::F64
+                && self.integer_sidecar.is_none()
+                && src.integer_sidecar.is_none()
+                && src.shape == self.shape
+                && mask
+                    .is_none_or(|mask| mask.integer_sidecar.is_none() && mask.shape == self.shape))
+        {
+            return self.copyto_numeric(src, mask);
         }
         match mask {
             Some(m) => {
@@ -73336,14 +73558,13 @@ print(json.dumps(results))
     }
 
     #[test]
-    fn copyto_rejects_inexact_integer_bridge_values() {
+    fn copyto_unsafe_truncates_fractional_integer_values() {
         let mut dst = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
         let src = UFuncArray::new(vec![2], vec![1.5, 2.0], DType::F64).unwrap();
 
-        let err = dst
-            .copyto(&src, None, Some("unsafe"))
-            .expect_err("fractional integer write must fail");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("copyto")));
+        dst.copyto(&src, None, Some("unsafe")).unwrap();
+        assert_eq!(dst.values(), &[1.0, 2.0]);
+        assert_eq!(dst.to_storage().unwrap(), ArrayStorage::I64(vec![1, 2]));
     }
 
     #[test]
