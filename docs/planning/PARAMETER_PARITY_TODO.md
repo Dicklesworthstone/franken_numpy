@@ -18,9 +18,12 @@
 ## GROUP 2: concatenate/stack dtype+casting parameters
 - [x] Add `concatenate_with_dtype(arrays, axis, dtype, casting)` method
 - [x] Validate casting via `fnp_dtype::can_cast` for each input → output dtype
-- [x] Cast each input array to target dtype before concatenation
+- [x] Cast original inputs directly to the target dtype, retaining exact wide-integer sidecars and source precision; Linux x86_64 uint32 conversion follows each operand's contiguous destination runs and aggregates invalid events once per operand
 - [x] Add `stack_with_dtype(arrays, axis, dtype, casting)` variant
 - [x] Add tests: concatenate with dtype promotion, casting rejection
+- [x] Complex concatenate/stack validate logical shapes and axes before conversion, retain paired components, and support mixed real/complex operands and explicit dtype/casting controls
+- [x] Complex append, flattened concatenation, hstack/vstack/dstack/column_stack, ravel, and atleast_1d/2d/3d preserve logical elements and dimension promotion; empty joins return immediately and checked axis lengths reject overflow
+- [x] Live NumPy oracle coverage includes logical negative axes, scalar/empty inputs, source precision, exact integer overrides, casting rejection, signed zero, destination-dependent uint32 values, and invalid-policy callback counts (`complex_joins.rs`)
 
 ## GROUP 3: sum/prod `initial` parameter
 - [x] Add `reduce_sum_initial(&self, axis, keepdims, initial: f64)` method

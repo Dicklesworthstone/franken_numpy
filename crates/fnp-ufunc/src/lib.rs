@@ -12130,10 +12130,34 @@ impl UFuncArray {
         self.moveaxis(ax as isize, dst as isize)
     }
 
+    /// Promote only logical dimensions, retaining the complex component axis.
+    fn complex_atleast(&self, minimum: usize) -> Option<Self> {
+        if !self.dtype.is_complex() {
+            return None;
+        }
+        let mut shape = self.complex_logical_shape("atleast").ok()?;
+        shape = match (minimum, shape.len()) {
+            (1, 0) => vec![1],
+            (2, 0) => vec![1, 1],
+            (2, 1) => vec![1, shape[0]],
+            (3, 0) => vec![1, 1, 1],
+            (3, 1) => vec![1, shape[0], 1],
+            (3, 2) => vec![shape[0], shape[1], 1],
+            _ => shape,
+        };
+        shape.push(2);
+        let mut result = self.clone();
+        result.shape = shape;
+        Some(result)
+    }
+
     /// Ensure the array is at least 1-D.
     ///
     /// Mimics `np.atleast_1d(a)`.
     pub fn atleast_1d(&self) -> Self {
+        if let Some(result) = self.complex_atleast(1) {
+            return result;
+        }
         if self.shape.is_empty() {
             Self {
                 shape: vec![1],
@@ -12150,6 +12174,9 @@ impl UFuncArray {
     ///
     /// Mimics `np.atleast_2d(a)`.
     pub fn atleast_2d(&self) -> Self {
+        if let Some(result) = self.complex_atleast(2) {
+            return result;
+        }
         match self.shape.len() {
             0 => Self {
                 shape: vec![1, 1],
@@ -12171,6 +12198,9 @@ impl UFuncArray {
     ///
     /// Mimics `np.atleast_3d(a)`.
     pub fn atleast_3d(&self) -> Self {
+        if let Some(result) = self.complex_atleast(3) {
+            return result;
+        }
         match self.shape.len() {
             0 => Self {
                 shape: vec![1, 1, 1],
@@ -12479,6 +12509,9 @@ impl UFuncArray {
     ///
     /// Mimics `np.append(arr, values, axis)`.
     pub fn append(&self, other: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if axis.is_none() && (self.dtype.is_complex() || other.dtype.is_complex()) {
+            return Self::concatenate_flat(&[self, other]);
+        }
         match axis {
             None => {
                 let mut values = self.values.clone();
@@ -12576,22 +12609,16 @@ impl UFuncArray {
             ));
         }
         // Promote scalars/1-D to 2-D column vectors, then concatenate along axis 1.
-        let promoted: Vec<Self> = arrays
+        let promoted = arrays
             .iter()
             .map(|a| {
-                let a = a.atleast_1d();
-                if a.shape.len() == 1 {
-                    Self {
-                        shape: vec![a.shape[0], 1],
-                        values: a.values.clone(),
-                        dtype: a.dtype,
-                        integer_sidecar: a.cloned_integer_sidecar(),
-                    }
-                } else {
-                    a.clone()
+                let mut a = a.atleast_1d();
+                if a.complex_logical_shape("column_stack")?.len() == 1 {
+                    a.shape.insert(1, 1);
                 }
+                Ok(a)
             })
-            .collect();
+            .collect::<Result<Vec<_>, UFuncError>>()?;
         let refs: Vec<&Self> = promoted.iter().collect();
         Self::concatenate(&refs, 1)
     }
@@ -14277,6 +14304,16 @@ impl UFuncArray {
 
     /// Concatenate arrays along an existing axis.
     pub fn concatenate(arrays: &[&Self], axis: isize) -> Result<Self, UFuncError> {
+        if arrays.iter().any(|array| array.dtype.is_complex()) {
+            return Self::join_with_dtype(arrays, axis, None, "same_kind", false);
+        }
+        Self::concatenate_components(arrays, axis)
+    }
+
+    /// Copy contiguous components after public logical-axis and cast checks.
+    /// Complex callers pass a positive logical axis, so the final dimension
+    /// remains the paired real/imaginary storage dimension.
+    fn concatenate_components(arrays: &[&Self], axis: isize) -> Result<Self, UFuncError> {
         if arrays.is_empty() {
             return Err(UFuncError::InvalidInputLength {
                 expected: 1,
@@ -14307,10 +14344,21 @@ impl UFuncArray {
         }
 
         // Compute output shape
-        let concat_dim: usize = arrays.iter().map(|a| a.shape[axis]).sum();
+        let concat_dim = arrays.iter().try_fold(0usize, |length, array| {
+            length
+                .checked_add(array.shape[axis])
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        })?;
         let mut out_shape = first.shape.clone();
         out_shape[axis] = concat_dim;
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let out_dtype = arrays
+            .iter()
+            .skip(1)
+            .fold(first.dtype, |acc, arr| promote(acc, arr.dtype));
+        if out_count == 0 {
+            return Self::new(out_shape, Vec::new(), out_dtype);
+        }
 
         // Build output values
         let inner: usize =
@@ -14334,11 +14382,6 @@ impl UFuncArray {
                 write_offset += arr_axis_len * out_inner;
             }
         }
-
-        let out_dtype = arrays
-            .iter()
-            .skip(1)
-            .fold(first.dtype, |acc, arr| promote(acc, arr.dtype));
 
         let any_has_sidecar = arrays.iter().any(|a| a.has_integer_sidecar());
         let mut out_sidecar = None;
@@ -14415,6 +14458,167 @@ impl UFuncArray {
         })
     }
 
+    /// Cast through the contiguous runs of the destination view. NumPy's uint32
+    /// conversion has different vector-body and scalar-tail results, so a
+    /// strided join destination cannot be modeled by casting a whole operand.
+    fn cast_join_operand(
+        &self,
+        dtype: DType,
+        casting: &str,
+        run_length: usize,
+    ) -> Result<Self, UFuncError> {
+        let logical_count = self.values.len() / if self.dtype.is_complex() { 2 } else { 1 };
+        if dtype != DType::U32 || !self.dtype.is_float() || run_length >= logical_count {
+            return self.astype_with_casting(dtype, casting);
+        }
+        let (shape, source) = self.numeric_cast_source()?;
+        let report_invalid = geterr().invalid != FloatErrorMode::Ignore;
+        let mut invalid = false;
+        let mut output = Vec::with_capacity(logical_count);
+        for start in (0..source.len()).step_by(run_length) {
+            let end = start + run_length.min(source.len() - start);
+            let run = match &source {
+                ArrayStorage::F16(values) => ArrayStorage::F16(values[start..end].to_vec()),
+                ArrayStorage::F32(values) => ArrayStorage::F32(values[start..end].to_vec()),
+                ArrayStorage::F64(values) => ArrayStorage::F64(values[start..end].to_vec()),
+                ArrayStorage::Complex64(values) => {
+                    ArrayStorage::Complex64(values[start..end].to_vec())
+                }
+                ArrayStorage::Complex128(values) => {
+                    ArrayStorage::Complex128(values[start..end].to_vec())
+                }
+                _ => unreachable!("floating source has floating typed storage"),
+            };
+            invalid |= report_invalid && run.has_invalid_float_to_integer_cast(dtype);
+            let converted = run
+                .cast_to(dtype)
+                .map_err(|error| UFuncError::Msg(format!("storage cast failed: {error}")))?;
+            let ArrayStorage::U32(values) = converted else {
+                unreachable!("uint32 conversion produces uint32 storage");
+            };
+            output.extend(values);
+        }
+        // One event per source operand, even if several of its rows were bad.
+        if invalid {
+            dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
+        }
+        Self::from_storage(shape, ArrayStorage::U32(output))
+    }
+
+    /// Validate original logical shapes before conversion. An explicit integer
+    /// dtype retains wide integer originals instead of first promoting them to
+    /// a complex working buffer; conversion follows destination iteration runs.
+    fn join_with_dtype(
+        arrays: &[&Self],
+        axis: isize,
+        dtype: Option<DType>,
+        casting: &str,
+        stack: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if stack { "stack" } else { "concatenate" };
+        let Some(first) = arrays.first() else {
+            return Err(UFuncError::InvalidInputLength {
+                expected: 1,
+                actual: 0,
+            });
+        };
+        let shapes = arrays
+            .iter()
+            .map(|array| array.complex_logical_shape(operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_shape = &shapes[0];
+        if stack {
+            // NumPy stack checks equal shapes before it checks the new axis.
+            for shape in &shapes[1..] {
+                if shape != first_shape {
+                    return Err(UFuncError::Shape(ShapeError::IncompatibleBroadcast {
+                        lhs: first_shape.clone(),
+                        rhs: shape.clone(),
+                    }));
+                }
+            }
+        } else if first_shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "zero-dimensional arrays cannot be concatenated".to_string(),
+            ));
+        }
+        let result_ndim = first_shape.len() + usize::from(stack);
+        let axis = normalize_axis(axis, result_ndim)?;
+        if !stack {
+            for shape in &shapes[1..] {
+                if shape.len() != first_shape.len() {
+                    return Err(UFuncError::Shape(ShapeError::RankMismatch {
+                        expected: first_shape.len(),
+                        actual: shape.len(),
+                    }));
+                }
+                if first_shape
+                    .iter()
+                    .zip(shape)
+                    .enumerate()
+                    .any(|(dim, (left, right))| dim != axis && left != right)
+                {
+                    return Err(UFuncError::Shape(ShapeError::IncompatibleBroadcast {
+                        lhs: first_shape.clone(),
+                        rhs: shape.clone(),
+                    }));
+                }
+            }
+        }
+        let joined_axis_length = if stack {
+            arrays.len()
+        } else {
+            shapes.iter().try_fold(0usize, |length, shape| {
+                length
+                    .checked_add(shape[axis])
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
+            })?
+        };
+        let dtype = dtype.unwrap_or_else(|| {
+            arrays
+                .iter()
+                .skip(1)
+                .fold(first.dtype, |dtype, array| promote(dtype, array.dtype))
+        });
+        // Admit every casting rule before any operand can emit a floating-point
+        // event. Shape errors above likewise cannot be hidden by a bad value.
+        for (index, array) in arrays.iter().enumerate() {
+            if !fnp_dtype::can_cast(array.dtype, dtype, casting) {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: cannot cast operand {index} from {:?} to {:?} with casting='{casting}'",
+                    array.dtype, dtype
+                )));
+            }
+        }
+        let mut converted = arrays
+            .iter()
+            .zip(&shapes)
+            .map(|(array, shape)| {
+                // An empty neighbor creates no stride gap. Likewise, a stack
+                // containing one operand retains the full contiguous source.
+                let contiguous = if stack {
+                    arrays.len() == 1
+                } else {
+                    joined_axis_length == shape[axis]
+                };
+                let run_length = if contiguous || array.values.is_empty() {
+                    array.values.len()
+                } else {
+                    element_count(&shape[axis..]).map_err(UFuncError::Shape)?
+                };
+                array.cast_join_operand(dtype, casting, run_length)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if stack {
+            for array in &mut converted {
+                // The normalized insertion axis precedes any component axis.
+                array.shape.insert(axis, 1);
+            }
+        }
+        let refs: Vec<_> = converted.iter().collect();
+        Self::concatenate_components(&refs, axis as isize)
+    }
+
     /// Concatenate with dtype and casting control (`np.concatenate(dtype=, casting=)`).
     ///
     /// Casts all input arrays to `dtype` using the specified casting rule before
@@ -14425,19 +14629,7 @@ impl UFuncArray {
         dtype: DType,
         casting: &str,
     ) -> Result<Self, UFuncError> {
-        // Validate all casts
-        for (i, arr) in arrays.iter().enumerate() {
-            if !fnp_dtype::can_cast(arr.dtype, dtype, casting) {
-                return Err(UFuncError::Msg(format!(
-                    "concatenate: cannot cast operand {} from {:?} to {:?} with casting='{casting}'",
-                    i, arr.dtype, dtype
-                )));
-            }
-        }
-        // Cast all arrays to target dtype
-        let cast_arrays: Vec<Self> = arrays.iter().map(|a| a.astype(dtype)).collect();
-        let refs: Vec<&Self> = cast_arrays.iter().collect();
-        Self::concatenate(&refs, axis)
+        Self::join_with_dtype(arrays, axis, Some(dtype), casting, false)
     }
 
     /// Concatenate arrays after flattening (`np.concatenate(arrays, axis=None)`).
@@ -14450,6 +14642,9 @@ impl UFuncArray {
                 expected: 1,
                 actual: 0,
             });
+        }
+        for array in arrays {
+            array.complex_logical_shape("concatenate")?;
         }
         let flat: Vec<Self> = arrays.iter().map(|a| a.ravel()).collect();
         let refs: Vec<&Self> = flat.iter().collect();
@@ -14470,21 +14665,14 @@ impl UFuncArray {
         dtype: DType,
         casting: &str,
     ) -> Result<Self, UFuncError> {
-        for (i, arr) in arrays.iter().enumerate() {
-            if !fnp_dtype::can_cast(arr.dtype, dtype, casting) {
-                return Err(UFuncError::Msg(format!(
-                    "stack: cannot cast operand {} from {:?} to {:?} with casting='{casting}'",
-                    i, arr.dtype, dtype
-                )));
-            }
-        }
-        let cast_arrays: Vec<Self> = arrays.iter().map(|a| a.astype(dtype)).collect();
-        let refs: Vec<&Self> = cast_arrays.iter().collect();
-        Self::stack(&refs, axis)
+        Self::join_with_dtype(arrays, axis, Some(dtype), casting, true)
     }
 
     /// Stack arrays along a new axis.
     pub fn stack(arrays: &[&Self], axis: isize) -> Result<Self, UFuncError> {
+        if arrays.iter().any(|array| array.dtype.is_complex()) {
+            return Self::join_with_dtype(arrays, axis, None, "same_kind", true);
+        }
         if arrays.is_empty() {
             return Err(UFuncError::InvalidInputLength {
                 expected: 1,
@@ -19432,11 +19620,9 @@ impl UFuncArray {
 
     // ── Type casting, boolean reductions, searching, comparison ────
 
-    /// Convert numeric logical elements through typed storage. The public
-    /// storage bridge remains real-valued; complex arrays add/remove their
-    /// trailing component dimension only at this private casting boundary.
-    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
-        let mut shape = self.complex_logical_shape("astype")?;
+    /// Read numeric logical elements at their declared source precision.
+    fn numeric_cast_source(&self) -> Result<(Vec<usize>, ArrayStorage), UFuncError> {
+        let shape = self.complex_logical_shape("astype")?;
         let source = match self.dtype {
             DType::Complex64 => ArrayStorage::Complex64(
                 self.values
@@ -19456,6 +19642,14 @@ impl UFuncArray {
             ),
             _ => self.to_storage()?,
         };
+        Ok((shape, source))
+    }
+
+    /// Convert numeric logical elements through typed storage. The public
+    /// storage bridge remains real-valued; complex arrays add/remove their
+    /// trailing component dimension only at this private casting boundary.
+    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
+        let (mut shape, source) = self.numeric_cast_source()?;
         if report_invalid
             && geterr().invalid != FloatErrorMode::Ignore
             && source.has_invalid_float_to_integer_cast(dtype)
@@ -27586,7 +27780,7 @@ impl UFuncArray {
         }
         let promoted: Vec<Self> = arrays.iter().map(|a| a.atleast_1d()).collect();
         // NumPy selects the concatenation axis based on the first promoted input.
-        if promoted[0].shape.len() == 1 {
+        if promoted[0].complex_logical_shape("hstack")?.len() == 1 {
             return Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 0);
         }
         Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 1)
@@ -27665,7 +27859,11 @@ impl UFuncArray {
     pub fn ravel(&self) -> Self {
         let n = self.values.len();
         Self {
-            shape: vec![n],
+            shape: if self.dtype.is_complex() && self.complex_logical_shape("ravel").is_ok() {
+                vec![n / 2, 2]
+            } else {
+                vec![n]
+            },
             values: self.values.clone(),
             dtype: self.dtype,
             integer_sidecar: self.cloned_integer_sidecar(),
