@@ -28661,59 +28661,203 @@ impl UFuncArray {
     }
 
     /// Choose elements from a list of arrays based on an index array (np.choose)
-    /// with explicit NumPy mode handling.
+    /// with explicit NumPy mode handling. Indices and all choices broadcast to
+    /// one logical shape, and choices share a common result dtype. Complex
+    /// choices retain their trailing storage component dimension in the result.
     pub fn choose_with_mode(&self, choices: &[Self], mode: &str) -> Result<Self, UFuncError> {
+        let mode = ChooseMode::parse(mode)?;
         if choices.is_empty() {
             return Err(UFuncError::Msg(
                 "choose: need at least 1 choice".to_string(),
             ));
         }
-        let mode = ChooseMode::parse(mode)?;
-        let n_choices = choices.len();
-        let mut values = Vec::with_capacity(self.values.len());
-        let source_sidecar = self.synthesized_integer_sidecar("choose")?;
-        let choice_sidecars = if matches!(choices[0].dtype, DType::I64 | DType::U64) {
-            Some(
-                choices
-                    .iter()
-                    .map(|choice| choice.synthesized_integer_sidecar("choose"))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
+        let index_dtype = if cfg!(target_pointer_width = "64") {
+            DType::I64
+        } else {
+            DType::I32
+        };
+        if !fnp_dtype::can_cast_lossless(self.dtype, index_dtype) {
+            return Err(UFuncError::TypeResolutionInvalid {
+                detail: format!(
+                    "choose: indices of dtype {:?} cannot be safely cast to {index_dtype:?}",
+                    self.dtype
+                ),
+            });
+        }
+        // NumPy's choose iterator admits at most 64 operands, including indices.
+        if choices.len() >= 64 {
+            return Err(UFuncError::Msg(
+                "choose: at most 63 choices are supported".into(),
+            ));
+        }
+        let choice_shapes = choices
+            .iter()
+            .map(|choice| choice.complex_logical_shape("choose"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let homogeneous_marker = !(choices[0].dtype.is_numeric()
+            || choices[0].dtype == DType::Bool)
+            && choices
+                .iter()
+                .all(|choice| choice.dtype == choices[0].dtype);
+        let dtype = if homogeneous_marker {
+            // Homogeneous temporal and opaque marker arrays already support
+            // payload relocation. Preserve their metadata without asking the
+            // numeric casting bridge to reinterpret it.
+            choices[0].dtype
+        } else {
+            let dtypes = choices
+                .iter()
+                .map(|choice| choice.dtype)
+                .collect::<Vec<_>>();
+            if dtypes
+                .iter()
+                .any(|dtype| !(dtype.is_numeric() || *dtype == DType::Bool))
+            {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail:
+                        "choose: mixed non-numeric choices are unsupported by this storage bridge"
+                            .into(),
+                });
+            }
+            fnp_dtype::result_type(&dtypes)
+        };
+        let shapes: Vec<&[usize]> = choice_shapes
+            .iter()
+            .map(Vec::as_slice)
+            .chain(std::iter::once(self.shape.as_slice()))
+            .collect();
+        if shapes.iter().any(|shape| shape.len() > 32) {
+            return Err(UFuncError::Msg(
+                "choose: at most 32 logical dimensions are supported".into(),
+            ));
+        }
+        let mut shape = Self::broadcast_shapes(&shapes)?;
+        let count = element_count(&shape).map_err(UFuncError::Shape)?;
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let physical_count = count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if count == 0 {
+            if dtype.is_complex() {
+                shape.push(2);
+            }
+            return Self::new(shape, Vec::new(), dtype);
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(physical_count).map_err(|_| {
+            UFuncError::Msg("choose: unable to allocate output array (out of memory)".into())
+        })?;
+
+        // Normalize even Boolean/narrow integer indices before reading them;
+        // UFuncArray::new does not canonicalize its f64 working representation.
+        // Exact wide integers retain their sidecars throughout this conversion.
+        let indices = self.cast_numeric_storage(self.dtype, false)?;
+        let source_sidecar = indices.synthesized_integer_sidecar("choose")?;
+        let choices: Vec<Self> = choices
+            .iter()
+            .map(|choice| {
+                if homogeneous_marker {
+                    Ok(choice.clone())
+                } else {
+                    choice.cast_numeric_storage(dtype, false)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let mut integer_sidecar = if choices
+            .iter()
+            .any(|choice| choice.integer_sidecar.is_some())
+        {
+            match dtype {
+                DType::I64 | DType::DateTime64 | DType::TimeDelta64 => {
+                    Some(IntegerSidecar::I64(Vec::new()))
+                }
+                DType::U64 => Some(IntegerSidecar::U64(Vec::new())),
+                _ => None,
+            }
         } else {
             None
         };
-        let mut integer_sidecar = match choices[0].dtype {
-            DType::I64 => Some(IntegerSidecar::I64(Vec::with_capacity(self.values.len()))),
-            DType::U64 => Some(IntegerSidecar::U64(Vec::with_capacity(self.values.len()))),
-            _ => None,
-        };
-        for (i, &idx) in self.values.iter().enumerate() {
+        match integer_sidecar.as_mut() {
+            Some(IntegerSidecar::I64(exact)) => exact.try_reserve_exact(count),
+            Some(IntegerSidecar::U64(exact)) => exact.try_reserve_exact(count),
+            None => Ok(()),
+        }
+        .map_err(|_| {
+            UFuncError::Msg(
+                "choose: unable to allocate exact integer output (out of memory)".into(),
+            )
+        })?;
+
+        let index_steps = aligned_broadcast_axis_steps(
+            shape.len(),
+            &self.shape,
+            &contiguous_strides_elems(&self.shape),
+        );
+        let choice_steps: Vec<Vec<usize>> = choice_shapes
+            .iter()
+            .map(|choice_shape| {
+                aligned_broadcast_axis_steps(
+                    shape.len(),
+                    choice_shape,
+                    &contiguous_strides_elems(choice_shape),
+                )
+            })
+            .collect();
+        let mut coordinates = vec![0usize; shape.len()];
+        let mut index_offset = 0usize;
+        let mut choice_offsets = vec![0usize; choices.len()];
+        for flat in 0..count {
             let choice_idx = match &source_sidecar {
                 Some(IntegerSidecar::I64(values)) => {
-                    resolve_choose_index_i64(values[i], n_choices, mode)?
+                    resolve_choose_index_i64(values[index_offset], choices.len(), mode)?
                 }
                 Some(IntegerSidecar::U64(values)) => {
-                    resolve_choose_index_u64(values[i], n_choices, mode)?
+                    resolve_choose_index_u64(values[index_offset], choices.len(), mode)?
                 }
-                None => resolve_choose_index_f64(idx, n_choices, mode)?,
+                None => {
+                    resolve_choose_index_f64(indices.values[index_offset], choices.len(), mode)?
+                }
             };
-            if i >= choices[choice_idx].values.len() {
-                return Err(UFuncError::Msg(format!(
-                    "choose: position {i} out of range for choice {choice_idx}"
-                )));
+            let choice = &choices[choice_idx];
+            let offset = choice_offsets[choice_idx];
+            let base = offset * components;
+            values.extend_from_slice(&choice.values[base..base + components]);
+            match integer_sidecar.as_mut() {
+                Some(IntegerSidecar::I64(exact)) => exact.push(match &choice.integer_sidecar {
+                    Some(IntegerSidecar::I64(source)) => source[offset],
+                    _ => choice.values[offset] as i64,
+                }),
+                Some(IntegerSidecar::U64(exact)) => exact.push(match &choice.integer_sidecar {
+                    Some(IntegerSidecar::U64(source)) => source[offset],
+                    _ => choice.values[offset] as u64,
+                }),
+                None => {}
             }
-            values.push(choices[choice_idx].values[i]);
-            if let (Some(sidecars), Some(out)) = (&choice_sidecars, integer_sidecar.as_mut()) {
-                match (out, &sidecars[choice_idx]) {
-                    (IntegerSidecar::I64(dst), Some(IntegerSidecar::I64(src))) => dst.push(src[i]),
-                    (IntegerSidecar::U64(dst), Some(IntegerSidecar::U64(src))) => dst.push(src[i]),
-                    _ => integer_sidecar = None,
+            if flat + 1 == count || shape.is_empty() {
+                continue;
+            }
+            for axis in (0..shape.len()).rev() {
+                coordinates[axis] += 1;
+                index_offset += index_steps[axis];
+                for (offset, steps) in choice_offsets.iter_mut().zip(&choice_steps) {
+                    *offset += steps[axis];
+                }
+                if coordinates[axis] < shape[axis] {
+                    break;
+                }
+                coordinates[axis] = 0;
+                index_offset -= index_steps[axis] * shape[axis];
+                for (offset, steps) in choice_offsets.iter_mut().zip(&choice_steps) {
+                    *offset -= steps[axis] * shape[axis];
                 }
             }
         }
-        let dtype = choices[0].dtype;
+        if dtype.is_complex() {
+            shape.push(2);
+        }
         Ok(Self {
-            shape: self.shape.clone(),
+            shape,
             values,
             dtype,
             integer_sidecar,
@@ -33727,11 +33871,8 @@ impl UFuncArray {
         if arrays.is_empty() {
             return DType::F64;
         }
-        let mut result = arrays[0].dtype;
-        for arr in &arrays[1..] {
-            result = promote(result, arr.dtype);
-        }
-        result
+        let dtypes = arrays.iter().map(|array| array.dtype).collect::<Vec<_>>();
+        fnp_dtype::result_type(&dtypes)
     }
 
     /// Check if a cast between dtypes is allowed (np.can_cast).
