@@ -18693,9 +18693,92 @@ impl UFuncArray {
         out
     }
 
+    fn take_complex(&self, indices: &[i64], axis: Option<isize>) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("take")?;
+        // NumPy promotes a scalar to one dimension for take(axis=0/-1).
+        // Flattening counts complex numbers, not their stored components.
+        let source_shape = if axis.is_none() || logical_shape.is_empty() {
+            vec![self.values.len() / 2]
+        } else {
+            logical_shape
+        };
+        let axis = normalize_axis(axis.unwrap_or(0), source_shape.len())?;
+        let axis_len = source_shape[axis];
+        let mut out_shape = source_shape.clone();
+        out_shape[axis] = indices.len();
+        let logical_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let physical_count = logical_count
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        out_shape.push(2);
+
+        // np.take visits the indices once per preceding-axis block, even
+        // when a following dimension is empty. A zero preceding dimension
+        // skips bounds checks; an empty following dimension does not.
+        if source_shape[..axis].contains(&0) || indices.is_empty() {
+            return Self::new(out_shape, Vec::new(), self.dtype);
+        }
+        // NumPy reserves the result before inspecting indices. In particular,
+        // an empty source can request an unallocatable result along its empty
+        // axis; that allocation error takes precedence over index bounds.
+        let mut values = Vec::new();
+        values.try_reserve_exact(physical_count).map_err(|_| {
+            UFuncError::Msg("take: unable to allocate output array (out of memory)".into())
+        })?;
+        let mut resolved = Vec::new();
+        resolved.try_reserve_exact(indices.len()).map_err(|_| {
+            UFuncError::Msg("take: unable to allocate index array (out of memory)".into())
+        })?;
+        for &index in indices {
+            let adjusted = if index < 0 {
+                i128::from(index) + axis_len as i128
+            } else {
+                i128::from(index)
+            };
+            if adjusted < 0 || adjusted >= axis_len as i128 {
+                return Err(UFuncError::Msg(format!(
+                    "take: index {index} out of bounds for axis {axis} with size {axis_len}"
+                )));
+            }
+            resolved.push(adjusted as usize);
+        }
+        if physical_count == 0 {
+            return Self::new(out_shape, values, self.dtype);
+        }
+
+        let outer = element_count(&source_shape[..axis]).map_err(UFuncError::Shape)?;
+        let inner = element_count(&source_shape[axis + 1..])
+            .map_err(UFuncError::Shape)?
+            .checked_mul(2)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        for block in 0..outer {
+            for &index in &resolved {
+                let start = (block * axis_len + index) * inner;
+                values.extend_from_slice(&self.values[start..start + inner]);
+            }
+        }
+        if self.dtype == DType::Complex64 {
+            for value in &mut values {
+                *value = f64::from(*value as f32);
+            }
+        }
+        Self::new(out_shape, values, self.dtype)
+    }
+
     /// Select elements by integer indices along an axis (np.take).
-    /// Negative indices are supported (wrap around).
+    /// Negative indices are supported (wrap around). Complex arrays use
+    /// logical axes and preserve complete real/imaginary component pairs.
     pub fn take(&self, indices: &[i64], axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.take_complex(indices, axis);
+        }
+        if self.shape.is_empty()
+            && let Some(axis) = axis
+        {
+            normalize_axis(axis, 1)?;
+            return self.take(indices, None);
+        }
         match axis {
             None => {
                 // Flat indexing
@@ -18761,13 +18844,33 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
-                let axis_len = self.shape[ax] as i64;
+                let axis_len = self.shape[ax];
+                let mut out_shape = self.shape.clone();
+                out_shape[ax] = indices.len();
+                let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                if out_count > isize::MAX as usize / std::mem::size_of::<f64>() {
+                    return Err(UFuncError::Shape(ShapeError::Overflow));
+                }
+                // NumPy does not visit an index when no preceding-axis block
+                // exists. A following zero extent still requires validation.
+                if self.shape[..ax].contains(&0) || indices.is_empty() {
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: Vec::new(),
+                        dtype: self.dtype,
+                        integer_sidecar: self.reindexed_integer_sidecar(&[]),
+                    });
+                }
                 // Resolve and validate indices
                 let resolved: Vec<usize> = indices
                     .iter()
                     .map(|&idx| {
-                        let i = if idx < 0 { idx + axis_len } else { idx };
-                        if i < 0 || i >= axis_len {
+                        let i = if idx < 0 {
+                            i128::from(idx) + axis_len as i128
+                        } else {
+                            i128::from(idx)
+                        };
+                        if i < 0 || i >= axis_len as i128 {
                             Err(UFuncError::Msg(format!(
                                 "take: index {idx} out of bounds for axis {ax} with size {axis_len}"
                             )))
@@ -18777,6 +18880,14 @@ impl UFuncArray {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
+                if out_count == 0 {
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: Vec::new(),
+                        dtype: self.dtype,
+                        integer_sidecar: self.reindexed_integer_sidecar(&[]),
+                    });
+                }
                 // A full axis selected once in source order is exactly a deep
                 // copy of the input. Validation above still preserves NumPy's
                 // first-error behavior; `Clone` copies values and any exact
@@ -18787,9 +18898,6 @@ impl UFuncArray {
                 {
                     return Ok(self.clone());
                 }
-
-                let mut out_shape = self.shape.clone();
-                out_shape[ax] = resolved.len();
 
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
@@ -18871,7 +18979,6 @@ impl UFuncArray {
                 self.take(&indices, None)
             }
             Some(ax) => {
-                let ax = normalize_axis(ax, self.shape.len())?;
                 let selected: Vec<usize> = condition
                     .iter()
                     .enumerate()
@@ -18879,7 +18986,9 @@ impl UFuncArray {
                     .map(|(i, _)| i)
                     .collect();
                 let indices: Vec<i64> = selected.iter().map(|&i| i as i64).collect();
-                self.take(&indices, Some(ax as isize))
+                // `take` owns logical-axis validation, including complex
+                // arrays' trailing storage dimension and scalar inputs.
+                self.take(&indices, Some(ax))
             }
         }
     }
@@ -18889,16 +18998,69 @@ impl UFuncArray {
         self.take(indices, None)
     }
 
-    /// Boolean mask indexing (flat). Equivalent to `a[mask]`.
+    /// Boolean mask indexing, equivalent to `a[mask]`.
+    /// A mask covers leading logical dimensions; remaining dimensions are
+    /// retained after the selected-element dimension. A scalar mask adds a
+    /// leading dimension of length zero or one.
     pub fn boolean_index(&self, mask: &Self) -> Result<Self, UFuncError> {
-        if mask.values.len() != self.values.len() {
+        if mask.dtype != DType::Bool {
+            return Err(UFuncError::Msg(
+                "boolean_index: mask must be a boolean array".to_string(),
+            ));
+        }
+        let logical_shape = self.complex_logical_shape("boolean_index")?;
+        if mask.shape.len() > logical_shape.len() {
             return Err(UFuncError::Msg(format!(
-                "boolean_index: mask size {} != array size {}",
-                mask.values.len(),
-                self.values.len()
+                "boolean_index: mask rank {} exceeds array rank {}",
+                mask.shape.len(),
+                logical_shape.len()
             )));
         }
-        Self::extract(mask, self)
+        // NumPy permits a zero-length mask dimension, but a nonempty mask
+        // dimension must match exactly. Boolean indexing never broadcasts.
+        if mask
+            .shape
+            .iter()
+            .zip(&logical_shape)
+            .any(|(&mask_len, &array_len)| mask_len != 0 && mask_len != array_len)
+        {
+            return Err(UFuncError::Msg(format!(
+                "boolean_index: mask size/shape {:?} does not match leading array dimensions {:?}",
+                mask.shape, logical_shape
+            )));
+        }
+        if mask.shape == logical_shape {
+            return Self::extract(mask, self);
+        }
+
+        let selected = mask.values.iter().filter(|&&value| value != 0.0).count();
+        let trailing_shape = &logical_shape[mask.shape.len()..];
+        let mut out_shape = Vec::with_capacity(trailing_shape.len() + 2);
+        out_shape.push(selected);
+        out_shape.extend_from_slice(trailing_shape);
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        if self.dtype.is_complex() {
+            out_shape.push(2);
+        }
+        let physical_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        if physical_count > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        let mut indices = Vec::with_capacity(out_count);
+        // Empty selections need no trailing-shape product: an otherwise
+        // enormous shape with a zero dimension still has a valid empty result.
+        if out_count != 0 {
+            let block = element_count(trailing_shape).map_err(UFuncError::Shape)?;
+            for (prefix, &value) in mask.values.iter().enumerate() {
+                if value != 0.0 {
+                    let start = prefix * block;
+                    indices.extend((start..start + block).map(|index| index as i64));
+                }
+            }
+        }
+        let mut result = self.take(&indices, None)?;
+        result.shape = out_shape;
+        Ok(result)
     }
 
     /// Set elements by boolean mask (flat). Equivalent to `a[mask] = value`.
@@ -19042,10 +19204,91 @@ impl UFuncArray {
         Ok(resolved as usize)
     }
 
+    fn take_along_axis_complex(&self, indices: &Self, axis: isize) -> Result<Self, UFuncError> {
+        let source_shape = self.complex_logical_shape("take_along_axis")?;
+        let ndim = source_shape.len();
+        // NumPy validates the axis before the index dtype, then the rank.
+        let axis = normalize_axis(axis, ndim)?;
+        if !indices.dtype.is_integer() {
+            return Err(UFuncError::Msg(
+                "take_along_axis: indices must be an integer array".into(),
+            ));
+        }
+        if indices.shape.len() != ndim {
+            return Err(UFuncError::Msg(format!(
+                "take_along_axis: indices ndim {} != array ndim {ndim}",
+                indices.shape.len()
+            )));
+        }
+        let mut out_shape = indices.shape.clone();
+        for (dim, length) in out_shape.iter_mut().enumerate() {
+            if dim == axis || source_shape[dim] == 1 {
+                continue;
+            }
+            if *length != 1 && *length != source_shape[dim] {
+                return Err(UFuncError::Msg(format!(
+                    "take_along_axis: non-axis dimension {dim} mismatch: {} vs {}",
+                    source_shape[dim], indices.shape[dim]
+                )));
+            }
+            *length = source_shape[dim];
+        }
+        let total = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let physical_count = total
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if total == 0 {
+            out_shape.push(2);
+            return Self::new(out_shape, Vec::new(), self.dtype);
+        }
+
+        let source_strides = c_strides_elems(&source_shape);
+        let index_strides = c_strides_elems(&indices.shape);
+        let out_strides = c_strides_elems(&out_shape);
+        let axis_len = source_shape[axis];
+        let mut values = Vec::new();
+        values.try_reserve_exact(physical_count).map_err(|_| {
+            UFuncError::Msg(
+                "take_along_axis: unable to allocate output array (out of memory)".into(),
+            )
+        })?;
+        for flat in 0..total {
+            let mut remainder = flat;
+            let mut source_flat = 0;
+            let mut index_flat = 0;
+            for dim in 0..ndim {
+                let coordinate = remainder / out_strides[dim];
+                remainder %= out_strides[dim];
+                if indices.shape[dim] != 1 {
+                    index_flat += coordinate * index_strides[dim];
+                }
+                if dim != axis && source_shape[dim] != 1 {
+                    source_flat += coordinate * source_strides[dim];
+                }
+            }
+            let resolved =
+                indices.resolve_along_axis_index(index_flat, axis, axis_len, "take_along_axis")?;
+            source_flat += resolved * source_strides[axis];
+            let parts = &self.values[source_flat * 2..source_flat * 2 + 2];
+            if self.dtype == DType::Complex64 {
+                values.extend(parts.iter().map(|&value| f64::from(value as f32)));
+            } else {
+                values.extend_from_slice(parts);
+            }
+        }
+        out_shape.push(2);
+        Self::new(out_shape, values, self.dtype)
+    }
+
     /// Take values along an axis using index array (np.take_along_axis).
-    /// Integer `indices` must have the same rank as `self`; non-axis
-    /// dimensions broadcast in either direction.
+    /// Integer `indices` must have the same logical rank as `self`; non-axis
+    /// dimensions broadcast in either direction. Complex component pairs
+    /// are gathered together and their storage dimension is not an axis.
     pub fn take_along_axis(&self, indices: &Self, axis: isize) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.take_along_axis_complex(indices, axis);
+        }
         let (ax, out_shape) = self.along_axis_index_shape(indices, axis, "take_along_axis")?;
         let ndim = self.shape.len();
         let axis_len = self.shape[ax];
@@ -19278,12 +19521,26 @@ impl UFuncArray {
 
     /// Return elements chosen from a flattened array based on condition (np.extract).
     pub fn extract(condition: &Self, arr: &Self) -> Result<Self, UFuncError> {
-        if condition.values.len() != arr.values.len() {
-            return Err(UFuncError::Msg(format!(
-                "extract: condition size {} != array size {}",
-                condition.values.len(),
-                arr.values.len()
-            )));
+        let typed_condition = if condition.dtype.is_complex() {
+            Some(condition.complex_truth_array("extract")?)
+        } else if matches!(condition.dtype, DType::F16 | DType::F32) || condition.dtype.is_integer()
+        {
+            Some(condition.cast_numeric_storage(DType::Bool, false)?)
+        } else {
+            None
+        };
+        let condition = typed_condition.as_ref().unwrap_or(condition);
+        if arr.dtype.is_complex() || condition.values.len() != arr.values.len() {
+            // NumPy implements extract as a flat take of the condition's
+            // nonzero positions. Short conditions and all-false excess tails
+            // are valid; only a selected index past the array's end fails.
+            let indices: Vec<i64> = condition
+                .values
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &value)| (value != 0.0).then_some(index as i64))
+                .collect();
+            return arr.take(&indices, None);
         }
         if arr.dtype == DType::F64 && arr.integer_sidecar.is_none() {
             const LANES: usize = 8;
