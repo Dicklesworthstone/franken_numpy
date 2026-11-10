@@ -1,9 +1,13 @@
 //! Conditional selection acts on logical complex elements, never components.
 
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, UFuncError};
+use fnp_ufunc::{
+    FloatErrorCallback, FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, errstate,
+    seterrcall, take_float_error_events,
+};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 fn complex(shape: &[usize], parts: &[(f64, f64)], dtype: DType) -> UFuncArray {
     let mut physical_shape = shape.to_vec();
@@ -123,6 +127,16 @@ impl OracleBatch {
         self.actual.push(UFuncArray::where_select(condition, x, y));
     }
 
+    fn push_select(&mut self, conditions: &[&UFuncArray], choices: &[&UFuncArray], default: f64) {
+        self.cases.push(json!({
+            "conditions": conditions.iter().map(|array| oracle_input(array)).collect::<Vec<_>>(),
+            "choices": choices.iter().map(|array| oracle_input(array)).collect::<Vec<_>>(),
+            "default": default.to_string(),
+        }));
+        self.actual
+            .push(UFuncArray::select(conditions, choices, default));
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -142,7 +156,12 @@ def load(item):
 rows = []
 for case in json.load(sys.stdin):
     try:
-        result = np.asarray(np.where(load(case['condition']), load(case['x']), load(case['y'])))
+        if 'conditions' in case:
+            result = np.asarray(np.select([load(item) for item in case['conditions']],
+                                          [load(item) for item in case['choices']],
+                                          float(case['default'])))
+        else:
+            result = np.asarray(np.where(load(case['condition']), load(case['x']), load(case['y'])))
         if result.dtype.kind == 'c':
             parts = np.empty(result.size * 2, dtype=np.float64)
             parts[0::2] = result.real.ravel()
@@ -421,4 +440,479 @@ fn where_select_checks_complex_layout_and_logical_broadcast_before_selection() {
     let result = UFuncArray::where_select(&false_condition, &empty, &valid_complex).unwrap();
     assert_eq!(result.shape(), &[0, usize::MAX, 2]);
     assert!(result.values().is_empty());
+}
+
+#[test]
+fn select_preserves_complex_pairs_with_broadcasting_and_first_match_precedence() {
+    let first = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap();
+    let second = UFuncArray::new(vec![1, 3], vec![1.0, 0.0, 1.0], DType::Bool).unwrap();
+    let third = UFuncArray::scalar(0.0, DType::Bool);
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let first_choice = complex(
+            &[1, 3],
+            &[
+                (1.25, -0.0),
+                (-0.0, 2.5),
+                (f64::INFINITY, f64::NEG_INFINITY),
+            ],
+            dtype,
+        );
+        let second_choice = complex(&[], &[(7.5, -4.25)], dtype);
+        let third_choice = sample(&[2, 1], DType::F32, 2);
+        for default in [-0.0, -1.25, f64::NAN, f64::INFINITY] {
+            batch.push_select(
+                &[&first, &second, &third],
+                &[&first_choice, &second_choice, &third_choice],
+                default,
+            );
+            batch.push_select(
+                &[&second, &first, &third],
+                &[&second_choice, &first_choice, &third_choice],
+                default,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn select_numeric_dtype_pairs_and_float_defaults_match_numpy() {
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let first = UFuncArray::new(vec![3], vec![1.0, 0.0, 0.0], DType::Bool).unwrap();
+    let second = UFuncArray::new(vec![3], vec![1.0, 1.0, 0.0], DType::Bool).unwrap();
+    let mut batch = OracleBatch::default();
+    for left_dtype in dtypes {
+        for right_dtype in dtypes {
+            let left = sample(&[3], left_dtype, 0);
+            let right = sample(&[3], right_dtype, 2);
+            for default in [0.0, -0.0, 0.1, 1.0e100, f64::NAN, f64::NEG_INFINITY] {
+                batch.push_select(&[&first, &second], &[&left, &right], default);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn select_mixed_signed_unsigned_and_float_choices_use_common_dtype() {
+    let condition = UFuncArray::scalar(1.0, DType::Bool);
+    let mut batch = OracleBatch::default();
+    for (signed, unsigned, floating) in [
+        (DType::I8, DType::U8, DType::F16),
+        (DType::I16, DType::U16, DType::F32),
+        (DType::I16, DType::U16, DType::Complex64),
+        (DType::I64, DType::U64, DType::F32),
+        (DType::I64, DType::U64, DType::Complex64),
+    ] {
+        let inputs = [
+            sample(&[], signed, 0),
+            sample(&[], unsigned, 4),
+            sample(&[], floating, 2),
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            batch.push_select(
+                &[&condition, &condition, &condition],
+                &[&inputs[order[0]], &inputs[order[1]], &inputs[order[2]]],
+                0.0,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn select_casts_source_precision_and_exact_integer_sidecars_before_selection() {
+    let condition = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 0.0], DType::Bool).unwrap();
+    let fallback_condition = UFuncArray::scalar(1.0, DType::Bool);
+    let signed = UFuncArray::from_storage(
+        vec![4],
+        ArrayStorage::I64(vec![
+            i64::MIN,
+            -(1_i64 << 53) - 1,
+            (1_i64 << 53) + 1,
+            i64::MAX,
+        ]),
+    )
+    .unwrap();
+    let unsigned = UFuncArray::from_storage(
+        vec![4],
+        ArrayStorage::U64(vec![u64::MAX, (1_u64 << 53) + 1, (1_u64 << 63) + 1, 0]),
+    )
+    .unwrap();
+    let mut batch = OracleBatch::default();
+    for (dtype, midpoint, tiny) in [
+        (DType::F16, 2049.0, 2.0_f64.powi(-26)),
+        (DType::F32, 16777217.0, 2.0_f64.powi(-151)),
+    ] {
+        let narrow =
+            UFuncArray::new(vec![4], vec![midpoint, -midpoint, tiny, -tiny], dtype).unwrap();
+        for wide in [&signed, &unsigned] {
+            batch.push_select(&[&condition, &fallback_condition], &[&narrow, wide], -0.0);
+            batch.push_select(&[&condition, &fallback_condition], &[wide, &narrow], -0.0);
+        }
+        for other_dtype in [DType::F64, DType::Complex64, DType::Complex128] {
+            let other = sample(&[4], other_dtype, 1);
+            batch.push_select(&[&condition, &fallback_condition], &[&narrow, &other], -0.0);
+        }
+    }
+    let complex_narrow = sample(&[4], DType::Complex64, 3);
+    for other in [&signed, &unsigned] {
+        batch.push_select(
+            &[&condition, &fallback_condition],
+            &[&complex_narrow, other],
+            0.0,
+        );
+        batch.push_select(
+            &[&condition, &fallback_condition],
+            &[other, &complex_narrow],
+            0.0,
+        );
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn select_scalar_and_empty_logical_shapes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for shape in [&[][..], &[0][..], &[2, 0, 3][..]] {
+        let scalar_condition = UFuncArray::scalar(1.0, DType::Bool);
+        let condition = sample(shape, DType::Bool, 0);
+        for dtype in [DType::F16, DType::F64, DType::Complex64, DType::Complex128] {
+            let choice = sample(shape, dtype, 1);
+            let scalar_choice = sample(&[], dtype, 3);
+            batch.push_select(
+                &[&condition, &scalar_condition],
+                &[&choice, &scalar_choice],
+                -0.0,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+
+    let scalar_condition = UFuncArray::scalar(0.0, DType::Bool);
+    for dtype in [DType::F64, DType::Complex128] {
+        let empty = sample(&[0, usize::MAX], dtype, 0);
+        let scalar = sample(&[], dtype, 0);
+        let result = UFuncArray::select(
+            &[&scalar_condition, &scalar_condition],
+            &[&empty, &scalar],
+            0.0,
+        )
+        .unwrap();
+        assert!(result.values().is_empty());
+        assert_eq!(result.shape(), empty.shape());
+    }
+}
+
+#[test]
+fn select_checks_broadcast_output_capacity_before_allocation() {
+    let condition = UFuncArray::scalar(0.0, DType::Bool);
+    for ndim in [usize::BITS as usize - 4, usize::BITS as usize] {
+        for dtype in [DType::F64, DType::Complex128] {
+            // Each input stores only two logical elements, but together their
+            // independent axes request more output bytes than an allocation can
+            // represent. Even never-selected choices participate in the shape.
+            let choices: Vec<UFuncArray> = (0..ndim)
+                .map(|axis| {
+                    let mut shape = vec![1; ndim];
+                    shape[axis] = 2;
+                    sample(&shape, dtype, axis)
+                })
+                .collect();
+            let conditions = vec![&condition; ndim];
+            let choices = choices.iter().collect::<Vec<_>>();
+            let result = UFuncArray::select(&conditions, &choices, 0.0);
+            assert!(matches!(result, Err(UFuncError::Shape(_))));
+        }
+    }
+}
+
+#[test]
+fn select_rejects_invalid_conditions_and_unselected_malformed_choices() {
+    let valid = complex(&[], &[(1.0, 2.0)], DType::Complex128);
+    let bool_condition = UFuncArray::scalar(0.0, DType::Bool);
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::I8,
+        DType::U64,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let condition = sample(&[], dtype, 1);
+        batch.push_select(&[&condition], &[&valid], 0.0);
+    }
+    let condition = sample(&[3], DType::Bool, 0);
+    let incompatible = sample(&[2], DType::Complex128, 0);
+    batch.push_select(&[&condition], &[&incompatible], 0.0);
+    batch.push_select(&[], &[], 0.0);
+    batch.push_select(&[&bool_condition], &[], 0.0);
+    batch.assert_matches_numpy();
+
+    for malformed in [
+        UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+    ] {
+        let result = UFuncArray::select(&[&bool_condition], &[&malformed], 0.0);
+        assert!(matches!(result, Err(UFuncError::Msg(message))
+            if message.contains("interleaved trailing-dimension shape")));
+    }
+}
+
+struct SelectCallbackGuard(Option<FloatErrorCallback>);
+
+impl Drop for SelectCallbackGuard {
+    fn drop(&mut self) {
+        let _ = seterrcall(self.0.take());
+    }
+}
+
+#[test]
+fn select_default_cast_errors_match_numpy_warn_call_and_raise() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let callback_calls = Arc::clone(&calls);
+    let _callback = SelectCallbackGuard(seterrcall(Some(Arc::new(move |event| {
+        callback_calls.lock().unwrap().push(event);
+    }))));
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for dtype in [
+        DType::F16,
+        DType::F32,
+        DType::Complex64,
+        DType::F64,
+        DType::Complex128,
+    ] {
+        let (tiny, subnormal) = if dtype == DType::F16 {
+            (2.0_f64.powi(-14), 2.0_f64.powi(-24))
+        } else {
+            (f64::from(f32::MIN_POSITIVE), f64::from(f32::from_bits(1)))
+        };
+        let quarter_boundary = tiny - subnormal * 0.25;
+        let defaults = [
+            0.0,
+            -0.0,
+            1.0e100,
+            -1.0e100,
+            1.0e-50,
+            -1.0e-50,
+            1.0e-40,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            subnormal,
+            -subnormal,
+            subnormal * 0.5,
+            subnormal * 1.5,
+            tiny - subnormal,
+            tiny - subnormal * 0.5,
+            quarter_boundary.next_down(),
+            quarter_boundary,
+            quarter_boundary.next_up(),
+            tiny - subnormal * 0.125,
+            tiny,
+            tiny + subnormal * 0.25,
+        ];
+        for shape in [&[][..], &[8][..], &[0][..]] {
+            let choice = sample(shape, dtype, 0);
+            for truth in [false, true] {
+                let condition = UFuncArray::scalar(if truth { 1.0 } else { 0.0 }, DType::Bool);
+                for default in defaults {
+                    for mode in [
+                        FloatErrorMode::Warn,
+                        FloatErrorMode::Call,
+                        FloatErrorMode::Raise,
+                    ] {
+                        cases.push(json!({
+                            "dtype": dtype_name(dtype), "shape": shape,
+                            "truth": truth, "default": default.to_string(), "mode": mode.as_str(),
+                        }));
+                        take_float_error_events();
+                        calls.lock().unwrap().clear();
+                        let result = {
+                            let _errors = errstate(
+                                Some(FloatErrorMode::Ignore),
+                                None,
+                                Some(mode),
+                                Some(mode),
+                                None,
+                            );
+                            UFuncArray::select(&[&condition], &[&choice], default)
+                        };
+                        let error = match result {
+                            Ok(_) => None,
+                            Err(UFuncError::FloatingPoint { kind, detail }) => {
+                                assert!(matches!(
+                                    kind,
+                                    FloatErrorKind::Over | FloatErrorKind::Under
+                                ));
+                                Some(detail)
+                            }
+                            Err(error) => panic!("unexpected select error: {error}"),
+                        };
+                        let messages = take_float_error_events()
+                            .into_iter()
+                            .map(|event| {
+                                assert_eq!(event.mode, FloatErrorMode::Warn);
+                                assert_eq!(event.op, "cast");
+                                event.message
+                            })
+                            .collect::<Vec<_>>();
+                        let callback_messages = calls
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|event| {
+                                assert_eq!(event.mode, FloatErrorMode::Call);
+                                assert_eq!(event.op, "cast");
+                                let flag = match event.kind {
+                                    FloatErrorKind::Over => 2,
+                                    FloatErrorKind::Under => 4,
+                                    _ => panic!("unexpected select callback kind"),
+                                };
+                                json!([event.message, flag])
+                            })
+                            .collect::<Vec<_>>();
+                        actual.push(json!({"error": error, "messages": messages, "calls": callback_messages}));
+                    }
+                }
+            }
+        }
+    }
+    let script = r#"
+import json, sys, warnings
+import numpy as np
+
+rows = []
+for case in json.load(sys.stdin):
+    choice = np.zeros(case['shape'], dtype=case['dtype'])
+    calls = []
+    def record(error, flag):
+        calls.append([error + ' encountered in cast', flag])
+    np.seterrcall(record)
+    error = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with np.errstate(all='ignore', over=case['mode'], under=case['mode']):
+            try:
+                np.select([case['truth']], [choice], float(case['default']))
+            except FloatingPointError as failure:
+                error = str(failure)
+    rows.append(dict(error=error, messages=[str(warning.message) for warning in caught], calls=calls))
+print(json.dumps(rows))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch live NumPy select default cast oracle");
+    let mut stdin = child.stdin.take().unwrap();
+    serde_json::to_writer(&mut stdin, &cases).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(expected.len(), actual.len());
+    for ((case, actual), expected) in cases.iter().zip(actual).zip(expected) {
+        assert_eq!(actual, expected, "select default cast policy: {case}");
+    }
+}
+
+#[test]
+fn select_validates_inputs_before_dispatching_default_cast_errors() {
+    let _errors = errstate(
+        Some(FloatErrorMode::Ignore),
+        None,
+        Some(FloatErrorMode::Raise),
+        Some(FloatErrorMode::Raise),
+        None,
+    );
+    let condition = UFuncArray::scalar(0.0, DType::Bool);
+    let invalid_condition = UFuncArray::scalar(1.0, DType::F64);
+    let valid_choice = sample(&[], DType::Complex64, 0);
+    let malformed = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex64).unwrap();
+    let incompatible_condition = sample(&[3], DType::Bool, 0);
+    let incompatible_choice = sample(&[2], DType::Complex64, 0);
+    for default in [1.0e100, 1.0e-50] {
+        assert!(matches!(
+            UFuncArray::select(&[&invalid_condition], &[&valid_choice], default),
+            Err(UFuncError::TypeResolutionInvalid { .. })
+        ));
+        assert!(matches!(
+            UFuncArray::select(&[&condition], &[&malformed], default),
+            Err(UFuncError::Msg(_))
+        ));
+        assert!(matches!(
+            UFuncArray::select(&[&incompatible_condition], &[&incompatible_choice], default),
+            Err(UFuncError::Shape(_))
+        ));
+    }
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn select_allocation_failure_precedes_default_cast_errors() {
+    let condition = UFuncArray::scalar(0.0, DType::Bool);
+    const NDIM: usize = 29;
+    for dtype in [DType::F16, DType::F32, DType::Complex64] {
+        // Only four logical elements per input, but their broadcast result
+        // requires 2^61 bytes (2^62 for complex storage). This fits usize and
+        // isize while exceeding supported process virtual address spaces, so
+        // reservation must fail without allocating or touching physical pages.
+        let choices: Vec<UFuncArray> = (0..NDIM)
+            .map(|axis| {
+                let mut shape = vec![1; NDIM];
+                shape[axis] = 4;
+                sample(&shape, dtype, 0)
+            })
+            .collect();
+        let conditions = vec![&condition; NDIM];
+        let choices = choices.iter().collect::<Vec<_>>();
+        for default in [1.0e100, 1.0e-50] {
+            for mode in [FloatErrorMode::Warn, FloatErrorMode::Raise] {
+                take_float_error_events();
+                let _errors = errstate(
+                    Some(FloatErrorMode::Ignore),
+                    None,
+                    Some(mode),
+                    Some(mode),
+                    None,
+                );
+                let result = UFuncArray::select(&conditions, &choices, default);
+                assert!(matches!(result, Err(UFuncError::Msg(message))
+                    if message.contains("unable to allocate output array")));
+                assert!(take_float_error_events().is_empty());
+            }
+        }
+    }
 }

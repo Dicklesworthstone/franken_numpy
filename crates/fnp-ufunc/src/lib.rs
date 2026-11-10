@@ -33000,7 +33000,9 @@ impl UFuncArray {
     /// Construct array from condlist and choicelist (np.select).
     /// Evaluates conditions in order; for each element, uses the first
     /// matching condition's corresponding choice. Elements with no
-    /// matching condition get `default`.
+    /// matching condition get `default`. Conditions must have Boolean dtype.
+    /// Complex choices broadcast by their logical shape and keep both components
+    /// together. The `f64` default has NumPy's Python-float scalar promotion.
     pub fn select(
         condlist: &[&Self],
         choicelist: &[&Self],
@@ -33016,18 +33018,55 @@ impl UFuncArray {
                 "select: condlist must be non-empty".to_string(),
             ));
         }
-        let mut shapes: Vec<&[usize]> = Vec::with_capacity(condlist.len() + choicelist.len());
-        for cond in condlist {
-            shapes.push(&cond.shape);
+        for (index, condition) in condlist.iter().enumerate() {
+            if condition.dtype != DType::Bool {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail: format!("select: condition {index} must have Boolean dtype"),
+                });
+            }
         }
+        let choice_shapes = choicelist
+            .iter()
+            .map(|choice| choice.complex_logical_shape("select"))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Start with a floating kind when present. Combining signed and
+        // unsigned choices first can invent an unnecessarily wide intermediate
+        // (int8 + uint8 -> int16), which incorrectly widens float16 choices.
+        let mut out_dtype = choicelist
+            .iter()
+            .find(|choice| choice.dtype.is_float())
+            .map_or(choicelist[0].dtype, |choice| choice.dtype);
         for choice in choicelist {
-            shapes.push(&choice.shape);
-        }
-        let out_shape = Self::broadcast_shapes(&shapes)?;
-        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-        let mut out_dtype = fnp_dtype::min_scalar_type(default);
-        for choice in choicelist {
+            if !(choice.dtype.is_numeric() || choice.dtype == DType::Bool) {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail: format!("select: unsupported choice dtype {:?}", choice.dtype),
+                });
+            }
             out_dtype = promote(out_dtype, choice.dtype);
+        }
+        // NumPy 2.x treats a Python float as weakly typed: integer and Boolean
+        // choices become float64, but floating/complex choices keep their
+        // promoted precision even when the default overflows that precision.
+        if out_dtype.is_integer() || out_dtype == DType::Bool {
+            out_dtype = DType::F64;
+        }
+        let shapes: Vec<&[usize]> = condlist
+            .iter()
+            .map(|condition| condition.shape.as_slice())
+            .chain(choice_shapes.iter().map(Vec::as_slice))
+            .collect();
+        let mut out_shape = Self::broadcast_shapes(&shapes)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let components = if out_dtype.is_complex() { 2 } else { 1 };
+        let physical_count = out_count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if out_count == 0 {
+            if out_dtype.is_complex() {
+                out_shape.push(2);
+            }
+            return Self::new(out_shape, Vec::new(), out_dtype);
         }
 
         if out_count >= SELECT_PARALLEL_MIN_ELEMS
@@ -33035,9 +33074,9 @@ impl UFuncArray {
             && condlist
                 .iter()
                 .all(|cond| cond.shape.as_slice() == out_shape.as_slice())
-            && choicelist
-                .iter()
-                .all(|choice| choice.shape.as_slice() == out_shape.as_slice())
+            && choicelist.iter().all(|choice| {
+                choice.dtype == DType::F64 && choice.shape.as_slice() == out_shape.as_slice()
+            })
         {
             let values = (0..out_count)
                 .into_par_iter()
@@ -33058,33 +33097,106 @@ impl UFuncArray {
             });
         }
 
-        let broadcast_conds: Vec<Self> = condlist
-            .iter()
-            .map(|cond| cond.broadcast_to(&out_shape))
-            .collect::<Result<_, _>>()?;
-        let broadcast_choices: Vec<Self> = choicelist
-            .iter()
-            .map(|choice| choice.broadcast_to(&out_shape))
-            .collect::<Result<_, _>>()?;
+        // NumPy reserves the result before filling it with the default. Keep
+        // allocation failures ahead of any default-cast warning or exception.
+        let mut values = Vec::new();
+        values.try_reserve_exact(physical_count).map_err(|_| {
+            UFuncError::Msg("select: unable to allocate output array (out of memory)".into())
+        })?;
 
-        let mut values = vec![default; out_count];
-        // Iterate in reverse so first matching condition wins
-        for (cond, choice) in broadcast_conds.iter().zip(broadcast_choices.iter()).rev() {
-            for (v, (c, ch)) in values
-                .iter_mut()
-                .zip(cond.values.iter().zip(choice.values.iter()))
-            {
-                if *c != 0.0 {
-                    *v = *ch;
+        // Convert each original source before selecting. This applies float16,
+        // float32 and complex64 source precision and reads wide integer values
+        // from their exact sidecars rather than their rounded working buffer.
+        let choices: Vec<Self> = choicelist
+            .iter()
+            .map(|choice| choice.cast_numeric_storage(out_dtype, false))
+            .collect::<Result<_, _>>()?;
+        let default_value = default;
+        let default =
+            Self::scalar(default_value, DType::F64).cast_numeric_storage(out_dtype, false)?;
+        let narrowed_default = default.values[0];
+        if default_value.is_finite() {
+            if narrowed_default.is_infinite() {
+                dispatch_float_error(FloatErrorKind::Over, "cast")?;
+            } else if default_value != narrowed_default {
+                // NumPy's half converter detects tininess before rounding.
+                // Binary32 conversion uses tininess after rounding to its
+                // significand precision: the last quarter-subnormal interval
+                // below MIN_POSITIVE rounds out of the tiny range. Exact
+                // subnormals never underflow because the cast is not inexact.
+                let tiny_boundary = match out_dtype {
+                    DType::F16 => f64::from(f16::MIN_POSITIVE),
+                    DType::F32 | DType::Complex64 => {
+                        f64::from(f32::MIN_POSITIVE) - f64::from(f32::from_bits(1)) * 0.25
+                    }
+                    _ => 0.0,
+                };
+                if default_value.abs() < tiny_boundary {
+                    dispatch_float_error(FloatErrorKind::Under, "cast")?;
                 }
             }
         }
-        Ok(Self {
-            shape: out_shape,
-            values,
-            dtype: out_dtype,
-            integer_sidecar: None,
-        })
+        let condition_steps: Vec<Vec<usize>> = condlist
+            .iter()
+            .map(|condition| {
+                aligned_broadcast_axis_steps(
+                    out_shape.len(),
+                    &condition.shape,
+                    &contiguous_strides_elems(&condition.shape),
+                )
+            })
+            .collect();
+        let choice_steps: Vec<Vec<usize>> = choice_shapes
+            .iter()
+            .map(|shape| {
+                aligned_broadcast_axis_steps(
+                    out_shape.len(),
+                    shape,
+                    &contiguous_strides_elems(shape),
+                )
+            })
+            .collect();
+        let mut condition_offsets = vec![0usize; condlist.len()];
+        let mut choice_offsets = vec![0usize; choicelist.len()];
+        let mut coordinates = vec![0usize; out_shape.len()];
+
+        for flat in 0..out_count {
+            let selected = condlist.iter().enumerate().find_map(|(index, condition)| {
+                (condition.values[condition_offsets[index]] != 0.0).then_some(index)
+            });
+            if let Some(index) = selected {
+                let base = choice_offsets[index] * components;
+                values.extend_from_slice(&choices[index].values[base..base + components]);
+            } else {
+                values.extend_from_slice(&default.values);
+            }
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+            for axis in (0..out_shape.len()).rev() {
+                coordinates[axis] += 1;
+                for (offset, steps) in condition_offsets.iter_mut().zip(&condition_steps) {
+                    *offset += steps[axis];
+                }
+                for (offset, steps) in choice_offsets.iter_mut().zip(&choice_steps) {
+                    *offset += steps[axis];
+                }
+                if coordinates[axis] < out_shape[axis] {
+                    break;
+                }
+                coordinates[axis] = 0;
+                for (offset, steps) in condition_offsets.iter_mut().zip(&condition_steps) {
+                    *offset -= steps[axis] * out_shape[axis];
+                }
+                for (offset, steps) in choice_offsets.iter_mut().zip(&choice_steps) {
+                    *offset -= steps[axis] * out_shape[axis];
+                }
+            }
+        }
+        if out_dtype.is_complex() {
+            out_shape.push(2);
+        }
+        Self::new(out_shape, values, out_dtype)
     }
 
     /// Convert angles from degrees to radians (np.deg2rad).
