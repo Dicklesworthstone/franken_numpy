@@ -1,9 +1,13 @@
-//! Complex reduction contracts for the interleaved Rust array representation.
+//! Complex casting and reduction contracts for the interleaved Rust array representation.
 
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, UFuncError};
+use fnp_ufunc::{
+    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, errstate, seterrcall,
+    take_float_error_events,
+};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 fn complex_array(shape: &[usize], values: &[(f64, f64)], dtype: DType) -> UFuncArray {
     let mut physical_shape = shape.to_vec();
@@ -136,6 +140,19 @@ impl OracleBatch {
             .push(reduce(array, operation, dtype, axis, keepdims, ddof));
     }
 
+    fn push_cast(&mut self, input: usize, array: &UFuncArray, dtype: DType) {
+        self.cases.push(json!({
+            "input": input,
+            "op": "astype",
+            "dtype": numpy_dtype(dtype),
+            "axis": null,
+            "keepdims": false,
+            "ddof": 0,
+        }));
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Ignore));
+        self.actual.push(array.astype_with_casting(dtype, "unsafe"));
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -164,15 +181,21 @@ for case in payload['cases']:
     if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
-        result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
+        if case['op'] == 'astype':
+            result = inputs[case['input']].astype(case['dtype'], casting='unsafe')
+        else:
+            result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
         if result.dtype.kind == 'c':
             parts = np.empty(result.size * 2, dtype=np.float64)
             parts[0::2] = result.real.ravel()
             parts[1::2] = result.imag.ravel()
         else:
             parts = result.astype(np.float64).ravel()
-        rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
-                         bits=parts.view(np.uint64).tolist()))
+        row = dict(shape=list(result.shape), dtype=str(result.dtype),
+                   bits=parts.view(np.uint64).tolist())
+        if case['op'] == 'astype' and result.dtype.kind in 'iu':
+            row['integers'] = [str(int(value)) for value in result.ravel()]
+        rows.append(row)
     except (TypeError, ValueError, IndexError) as error:
         rows.append(dict(error=type(error).__name__))
 print(json.dumps(rows))
@@ -221,6 +244,13 @@ print(json.dumps(rows))
             );
             let expected_bits = expected["bits"].as_array().expect("result bits");
             assert_eq!(actual.values().len(), expected_bits.len(), "{case}: length");
+            if let Some(integers) = expected.get("integers") {
+                let storage = actual.to_storage().expect("exact integer cast output");
+                let actual_integers = (0..storage.len())
+                    .map(|index| storage.get_i128(index).unwrap().to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(json!(actual_integers), *integers, "{case}: integer bits");
+            }
             for (index, (&value, bits)) in actual.values().iter().zip(expected_bits).enumerate() {
                 let expected = f64::from_bits(bits.as_u64().expect("float bits"));
                 if value.is_nan() && expected.is_nan() {
@@ -1224,4 +1254,415 @@ fn complex_nan_reduction_infinities_and_signed_zeros_match_numpy() {
         }
     }
     batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_casts_keep_logical_shape_and_use_both_components_for_truth() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(
+            &[2, 3],
+            &[
+                (1.75, 200.0),
+                (-3.75, -100.0),
+                (0.0, 4.0),
+                (-0.0, -0.0),
+                (0.0, f64::NAN),
+                (0.0, f64::INFINITY),
+            ],
+            dtype,
+        );
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        let integer = array.astype_with_casting(DType::I32, "unsafe").unwrap();
+        assert_eq!(integer.shape(), &[2, 3]);
+        assert_eq!(integer.values(), &[1.0, -3.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            integer.to_storage().unwrap(),
+            ArrayStorage::I32(vec![1, -3, 0, 0, 0, 0])
+        );
+        let truth = array.astype(DType::Bool);
+        assert_eq!(truth.shape(), &[2, 3]);
+        assert_eq!(
+            truth.to_storage().unwrap(),
+            ArrayStorage::Bool(vec![true, true, true, false, true, true])
+        );
+        let real = array.astype(DType::F64);
+        assert_eq!(real.shape(), &[2, 3]);
+        assert_eq!(real.values(), &[1.75, -3.75, 0.0, -0.0, 0.0, 0.0]);
+        assert_eq!(real.values()[3].to_bits(), (-0.0_f64).to_bits());
+        let scalar = complex_array(&[], &[(3.75, -4.0)], dtype).astype(DType::I16);
+        assert_eq!(scalar.shape(), &[] as &[usize]);
+        assert_eq!(scalar.values(), &[3.0]);
+    }
+}
+
+#[test]
+fn complex_cast_matrix_matches_numpy_shapes_dtypes_and_exact_values() {
+    let mut batch = OracleBatch::default();
+    for source in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![2, 3], vec![0], vec![2, 0, 3]] {
+            let count = shape.iter().product();
+            let pattern = [
+                (16_777_217.0, -16_777_219.0),
+                (-257.9, 255.5),
+                (255.9, -128.5),
+                (-0.0, 0.0),
+                (0.0, -0.25),
+                (1.000_488_281_250_000_2, -1.000_488_281_250_000_2),
+            ];
+            let values = (0..count)
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, source);
+            let input = batch.add_input(&array);
+            for target in [
+                DType::Bool,
+                DType::I8,
+                DType::I16,
+                DType::I32,
+                DType::I64,
+                DType::U8,
+                DType::U16,
+                DType::U32,
+                DType::U64,
+                DType::F16,
+                DType::F32,
+                DType::F64,
+                DType::Complex64,
+                DType::Complex128,
+            ] {
+                if target != source {
+                    batch.push_cast(input, &array, target);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_and_exact_integer_casts_to_complex_match_numpy_without_double_rounding() {
+    let midpoint = (1_i64 << 62) + (1_i64 << 38);
+    let arrays = [
+        UFuncArray::new(vec![], vec![-0.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![2, 0, 3], Vec::new(), DType::F32).unwrap(),
+        UFuncArray::new(vec![3], vec![1.001, -2.003, -0.0], DType::F16).unwrap(),
+        UFuncArray::new(vec![2], vec![16_777_217.0, -16_777_219.0], DType::F32).unwrap(),
+        UFuncArray::new(
+            vec![2, 2],
+            vec![1.25, -0.0, f64::NAN, f64::INFINITY],
+            DType::F64,
+        )
+        .unwrap(),
+        UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::I64(vec![midpoint - 1, midpoint + 1, i64::MIN, i64::MAX]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::U64(vec![midpoint as u64 - 1, midpoint as u64 + 1, 0, u64::MAX]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(vec![2], ArrayStorage::Bool(vec![true, false])).unwrap(),
+    ];
+    let mut batch = OracleBatch::default();
+    for array in arrays {
+        let input = batch.add_input(&array);
+        for target in [DType::Complex64, DType::Complex128] {
+            batch.push_cast(input, &array, target);
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn complex_integer_casts_keep_exact_sidecars_and_scalar_vector_boundaries() {
+    let mut batch = OracleBatch::default();
+    let two_to_63 = 9_223_372_036_854_775_808.0_f64;
+    let two_to_64 = 18_446_744_073_709_551_616.0_f64;
+    for source in [DType::Complex64, DType::Complex128] {
+        for len in [0, 1, 3, 4, 5, 6, 7, 8, 9, 8191, 8192, 8193] {
+            let pattern = [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -4_294_967_295.0,
+                4_294_967_297.0,
+                -1.9,
+                two_to_63.next_down(),
+                two_to_63,
+                two_to_64.next_down(),
+                two_to_64,
+                -two_to_63,
+            ];
+            let values = (0..len)
+                .map(|index| (pattern[index % pattern.len()], f64::NAN))
+                .collect::<Vec<_>>();
+            let array = complex_array(&[len], &values, source);
+            let input = batch.add_input(&array);
+            for target in [
+                DType::I8,
+                DType::I16,
+                DType::I32,
+                DType::I64,
+                DType::U8,
+                DType::U16,
+                DType::U32,
+                DType::U64,
+            ] {
+                batch.push_cast(input, &array, target);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+    let array = complex_array(
+        &[3],
+        &[
+            (-1.9, f64::NAN),
+            (two_to_63, 7.0),
+            (two_to_64.next_down(), 9.0),
+        ],
+        DType::Complex128,
+    );
+    assert_eq!(
+        array.astype(DType::U64).to_storage().unwrap(),
+        ArrayStorage::U64(vec![u64::MAX, 1_u64 << 63, u64::MAX - 2047])
+    );
+}
+
+#[test]
+fn complex_cast_invalid_policy_ignores_discarded_imaginary_values() {
+    take_float_error_events();
+    let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    for source in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(
+            &[3],
+            &[
+                (1.9, f64::NAN),
+                (-2.9, f64::INFINITY),
+                (0.0, f64::NEG_INFINITY),
+            ],
+            source,
+        );
+        assert_eq!(
+            array
+                .astype_with_casting(DType::I32, "unsafe")
+                .unwrap()
+                .values(),
+            &[1.0, -2.0, 0.0]
+        );
+        assert_eq!(
+            array
+                .astype_with_casting(DType::Bool, "unsafe")
+                .unwrap()
+                .values(),
+            &[1.0, 1.0, 1.0]
+        );
+        let empty = complex_array(&[2, 0], &[], source);
+        let output = empty.astype_with_casting(DType::U64, "unsafe").unwrap();
+        assert_eq!(output.shape(), &[2, 0]);
+        assert!(output.values().is_empty());
+        let invalid = complex_array(&[2], &[(f64::NAN, 0.0), (f64::INFINITY, 0.0)], source);
+        for target in [
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+        ] {
+            assert!(matches!(
+                invalid.astype_with_casting(target, "unsafe"),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Invalid,
+                    ..
+                })
+            ));
+        }
+    }
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn complex_cast_invalid_events_are_per_call_and_infallible_cast_stays_value_only() {
+    let array = complex_array(
+        &[4],
+        &[
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 1.0),
+            (3.9, f64::NAN),
+            (-4.9, 0.0),
+        ],
+        DType::Complex128,
+    );
+    for mode in [
+        FloatErrorMode::Warn,
+        FloatErrorMode::Print,
+        FloatErrorMode::Log,
+    ] {
+        take_float_error_events();
+        let _guard = errstate(None, None, None, None, Some(mode));
+        let output = array.astype_with_casting(DType::I64, "unsafe").unwrap();
+        assert_eq!(output.shape(), &[4]);
+        assert_eq!(&output.values()[2..], &[3.0, -4.0]);
+        let events = take_float_error_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FloatErrorKind::Invalid);
+        assert_eq!(events[0].mode, mode);
+        assert_eq!(events[0].op, "cast");
+        assert_eq!(events[0].message, "invalid value encountered in cast");
+    }
+    let expected = {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Ignore));
+        array
+            .astype_with_casting(DType::U64, "unsafe")
+            .unwrap()
+            .to_storage()
+            .unwrap()
+    };
+    {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+        assert_eq!(array.astype(DType::U64).to_storage().unwrap(), expected);
+    }
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn complex_cast_invalid_callback_runs_once_and_policy_rejection_precedes_status() {
+    let array = complex_array(
+        &[2],
+        &[(f64::NAN, 0.0), (f64::INFINITY, 1.0)],
+        DType::Complex64,
+    );
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let callback_sink = Arc::clone(&sink);
+    let previous = seterrcall(Some(Arc::new(move |event| {
+        callback_sink.lock().unwrap().push(event);
+    })));
+    take_float_error_events();
+    let result = {
+        let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Call));
+        for policy in ["safe", "same_kind", "no", "equiv", "unknown"] {
+            assert!(matches!(
+                array.astype_with_casting(DType::I32, policy),
+                Err(UFuncError::Msg(_))
+            ));
+        }
+        assert!(sink.lock().unwrap().is_empty());
+        array.astype_with_casting(DType::I32, "unsafe")
+    };
+    let _ = seterrcall(previous);
+    result.unwrap();
+    let events = sink.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, FloatErrorKind::Invalid);
+    assert_eq!(events[0].mode, FloatErrorMode::Call);
+    assert_eq!(events[0].op, "cast");
+    assert!(take_float_error_events().is_empty());
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn complex_uint32_invalid_status_tracks_complex_layout_and_source_precision() {
+    let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    for (source, len, index, invalid) in [
+        (DType::Complex64, 4, 0, false),
+        (DType::Complex64, 5, 0, true),
+        (DType::Complex64, 5, 4, false),
+        (DType::Complex128, 5, 0, false),
+        (DType::Complex128, 6, 0, true),
+        (DType::Complex128, 6, 4, false),
+        (DType::Complex128, 8192, 8187, true),
+        (DType::Complex128, 8192, 8188, false),
+        (DType::Complex128, 8193, 8191, true),
+        (DType::Complex128, 8193, 8192, false),
+    ] {
+        let mut values = vec![(0.0, f64::NAN); len];
+        values[index].0 = -4_294_967_296.0;
+        let array = complex_array(&[len], &values, source);
+        let result = array.astype_with_casting(DType::U32, "unsafe");
+        assert_eq!(
+            result.is_err(),
+            invalid,
+            "{source:?}, length={len}, index={index}"
+        );
+        if let Ok(output) = result {
+            assert_eq!(output.shape(), &[len]);
+            assert!(output.values().iter().all(|&value| value == 0.0));
+        }
+    }
+    for (source, invalid) in [(DType::Complex64, true), (DType::Complex128, false)] {
+        let array = complex_array(&[1], &[(2_147_483_647.0, 0.0)], source);
+        assert_eq!(
+            array.astype_with_casting(DType::I32, "unsafe").is_err(),
+            invalid
+        );
+    }
+}
+
+#[test]
+fn complex_casts_reject_malformed_interleaved_layouts() {
+    let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    for array in [
+        UFuncArray::new(vec![], vec![f64::NAN], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![3], vec![f64::NAN; 3], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![2, 0], Vec::new(), DType::Complex64).unwrap(),
+    ] {
+        assert!(matches!(
+            array.astype_with_casting(DType::I32, "unsafe"),
+            Err(UFuncError::Msg(message)) if message.contains("interleaved")
+        ));
+    }
+}
+
+#[test]
+fn complex_same_dtype_casts_preserve_values_after_policy_and_layout_validation() {
+    take_float_error_events();
+    let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(
+            &[2],
+            &[
+                (16_777_217.0, -16_777_219.0),
+                (f64::from_bits(0x7ff8_0000_0000_0042), -0.0),
+            ],
+            dtype,
+        );
+        let expected_bits = array
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+        for policy in ["no", "equiv", "safe", "same_kind", "unsafe"] {
+            let output = array.astype_with_casting(dtype, policy).unwrap();
+            assert_eq!(output.shape(), array.shape());
+            assert_eq!(output.dtype(), dtype);
+            assert_eq!(
+                output
+                    .values()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_bits,
+                "{dtype:?}, casting={policy}: unchanged dtype must not requantize"
+            );
+        }
+        assert!(matches!(
+            array.astype_with_casting(dtype, "unknown"),
+            Err(UFuncError::Msg(message)) if message.contains("rule 'unknown'")
+        ));
+        let malformed = UFuncArray::new(vec![3], vec![f64::NAN; 3], dtype).unwrap();
+        assert!(matches!(
+            malformed.astype_with_casting(dtype, "no"),
+            Err(UFuncError::Msg(message)) if message.contains("interleaved")
+        ));
+        assert!(matches!(
+            malformed.astype_with_casting(dtype, "unknown"),
+            Err(UFuncError::Msg(message)) if message.contains("rule 'unknown'")
+        ));
+    }
+    assert!(take_float_error_events().is_empty());
 }

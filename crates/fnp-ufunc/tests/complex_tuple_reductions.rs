@@ -1,7 +1,7 @@
 //! Joint-axis complex reductions must follow logical shapes and NumPy's loop order.
 
 use fnp_dtype::DType;
-use fnp_ufunc::{UFuncArray, UFuncError};
+use fnp_ufunc::{UFuncArray, UFuncError, where_nonzero};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
 
@@ -54,6 +54,9 @@ fn reduce_tuple(
         "nanmean" => input.nanmean_axes(axes, keepdims),
         "nanvar" => input.nanvar_axes(axes, keepdims, ddof),
         "nanstd" => input.nanstd_axes(axes, keepdims, ddof),
+        "any" => input.any_axes(axes),
+        "all" => input.all_axes(axes),
+        "count_nonzero" => input.count_nonzero_axes(axes, keepdims),
         _ => unreachable!("tuple reduction operation"),
     }
 }
@@ -162,6 +165,53 @@ impl OracleBatch {
         });
     }
 
+    fn push_truth_single(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        op: &str,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) {
+        self.cases.push(json!({
+            "input": input, "op": op, "axis": axis, "keepdims": keepdims,
+        }));
+        self.actual.push(match op {
+            "any" => array.any(axis),
+            "all" => array.all(axis),
+            "count_nonzero" => array.count_nonzero(axis, keepdims),
+            _ => unreachable!("truth reduction operation"),
+        });
+    }
+
+    fn push_truth_indices(&mut self, input: usize, array: &UFuncArray) {
+        for (op, native, result) in [
+            ("flatnonzero", "nonzero", array.nonzero()),
+            ("flatnonzero", "flatnonzero", array.flatnonzero()),
+            ("argwhere", "argwhere", array.argwhere()),
+        ] {
+            self.cases
+                .push(json!({"input": input, "op": op, "native": native}));
+            self.actual.push(Ok(result));
+        }
+        match where_nonzero(array) {
+            Ok(coordinates) => {
+                for (axis, values) in coordinates.into_iter().enumerate() {
+                    self.cases.push(json!({
+                        "input": input, "op": "nonzero", "coordinate": axis,
+                    }));
+                    self.actual.push(Ok(values));
+                }
+            }
+            Err(error) => {
+                self.cases.push(json!({
+                    "input": input, "op": "nonzero", "coordinate": 0,
+                }));
+                self.actual.push(Err(error));
+            }
+        }
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -177,14 +227,20 @@ for item in payload['inputs']:
     inputs.append(a.reshape(item['shape']))
 rows = []
 for case in payload['cases']:
-    axis = tuple(case['axes']) if 'axes' in case else case['axis']
-    kw = dict(axis=axis, keepdims=case['keepdims'])
-    if case.get('dtype') is not None:
-        kw['dtype'] = case['dtype']
-    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
-        kw['ddof'] = case['ddof']
     try:
-        result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
+        if case['op'] in ('flatnonzero', 'argwhere', 'nonzero'):
+            result = getattr(np, case['op'])(inputs[case['input']])
+            if 'coordinate' in case:
+                result = result[case['coordinate']]
+            result = np.asarray(result)
+        else:
+            axis = tuple(case['axes']) if 'axes' in case else case['axis']
+            kw = dict(axis=axis, keepdims=case['keepdims'])
+            if case.get('dtype') is not None:
+                kw['dtype'] = case['dtype']
+            if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
+                kw['ddof'] = case['ddof']
+            result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
         if result.dtype.kind == 'c':
             parts = np.empty(result.size * 2, dtype=np.float64)
             parts[0::2] = result.real.ravel()
@@ -980,4 +1036,112 @@ fn complex_tuple_explicit_product_dtypes_preserve_joint_rounding() {
         }
     }
     batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_truth_reductions_and_indices_match_logical_numpy_elements() {
+    let mut batch = OracleBatch::default();
+    let pattern = [
+        (0.0, -0.0),
+        (0.0, 3.0),
+        (-2.0, 0.0),
+        (1.0, -4.0),
+        (f64::NAN, 0.0),
+        (0.0, f64::NAN),
+        (f64::INFINITY, -0.0),
+        (0.0, f64::NEG_INFINITY),
+        (1.0e-50, -1.0e-50),
+        (0.0, f64::from(f32::from_bits(1))),
+        (-0.0, 0.0),
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![pattern.len()],
+            vec![3, 4],
+            vec![2, 3, 2],
+            vec![2, 0, 3],
+            vec![0, 2],
+        ] {
+            // Rotations make the scalar cases cover each truth state as well
+            // as changing which logical axes contain the nonzero elements.
+            for offset in 0..pattern.len() {
+                let values = (0..shape.iter().product())
+                    .map(|index| pattern[(index + offset) % pattern.len()])
+                    .collect::<Vec<_>>();
+                let array = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&array);
+                batch.push_truth_indices(input, &array);
+                for op in ["any", "all", "count_nonzero"] {
+                    for axis in [None, Some(0), Some(-1), Some(1), Some(-3), Some(3)] {
+                        batch.push_truth_single(input, &array, op, axis, false);
+                        if op == "count_nonzero" {
+                            batch.push_truth_single(input, &array, op, axis, true);
+                        }
+                    }
+                    let mut axes = axis_subsets(shape.len());
+                    axes.extend([vec![0, 0], vec![shape.len() as isize], vec![-4]]);
+                    for axis_tuple in axes {
+                        batch.push(input, &array, op, &axis_tuple, false, 0);
+                        if op == "count_nonzero" {
+                            batch.push(input, &array, op, &axis_tuple, true, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_truth_counts_each_pair_once_and_checks_layout_before_axes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(
+            &[2, 2],
+            &[(0.0, 1.0), (2.0, 0.0), (3.0, 4.0), (0.0, -0.0)],
+            dtype,
+        );
+        assert_eq!(array.all(Some(0)).unwrap().values(), &[1.0, 0.0]);
+        assert_eq!(array.any(Some(-1)).unwrap().values(), &[1.0, 1.0]);
+        assert_eq!(array.count_nonzero(None, false).unwrap().values(), &[3.0]);
+        assert_eq!(array.flatnonzero().values(), &[0.0, 1.0, 2.0]);
+        assert_eq!(array.nonzero().values(), &[0.0, 1.0, 2.0]);
+        assert_eq!(array.argwhere().shape(), &[3, 2]);
+        assert_eq!(array.argwhere().values(), &[0.0, 0.0, 0.0, 1.0, 1.0, 0.0]);
+        let coordinates = where_nonzero(&array).unwrap();
+        assert_eq!(coordinates.len(), 2);
+        assert_eq!(coordinates[0].values(), &[0.0, 0.0, 1.0]);
+        assert_eq!(coordinates[1].values(), &[0.0, 1.0, 0.0]);
+        for result in [
+            array.any(Some(2)),
+            array.all(Some(2)),
+            array.count_nonzero(Some(2), false),
+        ] {
+            assert!(matches!(
+                result,
+                Err(UFuncError::AxisOutOfBounds { axis: 2, ndim: 2 })
+            ));
+        }
+
+        let malformed = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], dtype).unwrap();
+        for result in [
+            malformed.any(None),
+            malformed.all(None),
+            malformed.any_axes(&[]),
+            malformed.all_axes(&[]),
+            malformed.count_nonzero(None, false),
+            malformed.count_nonzero_axes(&[], false),
+        ] {
+            assert!(matches!(result, Err(UFuncError::Msg(message))
+                if message.contains("interleaved trailing-dimension shape")));
+        }
+        assert!(where_nonzero(&malformed).is_err());
+        // The infallible flat/index methods retain their prior malformed-input
+        // behavior instead of gaining a panic or changing their public API.
+        assert_eq!(malformed.nonzero().values(), &[1.0, 2.0]);
+        assert_eq!(malformed.flatnonzero().values(), &[1.0, 2.0]);
+        assert_eq!(malformed.argwhere().shape(), &[2, 1]);
+        assert_eq!(malformed.argwhere().values(), &[1.0, 2.0]);
+    }
 }

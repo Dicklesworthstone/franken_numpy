@@ -19432,17 +19432,87 @@ impl UFuncArray {
 
     // ── Type casting, boolean reductions, searching, comparison ────
 
+    /// Convert numeric logical elements through typed storage. The public
+    /// storage bridge remains real-valued; complex arrays add/remove their
+    /// trailing component dimension only at this private casting boundary.
+    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
+        let mut shape = self.complex_logical_shape("astype")?;
+        let source = match self.dtype {
+            DType::Complex64 => ArrayStorage::Complex64(
+                self.values
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|parts| (parts[0] as f32, parts[1] as f32))
+                    .collect(),
+            ),
+            DType::Complex128 => ArrayStorage::Complex128(
+                self.values
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|parts| (parts[0], parts[1]))
+                    .collect(),
+            ),
+            _ => self.to_storage()?,
+        };
+        if report_invalid
+            && geterr().invalid != FloatErrorMode::Ignore
+            && source.has_invalid_float_to_integer_cast(dtype)
+        {
+            dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
+        }
+        let converted = source
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+        if !dtype.is_complex() {
+            return Self::from_storage(shape, converted);
+        }
+
+        let physical_count = converted
+            .len()
+            .checked_mul(2)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut values = Vec::with_capacity(physical_count);
+        match converted {
+            ArrayStorage::Complex64(parts) => {
+                for (real, imaginary) in parts {
+                    values.extend([f64::from(real), f64::from(imaginary)]);
+                }
+            }
+            ArrayStorage::Complex128(parts) => {
+                for (real, imaginary) in parts {
+                    values.extend([real, imaginary]);
+                }
+            }
+            _ => unreachable!("complex target produces complex typed storage"),
+        }
+        shape.push(2);
+        Self::new(shape, values, dtype)
+    }
+
     /// Cast the array to a different dtype (np.ndarray.astype).
     /// Integer-to-integer casts wrap to the destination width, preserving exact
-    /// sidecar values. For bool, non-zero becomes 1.0.
+    /// sidecar values. Complex casts preserve logical elements and use the real
+    /// component for real/integer targets, or either component for bool.
     ///
     /// This infallible value-conversion API does not consult floating-point error
     /// policy. Use [`Self::astype_with_casting`] for invalid-cast warnings,
-    /// callbacks, and errors from real floating-point inputs.
+    /// callbacks, and errors from real or complex floating-point inputs.
     pub fn astype(&self, dtype: DType) -> Self {
         if self.dtype == dtype {
             return self.clone();
         }
+
+        if (self.dtype.is_complex() || dtype.is_complex())
+            && (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (dtype.is_numeric() || dtype == DType::Bool)
+            && let Ok(converted) = self.cast_numeric_storage(dtype, false)
+        {
+            return converted;
+        }
+        // Raw arrays with malformed complex layouts retain this infallible
+        // API's historical behavior. The fallible API validates their layout.
 
         if (self.dtype.is_integer() || self.dtype == DType::Bool)
             && (dtype.is_integer()
@@ -19515,7 +19585,7 @@ impl UFuncArray {
                 .collect(),
             DType::F32 => self.values.iter().map(|&v| (v as f32) as f64).collect(),
             DType::F64 => self.values.clone(),
-            // Complex: store real parts (imaginary zeroed); Str/DateTime/TimeDelta: identity
+            // Legacy non-numeric/malformed inputs do not use the numeric bridge.
             DType::Complex64 | DType::Complex128 => self.values.clone(),
             DType::Str | DType::DateTime64 | DType::TimeDelta64 | DType::Structured => {
                 self.values.clone()
@@ -19555,10 +19625,11 @@ impl UFuncArray {
     ///
     /// Validates the cast using `fnp_dtype::can_cast` before performing it.
     /// `casting` must be one of `"no"`, `"equiv"`, `"safe"`, `"same_kind"`, or `"unsafe"`.
-    /// Real floating-to-integer casts also honor the current `invalid` error
-    /// mode, reporting at most one event for the whole cast. This includes NaN,
-    /// infinity, and overflow of the conversion intermediate; ordinary narrow
-    /// integer wrapping does not itself report invalid.
+    /// Real and complex floating-to-integer casts also honor the current
+    /// `invalid` error mode, reporting at most one event for the whole cast.
+    /// Only the real component of a complex input participates in integer
+    /// conversion. NaN, infinity, and overflow of the conversion intermediate
+    /// report invalid; ordinary narrow integer wrapping does not.
     pub fn astype_with_casting(&self, dtype: DType, casting: &str) -> Result<Self, UFuncError> {
         if !fnp_dtype::can_cast(self.dtype, dtype, casting) {
             return Err(UFuncError::Msg(format!(
@@ -19566,20 +19637,18 @@ impl UFuncArray {
                 self.dtype, dtype
             )));
         }
-        if matches!(self.dtype, DType::F16 | DType::F32 | DType::F64) && dtype.is_integer() {
-            // Quantize to the effective input precision before checking status.
-            // Reuse this storage for the conversion so uint32 sees the same
-            // vector body/tail and wide integer results retain their exact bits.
-            let source = self.to_storage()?;
-            if geterr().invalid != FloatErrorMode::Ignore
-                && source.has_invalid_float_to_integer_cast(dtype)
-            {
-                dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
-            }
-            let converted = source
-                .cast_to(dtype)
-                .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
-            return Self::from_storage(self.shape.clone(), converted);
+        if self.dtype == dtype {
+            self.complex_logical_shape("astype")?;
+            return Ok(self.clone());
+        }
+        if (self.dtype.is_float() && dtype.is_integer())
+            || ((self.dtype.is_complex() || dtype.is_complex())
+                && (self.dtype.is_numeric() || self.dtype == DType::Bool)
+                && (dtype.is_numeric() || dtype == DType::Bool))
+        {
+            // The same typed source drives status and conversion, preserving
+            // source precision, complex uint32 vector tails, and exact integers.
+            return self.cast_numeric_storage(dtype, true);
         }
         Ok(self.astype(dtype))
     }
@@ -19630,9 +19699,39 @@ impl UFuncArray {
         }
     }
 
+    /// Materialize one truth value per logical complex element. This keeps the
+    /// interleaved component axis out of reductions and index coordinates.
+    fn complex_truth_array(&self, operation: &str) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape(operation)?;
+        let values = self
+            .values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|parts| {
+                let truth = if self.dtype == DType::Complex64 {
+                    parts[0] as f32 != 0.0 || parts[1] as f32 != 0.0
+                } else {
+                    parts[0] != 0.0 || parts[1] != 0.0
+                };
+                if truth { 1.0 } else { 0.0 }
+            })
+            .collect();
+        Self::new(shape, values, DType::Bool)
+    }
+
     /// Test whether any element evaluates to true (non-zero).
     /// With axis=None, returns a scalar. With axis, reduces along that axis.
     pub fn any(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let truth = self.complex_truth_array("any")?;
+            let axis = if truth.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+                None
+            } else {
+                axis
+            };
+            return truth.any(axis);
+        }
         match axis {
             None => {
                 let found = if let Some(ref sidecar) = self.integer_sidecar {
@@ -19694,6 +19793,15 @@ impl UFuncArray {
     /// Test whether all elements evaluate to true (non-zero).
     /// With axis=None, returns a scalar. With axis, reduces along that axis.
     pub fn all(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let truth = self.complex_truth_array("all")?;
+            let axis = if truth.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+                None
+            } else {
+                axis
+            };
+            return truth.all(axis);
+        }
         match axis {
             None => {
                 let all_ok = if let Some(ref sidecar) = self.integer_sidecar {
@@ -19754,6 +19862,9 @@ impl UFuncArray {
 
     /// `np.any` over multiple axes simultaneously.
     pub fn any_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.complex_truth_array("any")?.any_axes(axes);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.astype(DType::Bool));
@@ -19771,6 +19882,9 @@ impl UFuncArray {
 
     /// `np.all` over multiple axes simultaneously.
     pub fn all_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.complex_truth_array("all")?.all_axes(axes);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.astype(DType::Bool));
@@ -19789,6 +19903,13 @@ impl UFuncArray {
     /// Return the indices of non-zero (truthy) elements (flat).
     /// Returns a 1-D array of integer indices. Equivalent to `np.nonzero` on flat.
     pub fn nonzero(&self) -> Self {
+        // This infallible flat-index API retains its existing behavior for
+        // malformed complex layouts; fallible reductions validate them above.
+        if self.dtype.is_complex()
+            && let Ok(truth) = self.complex_truth_array("nonzero")
+        {
+            return truth.nonzero();
+        }
         let indices: Vec<f64> = (0..self.values.len())
             .filter(|&idx| {
                 if let Some(ref sidecar) = self.integer_sidecar {
@@ -31929,6 +32050,11 @@ impl UFuncArray {
 
     /// Count nonzero over multiple axes simultaneously (np.count_nonzero with axis tuple).
     pub fn count_nonzero_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_truth_array("count_nonzero")?
+                .count_nonzero_axes(axes, keepdims);
+        }
         if axes.is_empty() {
             let values = self
                 .values
@@ -32079,6 +32205,15 @@ impl UFuncArray {
     ///
     /// With `axis=None`, returns a scalar. With an axis, reduces along that axis.
     pub fn count_nonzero(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let truth = self.complex_truth_array("count_nonzero")?;
+            let axis = if truth.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+                None
+            } else {
+                axis
+            };
+            return truth.count_nonzero(axis, keepdims);
+        }
         match axis {
             None => {
                 let count = if self.dtype == DType::F64
@@ -32459,6 +32594,11 @@ impl UFuncArray {
 
     /// Return indices of non-zero elements in the flattened array (np.flatnonzero).
     pub fn flatnonzero(&self) -> Self {
+        if self.dtype.is_complex()
+            && let Ok(truth) = self.complex_truth_array("flatnonzero")
+        {
+            return truth.flatnonzero();
+        }
         // Carry exact int64 positions so the Python bridge can export through
         // its direct sidecar path instead of cloning/scanning/casting through
         // generic to_storage. Values stay as f64 positions for existing Rust
@@ -32482,6 +32622,11 @@ impl UFuncArray {
 
     /// Return indices of nonzero elements as an (N, ndim) array (np.argwhere).
     pub fn argwhere(&self) -> Self {
+        if self.dtype.is_complex()
+            && let Ok(truth) = self.complex_truth_array("argwhere")
+        {
+            return truth.argwhere();
+        }
         let ndim = self.shape.len();
         let (n, out) = if self.dtype == DType::F64
             && self.integer_sidecar.is_none()
@@ -43489,6 +43634,9 @@ pub fn financial_rate(nper: f64, pmt: f64, pv: f64, fv: f64, when: u8, guess: f6
 /// Returns one `UFuncArray` per input dimension, each containing the indices
 /// along that dimension where the condition is nonzero.
 pub fn where_nonzero(condition: &UFuncArray) -> Result<Vec<UFuncArray>, UFuncError> {
+    if condition.dtype.is_complex() {
+        return where_nonzero(&condition.complex_truth_array("nonzero")?);
+    }
     let ndim = condition.shape.len();
     if ndim == 0 {
         return Err(UFuncError::Msg(
@@ -62911,13 +63059,14 @@ print(json.dumps([[str(int(x)) for x in np.array(c['values'], dtype=c['source'])
     }
 
     #[test]
-    fn astype_integer_to_complex_keeps_existing_core_representation() {
+    fn astype_integer_to_complex_constructs_interleaved_logical_elements() {
         let source = UFuncArray::from_storage(vec![2], ArrayStorage::I32(vec![1, -2])).unwrap();
         for dtype in [DType::Complex64, DType::Complex128] {
             let result = source.astype(dtype);
             assert_eq!(result.dtype(), dtype);
-            assert_eq!(result.shape(), source.shape());
-            assert_eq!(result.values(), source.values());
+            assert_eq!(result.shape(), &[2, 2]);
+            assert_eq!(result.values(), &[1.0, 0.0, -2.0, 0.0]);
+            assert_eq!(result.astype(DType::I32), source);
         }
     }
 
@@ -89462,7 +89611,11 @@ print(json.dumps(rows))
             DType::F64,
         )
         .unwrap();
-        for mode in [FloatErrorMode::Warn, FloatErrorMode::Log, FloatErrorMode::Print] {
+        for mode in [
+            FloatErrorMode::Warn,
+            FloatErrorMode::Log,
+            FloatErrorMode::Print,
+        ] {
             take_float_error_events();
             let _guard = errstate(None, None, None, None, Some(mode));
             let converted = a.astype_with_casting(DType::I64, "unsafe").unwrap();
@@ -89562,7 +89715,10 @@ print(json.dumps(rows))
         assert!(empty.astype_with_casting(DType::U32, "unsafe").is_ok());
         let integer = UFuncArray::new(vec![1], vec![257.0], DType::I32).unwrap();
         assert_eq!(
-            integer.astype_with_casting(DType::I8, "unsafe").unwrap().values(),
+            integer
+                .astype_with_casting(DType::I8, "unsafe")
+                .unwrap()
+                .values(),
             &[1.0]
         );
         assert!(take_float_error_events().is_empty());
@@ -89581,7 +89737,10 @@ print(json.dumps(rows))
             (DType::F32, 65_535.0, false),
         ] {
             let a = UFuncArray::new(vec![1], vec![value], dtype).unwrap();
-            assert_eq!(a.astype_with_casting(DType::I32, "unsafe").is_err(), invalid);
+            assert_eq!(
+                a.astype_with_casting(DType::I32, "unsafe").is_err(),
+                invalid
+            );
         }
         let a = UFuncArray::new(
             vec![7],
@@ -89627,7 +89786,9 @@ print(json.dumps(rows))
         )
         .unwrap();
         assert_eq!(
-            tail.astype_with_casting(DType::U32, "unsafe").unwrap().values(),
+            tail.astype_with_casting(DType::U32, "unsafe")
+                .unwrap()
+                .values(),
             &[0.0, 0.0, 0.0, 0.0, 1.0]
         );
     }
