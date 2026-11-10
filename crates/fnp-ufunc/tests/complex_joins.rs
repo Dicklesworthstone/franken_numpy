@@ -591,7 +591,7 @@ struct RestoreCallback(Option<FloatErrorCallback>);
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 impl Drop for RestoreCallback {
     fn drop(&mut self) {
-        seterrcall(self.0.take());
+        let _ = seterrcall(self.0.take());
     }
 }
 

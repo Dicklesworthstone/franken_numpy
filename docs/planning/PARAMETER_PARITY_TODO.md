@@ -59,6 +59,11 @@
 - [x] Return NumPy-shaped `return_index`, `return_inverse`, and `return_counts` metadata for unique axis slices
 - [x] Cover large-integer sidecars, signed-zero representatives, and NaN slice distinctness
 
+## GROUP 8: where(condition, x, y) with complex operands
+- [x] Complex conditions use one Boolean per logical element; real and imaginary components both participate in truth at the declared source precision
+- [x] Complex branches broadcast logical shapes, promote numeric dtypes, and select complete component pairs; exact integer branches retain the existing sidecar-aware real selection path
+- [x] Live NumPy coverage includes scalar/empty/broadcast inputs, mixed dtypes, source rounding, signed zero, NaN/Inf, exact wide integers, and malformed complex layouts (`complex_selection.rs`)
+
 ---
 
 ## ALREADY DONE (earlier this session)
@@ -70,4 +75,5 @@
 - [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
 - [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
 - [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces
+- [D] Complex logical-element handling remains incomplete in multi-branch `select` and mask/gather APIs such as `extract`, `boolean_index`, and flattened `compress`; three-argument `where_select` is covered above
 - [x] Rust-core `reduce_sum_axes_with_dtype`, `reduce_prod_axes_with_dtype`, `reduce_mean_axes_with_dtype`, `reduce_var_axes_with_dtype`, and `reduce_std_axes_with_dtype` support joint tuple reductions across all numeric accumulator dtypes; dedicated coverage includes exact integer wrapping, complex-to-real deviations, conversion buffers, float16 source precision, and impossible output capacities

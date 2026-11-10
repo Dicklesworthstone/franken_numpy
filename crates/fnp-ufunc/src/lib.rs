@@ -12779,10 +12779,102 @@ impl UFuncArray {
         })
     }
 
+    fn where_select_complex(condition: &Self, x: &Self, y: &Self) -> Result<Self, UFuncError> {
+        let x_shape = x.complex_logical_shape("where_select")?;
+        let y_shape = y.complex_logical_shape("where_select")?;
+        let shape_cx = broadcast_shape(&condition.shape, &x_shape).map_err(UFuncError::Shape)?;
+        let mut out_shape = broadcast_shape(&shape_cx, &y_shape).map_err(UFuncError::Shape)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let physical_count = out_count
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let out_dtype = promote(x.dtype, y.dtype);
+        if !out_dtype.is_complex() {
+            return Err(UFuncError::TypeResolutionInvalid {
+                detail: format!(
+                    "where_select: complex branches cannot produce non-complex dtype {out_dtype:?}"
+                ),
+            });
+        }
+
+        // Typed conversion applies the source precision even when a branch
+        // already has the output dtype. It also preserves exact integer inputs
+        // until conversion, and gives a real branch zero imaginary components.
+        let condition = condition.cast_numeric_storage(DType::Bool, false)?;
+        let x = x.cast_numeric_storage(out_dtype, false)?;
+        let y = y.cast_numeric_storage(out_dtype, false)?;
+        let cond_strides = contiguous_strides_elems(&condition.shape);
+        let x_strides = contiguous_strides_elems(&x_shape);
+        let y_strides = contiguous_strides_elems(&y_shape);
+        let cond_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), &condition.shape, &cond_strides);
+        let x_steps = aligned_broadcast_axis_steps(out_shape.len(), &x_shape, &x_strides);
+        let y_steps = aligned_broadcast_axis_steps(out_shape.len(), &y_shape, &y_strides);
+        let mut indices = vec![0usize; out_shape.len()];
+        let mut cond_flat = 0usize;
+        let mut x_flat = 0usize;
+        let mut y_flat = 0usize;
+        let mut values = Vec::with_capacity(physical_count);
+
+        for flat in 0..out_count {
+            let (selected, source_flat) = if condition.values[cond_flat] != 0.0 {
+                (&x, x_flat)
+            } else {
+                (&y, y_flat)
+            };
+            let base = source_flat * 2;
+            values.extend_from_slice(&selected.values[base..base + 2]);
+
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+            for dim in (0..out_shape.len()).rev() {
+                indices[dim] += 1;
+                cond_flat += cond_steps[dim];
+                x_flat += x_steps[dim];
+                y_flat += y_steps[dim];
+                if indices[dim] < out_shape[dim] {
+                    break;
+                }
+                indices[dim] = 0;
+                cond_flat -= cond_steps[dim] * out_shape[dim];
+                x_flat -= x_steps[dim] * out_shape[dim];
+                y_flat -= y_steps[dim] * out_shape[dim];
+            }
+        }
+        out_shape.push(2);
+        Self::new(out_shape, values, out_dtype)
+    }
+
     /// Conditional element selection: `numpy.where(condition, x, y)`.
     /// Broadcasts condition, x, and y to a common shape. Where condition is nonzero,
     /// selects from `x`; otherwise selects from `y`. Output dtype is `promote(x.dtype, y.dtype)`.
     pub fn where_select(condition: &Self, x: &Self, y: &Self) -> Result<Self, UFuncError> {
+        if condition.dtype.is_complex() {
+            let condition = condition.complex_truth_array("where_select")?;
+            if x.dtype.is_complex() || y.dtype.is_complex() {
+                return Self::where_select_complex(&condition, x, y);
+            }
+            // Apply real source precision before the existing real selection
+            // path, while leaving exact integer sidecars available to it.
+            let x_source = match x.dtype {
+                DType::F16 | DType::F32 => Some(x.cast_numeric_storage(x.dtype, false)?),
+                _ => None,
+            };
+            let y_source = match y.dtype {
+                DType::F16 | DType::F32 => Some(y.cast_numeric_storage(y.dtype, false)?),
+                _ => None,
+            };
+            return Self::where_select(
+                &condition,
+                x_source.as_ref().unwrap_or(x),
+                y_source.as_ref().unwrap_or(y),
+            );
+        }
+        if x.dtype.is_complex() || y.dtype.is_complex() {
+            return Self::where_select_complex(condition, x, y);
+        }
         // Broadcast all three to a common shape
         let shape_cx = broadcast_shape(&condition.shape, &x.shape).map_err(UFuncError::Shape)?;
         let out_shape = broadcast_shape(&shape_cx, &y.shape).map_err(UFuncError::Shape)?;
