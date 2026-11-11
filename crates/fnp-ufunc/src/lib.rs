@@ -19092,36 +19092,144 @@ impl UFuncArray {
         Ok(result)
     }
 
-    /// Set elements by boolean mask (flat). Equivalent to `a[mask] = value`.
+    /// Assign a Python-style float scalar to elements selected by a Boolean mask.
+    /// Masks cover leading logical dimensions; scalar masks select the entire
+    /// array or nothing. Scalar conversion precedes every write, including
+    /// assignments with an empty selection.
     pub fn boolean_set(&mut self, mask: &Self, value: f64) -> Result<(), UFuncError> {
-        if mask.values.len() != self.values.len() {
+        if mask.dtype != DType::Bool {
+            return Err(UFuncError::Msg(
+                "boolean_set: mask must be a boolean array".to_string(),
+            ));
+        }
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("boolean_set")?;
+        }
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let logical_rank = self.shape.len() - usize::from(self.dtype.is_complex());
+        let logical_shape = &self.shape[..logical_rank];
+        if mask.shape.len() > logical_shape.len() {
             return Err(UFuncError::Msg(format!(
-                "boolean_set: mask size {} != array size {}",
-                mask.values.len(),
-                self.values.len()
+                "boolean_set: mask rank {} exceeds array rank {}",
+                mask.shape.len(),
+                logical_shape.len()
             )));
         }
-        let n = self.values.len();
-        if n >= BOOLEAN_SET_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-            && self.dtype == DType::F64
+        // Like boolean_index, Boolean assignment never broadcasts a mask.
+        // A zero-length mask dimension is accepted, but other dimensions
+        // must still match even when some earlier dimension is empty.
+        if mask
+            .shape
+            .iter()
+            .zip(logical_shape)
+            .any(|(&mask_len, &array_len)| mask_len != 0 && mask_len != array_len)
+        {
+            return Err(UFuncError::Msg(format!(
+                "boolean_set: mask size/shape {:?} does not match leading array dimensions {:?}",
+                mask.shape, logical_shape
+            )));
+        }
+        let count = self.values.len() / components;
+        // The scalar already has destination precision on this hot path.
+        // Keep the existing parallel loop and avoid allocating a cast buffer
+        // or cloned shape for real float64 assignments.
+        if self.dtype == DType::F64
             && self.integer_sidecar.is_none()
             && mask.integer_sidecar.is_none()
         {
-            self.values
-                .par_iter_mut()
-                .zip(mask.values.par_iter())
-                .for_each(|(dst, &mask_value)| {
-                    if mask_value != 0.0 {
-                        *dst = value;
+            if mask.shape == logical_shape {
+                if count >= BOOLEAN_SET_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+                    self.values
+                        .par_iter_mut()
+                        .zip(mask.values.par_iter())
+                        .for_each(|(dst, &mask_value)| {
+                            if mask_value != 0.0 {
+                                *dst = value;
+                            }
+                        });
+                } else {
+                    for (dst, &mask_value) in self.values.iter_mut().zip(&mask.values) {
+                        if mask_value != 0.0 {
+                            *dst = value;
+                        }
                     }
-                });
+                }
+            } else if count != 0 && !mask.values.is_empty() {
+                let block =
+                    element_count(&logical_shape[mask.shape.len()..]).map_err(UFuncError::Shape)?;
+                for (prefix, &mask_value) in mask.values.iter().enumerate() {
+                    if mask_value != 0.0 {
+                        self.values[prefix * block..(prefix + 1) * block].fill(value);
+                    }
+                }
+            }
             return Ok(());
         }
-        for (flat_index, &m) in mask.values.iter().enumerate() {
-            if m != 0.0 {
-                self.values[flat_index] = value;
-                self.write_integer_mutation(flat_index, value, None, flat_index, "boolean_set")?;
+        let numeric = self.dtype.is_numeric() || self.dtype == DType::Bool;
+        let scalar = if numeric {
+            let converted_value = if self.dtype.is_integer() {
+                // Python floats become Python integers before NumPy checks
+                // the destination range. Array casts instead wrap or emit
+                // invalid sentinels, so their out-of-range path is unsuitable.
+                if value.is_nan() {
+                    return Err(UFuncError::Msg(
+                        "boolean_set: cannot convert float NaN to integer".into(),
+                    ));
+                }
+                if !value.is_finite() {
+                    return Err(UFuncError::Msg(
+                        "boolean_set: cannot convert float infinity to integer".into(),
+                    ));
+                }
+                let truncated = value.trunc();
+                let (lower, upper) = match self.dtype {
+                    DType::I8 => (-128.0, 128.0),
+                    DType::I16 => (-32_768.0, 32_768.0),
+                    DType::I32 => (-2_147_483_648.0, 2_147_483_648.0),
+                    DType::I64 => (i64::MIN as f64, -(i64::MIN as f64)),
+                    DType::U8 => (0.0, 256.0),
+                    DType::U16 => (0.0, 65_536.0),
+                    DType::U32 => (0.0, 4_294_967_296.0),
+                    DType::U64 => (0.0, 2.0_f64.powi(64)),
+                    _ => unreachable!("integer scalar assignment requires an integer dtype"),
+                };
+                if truncated < lower || truncated >= upper {
+                    return Err(UFuncError::Msg(format!(
+                        "boolean_set: scalar {value} out of bounds for {:?}",
+                        self.dtype
+                    )));
+                }
+                truncated
+            } else {
+                value
+            };
+            let (scalar, mut flags) =
+                Self::scalar(converted_value, DType::F64).cast_numeric_with_flags(self.dtype)?;
+            // NumPy's Python-float scalar packing reports overflow, but does
+            // not report underflow. A float64 ndarray source is different.
+            flags.under = false;
+            dispatch_float_error_flags(flags, "cast")?;
+            Some(scalar)
+        } else {
+            None
+        };
+        // Scalar packing above is observable even for empty selections. Do
+        // not form a potentially overflowing trailing product until a write
+        // is needed: huge shapes containing a zero dimension are valid.
+        if count == 0 || !mask.values.iter().any(|&selected| selected != 0.0) {
+            return Ok(());
+        }
+        let block = element_count(&logical_shape[mask.shape.len()..]).map_err(UFuncError::Shape)?;
+        for (prefix, &selected) in mask.values.iter().enumerate() {
+            if selected != 0.0 {
+                for destination in prefix * block..(prefix + 1) * block {
+                    if let Some(scalar) = &scalar {
+                        self.write_numeric_assignment(destination, scalar, 0, "boolean_set")?;
+                    } else {
+                        self.write_integer_mutation(destination, value, None, 0, "boolean_set")?;
+                        self.values[destination] = value;
+                    }
+                }
             }
         }
         Ok(())
@@ -63975,15 +64083,15 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn boolean_set_rejects_fractional_i64_values() {
+    fn boolean_set_truncates_fractional_i64_values() {
         let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
 
-        let err = a
-            .boolean_set(&mask, 1.5)
-            .expect_err("boolean_set must reject fractional i64 values");
-
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("boolean_set")));
+        // NumPy 2.4.3: a[np.array([False, True])] = 1.5 truncates the
+        // Python float scalar, unlike an out-of-range integer assignment.
+        a.boolean_set(&mask, 1.5).unwrap();
+        assert_eq!(a.values(), &[1.0, 1.0]);
+        assert_eq!(a.to_storage().unwrap(), ArrayStorage::I64(vec![1, 1]));
     }
 
     #[test]
