@@ -17801,12 +17801,50 @@ impl UFuncArray {
         j: usize,
     ) -> Result<Self, UFuncError> {
         if i == j {
+            if matches!(arrays[i].dtype, DType::F16 | DType::F32) {
+                // Raw constructors retain f64 working cells. A real subtree
+                // must read each leaf at its declared precision before a later
+                // complex product can widen it.
+                return Self::from_storage(arrays[i].shape.clone(), arrays[i].to_storage()?);
+            }
             return Ok(arrays[i].clone());
         }
         let k = split[i][j];
         let left = Self::multi_dot_eval(arrays, split, i, k)?;
         let right = Self::multi_dot_eval(arrays, split, k + 1, j)?;
-        left.dot(&right)
+        let left_shape = left.complex_logical_shape("multi_dot")?;
+        let right_shape = right.complex_logical_shape("multi_dot")?;
+        let rows = if left_shape.len() == 1 {
+            1
+        } else {
+            left_shape[0]
+        };
+        let columns = if right_shape.len() == 1 {
+            1
+        } else {
+            right_shape[1]
+        };
+        let components = if left.dtype.is_complex() || right.dtype.is_complex() {
+            2
+        } else {
+            1
+        };
+        rows.checked_mul(columns)
+            .and_then(|count| count.checked_mul(components))
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        // Preserve the selected product order and each product's own promoted
+        // dtype. Casting the entire chain up front changes integer wrapping and
+        // complex64 intermediate rounding before a later wider operand.
+        let output = left.dot(&right)?;
+        if matches!(output.dtype, DType::F16 | DType::F32) {
+            // Real dot kernels accumulate in the f64 working buffer. Materialize
+            // the typed intermediate before the next dot: deferring this round
+            // can change a mixed chain's result even if its final dtype is wide.
+            Self::from_storage(output.shape.clone(), output.to_storage()?)
+        } else {
+            Ok(output)
+        }
     }
 
     // ── linalg bridge methods ─────────────────────────────────────
