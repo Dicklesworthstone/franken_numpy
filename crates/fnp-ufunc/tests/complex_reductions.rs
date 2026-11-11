@@ -153,6 +153,28 @@ impl OracleBatch {
         self.actual.push(array.astype_with_casting(dtype, "unsafe"));
     }
 
+    fn push_storage_cast(
+        &mut self,
+        input: usize,
+        shape: &[usize],
+        storage: &ArrayStorage,
+        dtype: DType,
+    ) {
+        self.cases.push(json!({
+            "input": input,
+            "op": "astype",
+            "dtype": numpy_dtype(dtype),
+            "axis": null,
+            "keepdims": false,
+            "ddof": 0,
+        }));
+        self.actual.push(UFuncArray::from_storage_with_dtype(
+            shape.to_vec(),
+            storage.clone(),
+            dtype,
+        ));
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -1790,11 +1812,7 @@ fn narrowing_cast_status_uses_source_precision_and_ignores_nonfinite_inputs() {
         // These unquantized working values are already infinity/zero in the
         // declared source dtype. Casting them again must not report new flags.
         let array = if source.is_complex() {
-            complex_array(
-                &[2],
-                &[(1.0e300, 1.0e-300), (-1.0e300, -1.0e-300)],
-                source,
-            )
+            complex_array(&[2], &[(1.0e300, 1.0e-300), (-1.0e300, -1.0e-300)], source)
         } else {
             UFuncArray::new(
                 vec![4],
@@ -1826,11 +1844,7 @@ fn narrowing_cast_status_uses_source_precision_and_ignores_nonfinite_inputs() {
             array.astype_with_casting(target, "unsafe").unwrap();
         }
     }
-    let discarded = complex_array(
-        &[2],
-        &[(1.0, 1.0e300), (-0.0, 1.0e-300)],
-        DType::Complex128,
-    );
+    let discarded = complex_array(&[2], &[(1.0, 1.0e300), (-0.0, 1.0e-300)], DType::Complex128);
     for target in [DType::F16, DType::F32] {
         let output = discarded.astype_with_casting(target, "unsafe").unwrap();
         assert_eq!(output.values(), &[1.0, -0.0]);
@@ -1996,7 +2010,9 @@ for case in payload['cases']:
     with np.errstate(all='warn'), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         output = inputs[case['input']].astype(case['dtype'])
-    flags = [str(item.message) for item in caught if issubclass(item.category, RuntimeWarning)]
+    flags = [str(item.message) for item in caught
+             if issubclass(item.category, RuntimeWarning)
+             and not issubclass(item.category, np.exceptions.ComplexWarning)]
     rows.append(dict(flags=flags, bytes=list(output.astype(output.dtype.newbyteorder('<')).tobytes())))
 print(json.dumps(rows))
 "#;
@@ -2029,6 +2045,377 @@ print(json.dumps(rows))
         assert_eq!(
             actual, expected,
             "{case}: narrowing flags and exact target bytes"
+        );
+    }
+}
+
+fn assert_typed_complex_storage_bits(actual: &ArrayStorage, expected: &ArrayStorage) {
+    let bits = |storage: &ArrayStorage| -> Vec<[u64; 2]> {
+        match storage {
+            ArrayStorage::Complex64(values) => values
+                .iter()
+                .map(|&(real, imaginary)| {
+                    [u64::from(real.to_bits()), u64::from(imaginary.to_bits())]
+                })
+                .collect(),
+            ArrayStorage::Complex128(values) => values
+                .iter()
+                .map(|&(real, imaginary)| [real.to_bits(), imaginary.to_bits()])
+                .collect(),
+            _ => panic!("expected typed complex storage"),
+        }
+    };
+    assert_eq!(actual.dtype(), expected.dtype());
+    assert_eq!(bits(actual), bits(expected));
+}
+
+#[test]
+fn typed_complex_storage_round_trips_logical_shapes_and_component_bits() {
+    let values64 = [
+        (-0.0_f32, 0.0_f32),
+        (f32::from_bits(1), -f32::from_bits(1)),
+        (f32::from_bits(0x7fc0_1234), f32::from_bits(0xffc0_5678)),
+        (f32::INFINITY, f32::NEG_INFINITY),
+        (f32::MAX, f32::MIN_POSITIVE),
+        (1.25, -16_777_216.0),
+    ];
+    let values128 = [
+        (-0.0_f64, 0.0_f64),
+        (f64::from_bits(1), -f64::from_bits(1)),
+        (
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            f64::from_bits(0xfff8_0000_0000_5678),
+        ),
+        (f64::INFINITY, f64::NEG_INFINITY),
+        (f64::MAX, f64::MIN_POSITIVE),
+        (1.0 + f64::EPSILON, -16_777_217.0),
+    ];
+    for shape in [
+        vec![],
+        vec![1],
+        vec![2],
+        vec![2, 2],
+        vec![2, 1, 3],
+        vec![0],
+        vec![2, 0, 3],
+        vec![usize::MAX, 0],
+    ] {
+        let count = shape.iter().product::<usize>();
+        for storage in [
+            ArrayStorage::Complex64(values64[..count].to_vec()),
+            ArrayStorage::Complex128(values128[..count].to_vec()),
+        ] {
+            let mut physical_shape = shape.clone();
+            physical_shape.push(2);
+            for array in [
+                UFuncArray::from_storage(shape.clone(), storage.clone()).unwrap(),
+                UFuncArray::from_storage_with_dtype(
+                    shape.clone(),
+                    storage.clone(),
+                    storage.dtype(),
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(array.shape(), physical_shape);
+                assert_eq!(array.dtype(), storage.dtype());
+                assert_eq!(array.values().len(), count * 2);
+                assert!(!array.has_integer_sidecar());
+                assert_typed_complex_storage_bits(&array.to_storage().unwrap(), &storage);
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_complex_storage_exports_raw_cells_at_declared_component_precision() {
+    let values = [
+        (16_777_217.0, 1.0 + 2.0_f64.powi(-24)),
+        (-0.0, -f64::from(f32::from_bits(1)) * 0.75),
+        (f64::from(f32::MAX) * 2.0, f64::NAN),
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(&[3], &values, dtype);
+        let expected = if dtype == DType::Complex64 {
+            ArrayStorage::Complex64(
+                values
+                    .iter()
+                    .map(|&(real, imaginary)| (real as f32, imaginary as f32))
+                    .collect(),
+            )
+        } else {
+            ArrayStorage::Complex128(values.to_vec())
+        };
+        let storage = array.to_storage().unwrap();
+        assert_typed_complex_storage_bits(&storage, &expected);
+        let restored = UFuncArray::from_storage(vec![3], storage).unwrap();
+        assert_typed_complex_storage_bits(&restored.to_storage().unwrap(), &expected);
+        assert_eq!(restored.shape(), &[3, 2]);
+    }
+}
+
+#[test]
+fn typed_complex_storage_casts_match_numpy_without_losing_source_precision() {
+    let mut batch = OracleBatch::default();
+    let values = [
+        (-0.0, 0.0),
+        (0.0, -0.0),
+        (0.0, 2.0),
+        (-0.0, -3.0),
+        (1.5, -4.5),
+        (-1.75, 2.25),
+        (16_777_217.0, 0.1),
+        (65_520.0, 65_519.0),
+        (
+            f64::from(f32::MAX) * 2.0,
+            -f64::from(f32::MIN_POSITIVE) * 0.5,
+        ),
+        (2.0_f64.powi(54), 0.0),
+        (i64::MIN as f64, 0.0),
+        (2.0_f64.powi(64), 0.0),
+        (f64::NAN, 1.0),
+        (1.0, f64::NAN),
+        (f64::INFINITY, f64::NEG_INFINITY),
+        (f64::NEG_INFINITY, f64::INFINITY),
+    ];
+    let targets = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    for source in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![16], vec![2, 8], vec![2, 2, 4]] {
+            let array = complex_array(&shape, &values, source);
+            let storage = if source == DType::Complex64 {
+                ArrayStorage::Complex64(
+                    values
+                        .iter()
+                        .map(|&(real, imaginary)| (real as f32, imaginary as f32))
+                        .collect(),
+                )
+            } else {
+                ArrayStorage::Complex128(values.to_vec())
+            };
+            let input = batch.add_input(&array);
+            for target in targets {
+                batch.push_storage_cast(input, &shape, &storage, target);
+            }
+        }
+        for value in values {
+            let array = complex_array(&[], &[value], source);
+            let storage = if source == DType::Complex64 {
+                ArrayStorage::Complex64(vec![(value.0 as f32, value.1 as f32)])
+            } else {
+                ArrayStorage::Complex128(vec![value])
+            };
+            let input = batch.add_input(&array);
+            for target in targets {
+                batch.push_storage_cast(input, &[], &storage, target);
+            }
+        }
+    }
+
+    // These integers straddle an f32 midpoint but collapse to the same f64.
+    // Real -> complex64 must convert the original typed integer exactly once.
+    let midpoint = (1_i64 << 54) + (1_i64 << 30);
+    for storage in [
+        ArrayStorage::Bool(vec![false, true, true, false]),
+        ArrayStorage::I8(vec![i8::MIN, -1, 0, i8::MAX]),
+        ArrayStorage::I16(vec![i16::MIN, -1, 0, i16::MAX]),
+        ArrayStorage::I32(vec![i32::MIN, -1, 0, i32::MAX]),
+        ArrayStorage::I64(vec![
+            -midpoint - 1,
+            -midpoint + 1,
+            midpoint - 1,
+            midpoint + 1,
+        ]),
+        ArrayStorage::U8(vec![0, 1, 2, u8::MAX]),
+        ArrayStorage::U16(vec![0, 1, 2, u16::MAX]),
+        ArrayStorage::U32(vec![0, 1, 2, u32::MAX]),
+        ArrayStorage::U64(vec![midpoint as u64 - 1, midpoint as u64 + 1, 0, u64::MAX]),
+        ArrayStorage::F16(
+            [-0.0, 0.1, 2.0_f64.powi(-24), f64::INFINITY]
+                .into_iter()
+                .map(fnp_dtype::f16_from_f64)
+                .collect(),
+        ),
+        ArrayStorage::F32(vec![-0.0, 0.1, f32::from_bits(1), f32::INFINITY]),
+        ArrayStorage::F64(vec![-0.0, 1.0 + 2.0_f64.powi(-24), 1e-46, f64::NAN]),
+    ] {
+        for shape in [vec![4], vec![2, 2], vec![1, 4, 1]] {
+            let array = UFuncArray::from_storage(shape.clone(), storage.clone()).unwrap();
+            let input = batch.add_input(&array);
+            for target in [DType::Complex64, DType::Complex128] {
+                batch.push_storage_cast(input, &shape, &storage, target);
+            }
+        }
+    }
+    for source in [DType::Complex64, DType::Complex128] {
+        let storage = if source == DType::Complex64 {
+            ArrayStorage::Complex64(vec![])
+        } else {
+            ArrayStorage::Complex128(vec![])
+        };
+        let array = complex_array(&[2, 0, 3], &[], source);
+        let input = batch.add_input(&array);
+        for target in targets {
+            batch.push_storage_cast(input, &[2, 0, 3], &storage, target);
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn typed_complex_storage_rejects_invalid_shapes_and_unsupported_casts() {
+    for storage in [
+        ArrayStorage::Complex64(vec![(1.0, 2.0)]),
+        ArrayStorage::Complex128(vec![(1.0, 2.0)]),
+    ] {
+        for shape in [vec![2], vec![1, 2], vec![0], vec![1, 0]] {
+            assert!(matches!(
+                UFuncArray::from_storage(shape.clone(), storage.clone()),
+                Err(UFuncError::InvalidInputLength { actual: 1, .. })
+            ));
+            for target in [DType::Bool, DType::F64, DType::Complex64, DType::Complex128] {
+                assert!(matches!(
+                    UFuncArray::from_storage_with_dtype(shape.clone(), storage.clone(), target),
+                    Err(UFuncError::InvalidInputLength { actual: 1, .. })
+                ));
+            }
+        }
+        for target in [
+            DType::DateTime64,
+            DType::TimeDelta64,
+            DType::Str,
+            DType::Structured,
+        ] {
+            assert!(UFuncArray::from_storage_with_dtype(vec![], storage.clone(), target).is_err());
+        }
+    }
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![1],
+            vec![3],
+            vec![1, 3],
+            vec![2, 1],
+            vec![0],
+            vec![2, 0],
+        ] {
+            let count = shape.iter().product::<usize>();
+            let malformed = UFuncArray::new(shape, vec![0.0; count], dtype).unwrap();
+            assert!(matches!(
+                malformed.to_storage(),
+                Err(UFuncError::Msg(message)) if message.contains("interleaved")
+            ));
+        }
+        assert!(
+            UFuncArray::from_storage_with_dtype(
+                vec![1],
+                ArrayStorage::String(vec!["1+2j".into()]),
+                dtype,
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            UFuncArray::from_storage_with_dtype(
+                vec![usize::MAX, 2],
+                ArrayStorage::F64(vec![]),
+                dtype
+            ),
+            Err(UFuncError::Shape(_))
+        ));
+    }
+    assert!(matches!(
+        UFuncArray::from_storage(vec![usize::MAX, 2], ArrayStorage::Complex128(vec![])),
+        Err(UFuncError::Shape(_))
+    ));
+}
+
+#[test]
+fn typed_complex_storage_preserves_real_sidecars_and_value_only_cast_behavior() {
+    for storage in [
+        ArrayStorage::I64(vec![i64::MIN, i64::MAX]),
+        ArrayStorage::U64(vec![0, u64::MAX]),
+    ] {
+        let imported = UFuncArray::from_storage(vec![2], storage.clone()).unwrap();
+        let same_dtype =
+            UFuncArray::from_storage_with_dtype(vec![2], storage.clone(), storage.dtype()).unwrap();
+        for array in [imported, same_dtype] {
+            assert!(array.has_integer_sidecar());
+            assert_eq!(array.to_storage().unwrap(), storage);
+            assert_eq!(array.shape(), &[2]);
+        }
+        // The established real-only bridge remains conservative about these
+        // wide inputs; accepting complex targets must not change that contract.
+        assert!(UFuncArray::from_storage_with_dtype(vec![2], storage, DType::F64).is_err());
+    }
+    let raw_integer = UFuncArray::new(vec![1], vec![2.0_f64.powi(54)], DType::I64).unwrap();
+    assert!(raw_integer.to_storage().is_err());
+
+    let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    take_float_error_events();
+    let narrowed = UFuncArray::from_storage_with_dtype(
+        vec![1],
+        ArrayStorage::Complex128(vec![(1e100, 1e-100)]),
+        DType::Complex64,
+    )
+    .unwrap();
+    assert_eq!(narrowed.values(), &[f64::INFINITY, 0.0]);
+    let integer = UFuncArray::from_storage_with_dtype(
+        vec![],
+        ArrayStorage::Complex128(vec![(f64::NAN, 1.0)]),
+        DType::I64,
+    )
+    .unwrap();
+    assert_eq!(integer.shape(), &[] as &[usize]);
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn typed_complex_storage_round_trips_reduction_and_cast_results() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let pairs = [(1.0, 2.0), (3.0, -4.0), (-5.0, 6.0), (7.0, 8.0)];
+        let storage = if dtype == DType::Complex64 {
+            ArrayStorage::Complex64(
+                pairs
+                    .iter()
+                    .map(|&(re, im)| (re as f32, im as f32))
+                    .collect(),
+            )
+        } else {
+            ArrayStorage::Complex128(pairs.to_vec())
+        };
+        let array = UFuncArray::from_storage(vec![2, 2], storage).unwrap();
+        let sum = array.reduce_sum(Some(0), true).unwrap();
+        assert_eq!(sum.shape(), &[1, 2, 2]);
+        assert_eq!(sum.values(), &[-4.0, 8.0, 10.0, 4.0]);
+        let restored = UFuncArray::from_storage(vec![1, 2], sum.to_storage().unwrap()).unwrap();
+        assert_eq!(restored, sum);
+        let real = UFuncArray::from_storage_with_dtype(
+            vec![1, 2],
+            restored.to_storage().unwrap(),
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(real.shape(), &[1, 2]);
+        assert_eq!(real.values(), &[-4.0, 10.0]);
+        let variance = array.reduce_var(Some(-1), false, 0).unwrap();
+        assert_eq!(variance.shape(), &[2]);
+        assert_eq!(variance.values(), &[10.0, 37.0]);
+        assert_eq!(
+            UFuncArray::from_storage(vec![2], variance.to_storage().unwrap()).unwrap(),
+            variance,
         );
     }
 }

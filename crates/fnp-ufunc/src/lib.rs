@@ -5259,14 +5259,48 @@ impl UFuncArray {
     /// Build an array from typed storage while preserving storage dtype metadata.
     ///
     /// This is a migration bridge for phased transition from `Vec<f64>` internals to
-    /// polymorphic `ArrayStorage`-backed construction APIs.
-    pub fn from_storage(shape: Vec<usize>, storage: ArrayStorage) -> Result<Self, UFuncError> {
+    /// polymorphic `ArrayStorage`-backed construction APIs. `shape` counts logical
+    /// elements, including for complex storage; the internal trailing component
+    /// axis is added here and must not be supplied by the caller.
+    pub fn from_storage(mut shape: Vec<usize>, storage: ArrayStorage) -> Result<Self, UFuncError> {
         let expected = element_count(&shape).map_err(UFuncError::Shape)?;
         let actual = storage.len();
         if actual != expected {
             return Err(UFuncError::InvalidInputLength { expected, actual });
         }
         let dtype = storage.dtype();
+        if dtype.is_complex() {
+            let physical_count = actual
+                .checked_mul(2)
+                .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            let mut values = Vec::new();
+            values.try_reserve_exact(physical_count).map_err(|_| {
+                UFuncError::Msg(
+                    "from_storage: unable to allocate output array (out of memory)".into(),
+                )
+            })?;
+            match storage {
+                ArrayStorage::Complex64(parts) => {
+                    for (real, imaginary) in parts {
+                        values.extend([f64::from(real), f64::from(imaginary)]);
+                    }
+                }
+                ArrayStorage::Complex128(parts) => {
+                    for (real, imaginary) in parts {
+                        values.extend([real, imaginary]);
+                    }
+                }
+                _ => unreachable!("complex dtype has paired component storage"),
+            }
+            shape.push(2);
+            return Ok(Self {
+                shape,
+                values,
+                dtype,
+                integer_sidecar: None,
+            });
+        }
         ensure_bridge_dtype_supported(dtype, "from_storage")?;
 
         // For I64/U64 with values exceeding f64 exact range, preserve the
@@ -5297,11 +5331,43 @@ impl UFuncArray {
     }
 
     /// Build an array from typed storage after casting into `dtype`.
+    ///
+    /// `shape` always describes logical source elements. Complex numeric casts
+    /// preserve both components when the target is complex, use the real
+    /// component for real/integer targets, and test either component for bool.
+    /// Like [`Self::from_storage`], this value-conversion constructor does not
+    /// report floating-point status; use [`Self::astype_with_casting`] when
+    /// cast warnings, callbacks, or errors are required.
     pub fn from_storage_with_dtype(
         shape: Vec<usize>,
         storage: ArrayStorage,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        let source_dtype = storage.dtype();
+        if (source_dtype.is_complex() || dtype.is_complex())
+            && (source_dtype.is_numeric() || source_dtype == DType::Bool)
+            && (dtype.is_numeric() || dtype == DType::Bool)
+        {
+            let expected = element_count(&shape).map_err(UFuncError::Shape)?;
+            let actual = storage.len();
+            if actual != expected {
+                return Err(UFuncError::InvalidInputLength { expected, actual });
+            }
+            if dtype.is_complex() && actual > isize::MAX as usize / (2 * std::mem::size_of::<f64>())
+            {
+                return Err(UFuncError::Shape(ShapeError::Overflow));
+            }
+            // Cast the typed source directly. An intermediate f64 array loses
+            // imaginary values and can double-round wide integers to complex64.
+            let casted = if source_dtype == dtype {
+                storage
+            } else {
+                storage
+                    .cast_to(dtype)
+                    .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?
+            };
+            return Self::from_storage(shape, casted);
+        }
         ensure_bridge_dtype_supported(dtype, "from_storage_with_dtype")?;
 
         let is_storage_compatible = storage.dtype() == dtype
@@ -5340,8 +5406,37 @@ impl UFuncArray {
     ///
     /// When an integer sidecar is present (from a prior `from_storage` call with
     /// large i64/u64 values), the sidecar values are returned directly, preserving
-    /// exact integer fidelity without f64 round-trip loss.
+    /// exact integer fidelity without f64 round-trip loss. Complex output stores
+    /// one typed component pair per logical element, after validating the
+    /// internal component axis and rounding to the declared component precision.
     pub fn to_storage(&self) -> Result<ArrayStorage, UFuncError> {
+        if self.dtype.is_complex() {
+            let shape = self.complex_logical_shape("to_storage")?;
+            let expected = element_count(&shape).map_err(UFuncError::Shape)?;
+            let actual = self.values.len() / 2;
+            if actual != expected {
+                return Err(UFuncError::InvalidInputLength { expected, actual });
+            }
+            return Ok(match self.dtype {
+                DType::Complex64 => ArrayStorage::Complex64(
+                    self.values
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|parts| (parts[0] as f32, parts[1] as f32))
+                        .collect(),
+                ),
+                DType::Complex128 => ArrayStorage::Complex128(
+                    self.values
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|parts| (parts[0], parts[1]))
+                        .collect(),
+                ),
+                _ => unreachable!("complex storage dtype"),
+            });
+        }
         // If we have a sidecar with exact integer values, use it directly.
         if let Some(ref sidecar) = self.integer_sidecar {
             match (sidecar, self.dtype) {
@@ -5745,6 +5840,10 @@ impl UFuncArray {
         values: Vec<f64>,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        // These internal callers supply real cells or physical array shapes.
+        // Keep their established real-only contract: the public typed bridge
+        // accepts logical complex shapes and must not reinterpret these cells.
+        ensure_bridge_dtype_supported(dtype, "from_storage_with_dtype")?;
         Self::from_storage_with_dtype(shape, ArrayStorage::from_f64_vec(values), dtype)
     }
 
@@ -21594,62 +21693,15 @@ impl UFuncArray {
     /// Read numeric logical elements at their declared source precision.
     fn numeric_cast_source(&self) -> Result<(Vec<usize>, ArrayStorage), UFuncError> {
         let shape = self.complex_logical_shape("astype")?;
-        let source = match self.dtype {
-            DType::Complex64 => ArrayStorage::Complex64(
-                self.values
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|parts| (parts[0] as f32, parts[1] as f32))
-                    .collect(),
-            ),
-            DType::Complex128 => ArrayStorage::Complex128(
-                self.values
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|parts| (parts[0], parts[1]))
-                    .collect(),
-            ),
-            _ => self.to_storage()?,
-        };
-        Ok((shape, source))
+        Ok((shape, self.to_storage()?))
     }
 
-    /// Build a numeric array from typed logical elements. Complex storage adds
-    /// its physical component axis only at this private bridge boundary.
+    /// Keep internal numeric casts on the public logical-element storage bridge.
     fn from_numeric_storage(
-        mut shape: Vec<usize>,
+        shape: Vec<usize>,
         converted: ArrayStorage,
     ) -> Result<Self, UFuncError> {
-        let dtype = converted.dtype();
-        if !dtype.is_complex() {
-            return Self::from_storage(shape, converted);
-        }
-
-        let physical_count = converted
-            .len()
-            .checked_mul(2)
-            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
-        if physical_count > isize::MAX as usize / std::mem::size_of::<f64>() {
-            return Err(UFuncError::Shape(ShapeError::Overflow));
-        }
-        let mut values = Vec::with_capacity(physical_count);
-        match converted {
-            ArrayStorage::Complex64(parts) => {
-                for (real, imaginary) in parts {
-                    values.extend([f64::from(real), f64::from(imaginary)]);
-                }
-            }
-            ArrayStorage::Complex128(parts) => {
-                for (real, imaginary) in parts {
-                    values.extend([real, imaginary]);
-                }
-            }
-            _ => unreachable!("complex target produces complex typed storage"),
-        }
-        shape.push(2);
-        Self::new(shape, values, dtype)
+        Self::from_storage(shape, converted)
     }
 
     /// Detect the floating-point status of the same typed conversion that
@@ -21713,9 +21765,8 @@ impl UFuncArray {
         )
     }
 
-    /// Convert numeric logical elements through typed storage. The public
-    /// storage bridge remains real-valued; complex arrays add/remove their
-    /// trailing component dimension only at this private casting boundary.
+    /// Convert numeric logical elements through typed storage. The storage
+    /// bridge adds/removes the physical component axis for complex dtypes.
     fn cast_numeric_storage(&self, dtype: DType, report_errors: bool) -> Result<Self, UFuncError> {
         let (shape, source) = self.numeric_cast_source()?;
         let converted = source
@@ -36656,9 +36707,7 @@ impl UFuncArray {
         let numeric = self.dtype.is_numeric() || self.dtype == DType::Bool;
         let packed = if numeric {
             Some(Self::pack_python_float_values(
-                values,
-                self.dtype,
-                "put_mask",
+                values, self.dtype, "put_mask",
             )?)
         } else {
             None
@@ -45537,8 +45586,8 @@ impl MaskedArray {
                 // Apply the same logical permutation to the mask's leading
                 // dimensions and keep each pair of component masks together.
                 let ndim = self.data.shape.len() - 1;
-                let mut physical_axes = axes
-                    .map_or_else(|| (0..ndim).rev().collect::<Vec<_>>(), <[usize]>::to_vec);
+                let mut physical_axes =
+                    axes.map_or_else(|| (0..ndim).rev().collect::<Vec<_>>(), <[usize]>::to_vec);
                 physical_axes.push(ndim);
                 Some(mask.transpose_physical(Some(&physical_axes))?)
             }
@@ -52805,10 +52854,12 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn from_storage_rejects_complex_storage_bridge() {
-        let err = UFuncArray::from_storage(vec![1], ArrayStorage::Complex128(vec![(1.0, 2.0)]))
-            .expect_err("complex bridge should fail closed");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+    fn from_storage_supports_logical_complex_storage() {
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::Complex128(vec![(1.0, 2.0)]))
+            .expect("complex bridge");
+        assert_eq!(arr.dtype(), DType::Complex128);
+        assert_eq!(arr.shape(), &[1, 2]);
+        assert_eq!(arr.values(), &[1.0, 2.0]);
     }
 
     #[test]
@@ -52867,14 +52918,16 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn from_storage_with_dtype_rejects_complex_target() {
-        let err = UFuncArray::from_storage_with_dtype(
+    fn from_storage_with_dtype_supports_complex_target() {
+        let arr = UFuncArray::from_storage_with_dtype(
             vec![1],
             ArrayStorage::F64(vec![1.0]),
             DType::Complex128,
         )
-        .expect_err("complex target should fail closed");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+        .expect("complex target");
+        assert_eq!(arr.dtype(), DType::Complex128);
+        assert_eq!(arr.shape(), &[1, 2]);
+        assert_eq!(arr.values(), &[1.0, 0.0]);
     }
 
     #[test]
@@ -53003,12 +53056,12 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn to_storage_rejects_complex_dtype_bridge() {
+    fn to_storage_supports_complex_dtype_bridge() {
         let arr = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::Complex128).expect("array");
-        let err = arr
-            .to_storage()
-            .expect_err("complex dtype bridge should fail closed");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+        assert_eq!(
+            arr.to_storage().expect("complex dtype bridge"),
+            ArrayStorage::Complex128(vec![(1.0, 2.0)])
+        );
     }
 
     #[test]
