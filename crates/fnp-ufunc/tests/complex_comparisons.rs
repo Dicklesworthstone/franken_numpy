@@ -22,6 +22,25 @@ const OPS: [BinaryOp; 9] = [
     BinaryOp::LogicalXor,
 ];
 
+fn public_comparison(
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+    op: BinaryOp,
+) -> Result<UFuncArray, UFuncError> {
+    match op {
+        BinaryOp::Equal => fnp_ufunc::equal(lhs, rhs),
+        BinaryOp::NotEqual => fnp_ufunc::not_equal(lhs, rhs),
+        BinaryOp::Less => fnp_ufunc::less(lhs, rhs),
+        BinaryOp::LessEqual => fnp_ufunc::less_equal(lhs, rhs),
+        BinaryOp::Greater => fnp_ufunc::greater(lhs, rhs),
+        BinaryOp::GreaterEqual => fnp_ufunc::greater_equal(lhs, rhs),
+        BinaryOp::LogicalAnd => fnp_ufunc::logical_and(lhs, rhs),
+        BinaryOp::LogicalOr => fnp_ufunc::logical_or(lhs, rhs),
+        BinaryOp::LogicalXor => fnp_ufunc::logical_xor(lhs, rhs),
+        _ => panic!("comparison fixture requires a Boolean operation"),
+    }
+}
+
 const NUMERIC_DTYPES: [DType; 14] = [
     DType::Bool,
     DType::I8,
@@ -151,11 +170,20 @@ struct OracleBatch {
 
 impl OracleBatch {
     fn push(&mut self, lhs: &UFuncArray, rhs: &UFuncArray, op: BinaryOp) {
-        self.cases
-            .push(json!({"lhs": oracle_input(lhs), "rhs": oracle_input(rhs), "op": op.name()}));
+        self.push_with_api(lhs, rhs, op, false);
+    }
+
+    fn push_with_api(&mut self, lhs: &UFuncArray, rhs: &UFuncArray, op: BinaryOp, public: bool) {
+        self.cases.push(json!({
+            "lhs": oracle_input(lhs), "rhs": oracle_input(rhs), "op": op.name(), "public": public,
+        }));
         let _guard = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
         take_float_error_events();
-        let output = lhs.elementwise_binary(rhs, op);
+        let output = if public {
+            public_comparison(lhs, rhs, op)
+        } else {
+            lhs.elementwise_binary(rhs, op)
+        };
         let events = take_float_error_events()
             .into_iter()
             .map(|event| event.message)
@@ -276,8 +304,90 @@ fn comparisons_return_one_boolean_per_complex_element() {
             assert_eq!(result.shape(), &[3], "{op:?}");
             assert_eq!(result.dtype(), DType::Bool, "{op:?}");
             assert_eq!(result.values(), &expected, "{op:?}");
+            let result = public_comparison(&lhs, &rhs, op).unwrap();
+            assert_eq!(result.shape(), &[3], "public {op:?}");
+            assert_eq!(result.dtype(), DType::Bool, "public {op:?}");
+            assert_eq!(result.values(), &expected, "public {op:?}");
         }
     }
+}
+
+#[test]
+fn public_comparison_functions_match_numpy_for_complex_inputs() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[(&[usize], &[usize])] = &[
+        (&[], &[2, 3]),
+        (&[2, 1], &[1, 3]),
+        (&[0, 3], &[1, 3]),
+        (&[2, 3], &[2, 3]),
+    ];
+    for complex_dtype in [DType::Complex64, DType::Complex128] {
+        for other_dtype in NUMERIC_DTYPES {
+            for &(lhs_shape, rhs_shape) in shapes {
+                let lhs = sample(lhs_shape, complex_dtype, 3);
+                let rhs = sample(rhs_shape, other_dtype, 5);
+                for op in OPS {
+                    batch.push_with_api(&lhs, &rhs, op, true);
+                    batch.push_with_api(&rhs, &lhs, op, true);
+                }
+            }
+        }
+        for storage in [
+            ArrayStorage::I64(vec![i64::MIN, i64::MAX, 9_007_199_254_740_993]),
+            ArrayStorage::U64(vec![0, u64::MAX, 9_007_199_254_740_993]),
+        ] {
+            let integer = UFuncArray::from_storage(vec![3], storage).unwrap();
+            let value = complex(
+                &[3],
+                &[(0.0, 1.0), (1.0e19, 0.0), (9_007_199_254_740_992.0, 0.0)],
+                complex_dtype,
+            );
+            for op in OPS {
+                batch.push_with_api(&integer, &value, op, true);
+                batch.push_with_api(&value, &integer, op, true);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn public_comparison_functions_validate_complex_layouts_and_report_invalid() {
+    let valid = complex(&[3], &[(1.0, 2.0); 3], DType::Complex128);
+    for malformed in [
+        UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![], vec![1.0], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 3], vec![], DType::Complex64).unwrap(),
+    ] {
+        for op in OPS {
+            assert!(public_comparison(&malformed, &valid, op).is_err());
+            assert!(public_comparison(&valid, &malformed, op).is_err());
+        }
+    }
+    let empty = complex(&[0, usize::MAX], &[], DType::Complex128);
+    let scalar = UFuncArray::scalar(1.0, DType::F64);
+    for op in OPS {
+        let result = public_comparison(&empty, &scalar, op).unwrap();
+        assert_eq!(result.shape(), &[0, usize::MAX]);
+        assert!(result.values().is_empty());
+    }
+    let nan = complex(&[], &[(f64::NAN, 1.0)], DType::Complex128);
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for op in [
+        BinaryOp::Less,
+        BinaryOp::LessEqual,
+        BinaryOp::Greater,
+        BinaryOp::GreaterEqual,
+    ] {
+        assert!(matches!(
+            public_comparison(&nan, &scalar, op),
+            Err(UFuncError::FloatingPoint { kind: FloatErrorKind::Invalid, .. })
+        ));
+    }
+    assert_eq!(
+        public_comparison(&nan, &scalar, BinaryOp::LogicalAnd).unwrap().values(),
+        &[1.0]
+    );
 }
 
 #[test]

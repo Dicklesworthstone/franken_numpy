@@ -8764,6 +8764,22 @@ impl UFuncArray {
                     message: detail,
                 });
             }
+            // The infallible API records raised errors but still returns the
+            // computed values. Retain complex values instead of retrying the
+            // real, component-by-component fallback for these numeric kernels.
+            if self.dtype.is_complex()
+                && matches!(
+                    op,
+                    UnaryOp::Square
+                        | UnaryOp::Sign
+                        | UnaryOp::Sqrt
+                        | UnaryOp::Exp
+                        | UnaryOp::Log
+                )
+                && let Ok((result, _)) = self.complex_unary_values(op)
+            {
+                return result;
+            }
             let values = self.values.iter().map(|&v| op.apply(v)).collect();
             let dtype = if op.is_bool_output() {
                 DType::Bool
@@ -19177,6 +19193,14 @@ impl UFuncArray {
                 Some(self.complex_logical_predicate(op))
             }
             UnaryOp::Positive | UnaryOp::Negative => Some(self.complex_signed_unary(op)),
+            UnaryOp::Square
+            | UnaryOp::Sign
+            | UnaryOp::Sqrt
+            | UnaryOp::Exp
+            | UnaryOp::Log => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
+                dispatch_float_error_flags(flags, op.name())?;
+                Ok(array)
+            })),
             _ => None,
         }
     }
@@ -19195,6 +19219,366 @@ impl UFuncArray {
             output.copy_from_slice(&[result.0, result.1]);
         }
         Self::new(self.shape.clone(), values, self.dtype)
+    }
+
+    fn complex_unary_round(value: f64, dtype: DType) -> f64 {
+        if dtype == DType::Complex64 {
+            f64::from(value as f32)
+        } else {
+            value
+        }
+    }
+
+    fn complex_unary_min_normal(dtype: DType) -> f64 {
+        if dtype == DType::Complex64 {
+            f64::from(f32::MIN_POSITIVE)
+        } else {
+            f64::MIN_POSITIVE
+        }
+    }
+
+    fn complex_unary_product_flags(
+        flags: &mut FloatErrorFlags,
+        a: f64,
+        b: f64,
+        result: f64,
+        dtype: DType,
+    ) {
+        if !a.is_nan() && !b.is_nan() && result.is_nan() {
+            flags.note(FloatErrorKind::Invalid);
+        } else if a.is_finite() && b.is_finite() {
+            if result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            } else if result.abs() < Self::complex_unary_min_normal(dtype)
+                && tiny_product_is_inexact(a, b, result)
+            {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+    }
+
+    fn complex_unary_fma_flags(
+        flags: &mut FloatErrorFlags,
+        a: f64,
+        b: f64,
+        c: f64,
+        result: f64,
+        dtype: DType,
+    ) {
+        if a.is_nan() || b.is_nan() || c.is_nan() {
+            return;
+        }
+        if result.is_nan() {
+            flags.note(FloatErrorKind::Invalid);
+        } else if a.is_finite() && b.is_finite() && c.is_finite() {
+            if result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            } else if result.abs() < Self::complex_unary_min_normal(dtype) {
+                // Widened float32 products are exact. For float64, move a tiny
+                // fused result into the normal range before checking its product
+                // and addition residuals; an unscaled residual can itself vanish.
+                let inexact = if dtype == DType::Complex64 {
+                    a.mul_add(b, c) != result
+                } else {
+                    const SCALE: f64 = f64::from_bits((1023 + 600) << 52);
+                    let (a, b, c, target) =
+                        (a * SCALE, b * SCALE, c * SCALE * SCALE, result * SCALE * SCALE);
+                    let product = a * b;
+                    let sum = product + c;
+                    if product.is_finite() && sum.is_finite() {
+                        let product_error = a.mul_add(b, -product);
+                        let displaced = sum - product;
+                        let sum_error = (product - (sum - displaced)) + (c - displaced);
+                        ((sum - target) + product_error) + sum_error != 0.0
+                    } else {
+                        // Cancellation between large representable terms can be
+                        // exactly zero, but cannot produce an inexact subnormal.
+                        false
+                    }
+                };
+                if inexact {
+                    flags.note(FloatErrorKind::Under);
+                }
+            }
+        }
+    }
+
+    fn complex_unary_square(
+        value: (f64, f64),
+        dtype: DType,
+        fused: bool,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        let (re, im) = value;
+        let ii = Self::complex_unary_round(im * im, dtype);
+        let ir = Self::complex_unary_round(im * re, dtype);
+        Self::complex_unary_product_flags(flags, im, im, ii, dtype);
+        Self::complex_unary_product_flags(flags, im, re, ir, dtype);
+        if fused {
+            let result = Self::complex_cumulative_fused_multiply(value, value, dtype);
+            Self::complex_unary_fma_flags(flags, re, re, -ii, result.0, dtype);
+            Self::complex_unary_fma_flags(flags, re, im, ir, result.1, dtype);
+            result
+        } else {
+            let rr = Self::complex_unary_round(re * re, dtype);
+            Self::complex_unary_product_flags(flags, re, re, rr, dtype);
+            let result = Self::complex_reduction_multiply(value, value, dtype);
+            for (a, b, output) in [(rr, -ii, result.0), (ir, ir, result.1)] {
+                if !a.is_nan() && !b.is_nan() && output.is_nan() {
+                    flags.note(FloatErrorKind::Invalid);
+                } else if a.is_finite() && b.is_finite() && output.is_infinite() {
+                    flags.note(FloatErrorKind::Over);
+                }
+            }
+            result
+        }
+    }
+
+    fn complex_unary_sign(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        let magnitude = if dtype == DType::Complex64 {
+            f64::from((re as f32).hypot(im as f32))
+        } else {
+            re.hypot(im)
+        };
+        if re.is_finite() && im.is_finite() && magnitude.is_infinite() {
+            flags.note(FloatErrorKind::Over);
+        }
+        if magnitude.is_nan() {
+            return (f64::NAN, f64::NAN);
+        }
+        if magnitude.is_infinite() {
+            return if re.is_infinite() {
+                if im.is_infinite() {
+                    (f64::NAN, f64::NAN)
+                } else {
+                    (1.0_f64.copysign(re), 0.0)
+                }
+            } else {
+                (0.0, 1.0_f64.copysign(im))
+            };
+        }
+        if magnitude == 0.0 {
+            return (0.0, 0.0);
+        }
+        let minimum = Self::complex_unary_min_normal(dtype);
+        if magnitude < minimum && re != 0.0 && im != 0.0 {
+            const SCALE: f64 = f64::from_bits((1023 + 80) << 52);
+            if dtype == DType::Complex128
+                || (re * SCALE).hypot(im * SCALE) != magnitude * SCALE
+            {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        let divide = |value: f64| {
+            if dtype == DType::Complex64 {
+                f64::from((value as f32) / (magnitude as f32))
+            } else {
+                value / magnitude
+            }
+        };
+        let result = (divide(re), divide(im));
+        for (value, output) in [(re, result.0), (im, result.1)] {
+            if value != 0.0 && output.abs() < minimum {
+                const SCALE: f64 = f64::from_bits((1023 + 600) << 52);
+                if (output * SCALE).mul_add(magnitude, -(value * SCALE)) != 0.0 {
+                    flags.note(FloatErrorKind::Under);
+                }
+            }
+        }
+        result
+    }
+
+    fn complex_unary_sqrt(re: f64, im: f64, dtype: DType) -> (f64, f64) {
+        if im.is_infinite() {
+            return (f64::INFINITY, im);
+        }
+        if re.is_infinite() {
+            return if re.is_sign_positive() {
+                (f64::INFINITY, if im.is_nan() { im } else { 0.0_f64.copysign(im) })
+            } else {
+                (if im.is_nan() { im } else { 0.0 }, f64::INFINITY.copysign(im))
+            };
+        }
+        if re.is_nan() || im.is_nan() {
+            return (f64::NAN, f64::NAN);
+        }
+        if re == 0.0 && im == 0.0 {
+            return (0.0, im);
+        }
+        // Scale the norm before adding it to |re|. Both maximum finite
+        // components and the smallest subnormals have finite principal roots.
+        let largest = re.abs().max(im.abs());
+        let (a, b, root_scale) = if largest > f64::MAX / 4.0 {
+            (re * 0.25, im * 0.25, 2.0)
+        } else if largest < f64::MIN_POSITIVE * 4.0 {
+            (re * 18014398509481984.0, im * 18014398509481984.0, 1.0 / 134217728.0)
+        } else {
+            (re, im, 1.0)
+        };
+        let root = ((a.abs() + a.hypot(b)) * 0.5).sqrt() * root_scale;
+        // Divide before halving in the component dtype. Combining these into
+        // im/(2*root) changes subnormal rounding and can turn NumPy's zero minor
+        // component into the smallest nonzero value.
+        let minor = if dtype == DType::Complex64 {
+            f64::from(((im as f32) / (root as f32)) * 0.5)
+        } else {
+            (im / root) * 0.5
+        };
+        if re >= 0.0 {
+            (root, minor)
+        } else {
+            (minor.abs(), root.copysign(im))
+        }
+    }
+
+    fn complex_unary_exp(re: f64, im: f64, flags: &mut FloatErrorFlags) -> (f64, f64) {
+        if re.is_nan() {
+            if im == 0.0 {
+                return (re, im);
+            }
+            if !im.is_nan() {
+                flags.note(FloatErrorKind::Invalid);
+            }
+            return (f64::NAN, f64::NAN);
+        }
+        if re.is_infinite() {
+            if re.is_sign_negative() {
+                if !im.is_finite() {
+                    return (0.0, 0.0_f64.copysign(im));
+                }
+                let (sin, cos) = im.sin_cos();
+                return (0.0_f64.copysign(cos), 0.0_f64.copysign(sin));
+            }
+            if im == 0.0 {
+                return (re, im);
+            }
+            if !im.is_finite() {
+                if im.is_infinite() {
+                    flags.note(FloatErrorKind::Invalid);
+                }
+                return (re, f64::NAN);
+            }
+            let (sin, cos) = im.sin_cos();
+            return (re.copysign(cos), re.copysign(sin));
+        }
+        if !im.is_finite() {
+            flags.note(FloatErrorKind::Invalid);
+            return (f64::NAN, f64::NAN);
+        }
+        let (sin, cos) = im.sin_cos();
+        if re > f64::MAX.ln() {
+            // Multiplying the trigonometric factor first retains finite
+            // components even when exp(re) itself would overflow.
+            // A power-of-two split avoids rounding the exponent before exp.
+            let scale = (re * 0.25).exp();
+            let component = |value: f64| {
+                if value == 0.0 { value } else { (((value * scale) * scale) * scale) * scale }
+            };
+            (component(cos), component(sin))
+        } else {
+            let magnitude = re.exp();
+            (magnitude * cos, magnitude * sin)
+        }
+    }
+
+    fn complex_unary_log(re: f64, im: f64, flags: &mut FloatErrorFlags) -> (f64, f64) {
+        let phase = im.atan2(re);
+        if re.is_infinite() || im.is_infinite() {
+            return (f64::INFINITY, phase);
+        }
+        if re.is_nan() || im.is_nan() {
+            return (f64::NAN, f64::NAN);
+        }
+        let largest = re.abs().max(im.abs());
+        let smallest = re.abs().min(im.abs());
+        if largest == 0.0 {
+            flags.note(FloatErrorKind::Divide);
+            return (f64::NEG_INFINITY, phase);
+        }
+        let magnitude_log = if (0.5..=2.0).contains(&largest) {
+            // Around the unit circle, the small logarithm depends on low bits
+            // discarded by either hypot or an ordinary sum of squares. Retain
+            // both product residuals and the addition residual before log1p.
+            let large_square = largest * largest;
+            let small_square = smallest * smallest;
+            let sum = large_square + small_square;
+            let displaced = sum - large_square;
+            let addition_error = (large_square - (sum - displaced)) + (small_square - displaced);
+            let correction = addition_error
+                + (largest.mul_add(largest, -large_square)
+                    + smallest.mul_add(smallest, -small_square));
+            0.5 * ((sum - 1.0) + correction).ln_1p()
+        } else {
+            let ratio = smallest / largest;
+            largest.ln() + 0.5 * (ratio * ratio).ln_1p()
+        };
+        (magnitude_log, phase)
+    }
+
+    fn complex_unary_values(&self, op: UnaryOp) -> Result<(Self, FloatErrorFlags), UFuncError> {
+        if !matches!(op, UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Square | UnaryOp::Sign | UnaryOp::LogicalNot | UnaryOp::Sqrt | UnaryOp::Exp | UnaryOp::Log) {
+            return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name())));
+        }
+        let logical_shape = self.complex_logical_shape(op.name())?;
+        let logical_not = op == UnaryOp::LogicalNot;
+        let fused_square = op == UnaryOp::Square && Self::complex_multiply_uses_fma();
+        let mut flags = FloatErrorFlags::default();
+        let mut values = Vec::with_capacity(if logical_not { self.values.len() / 2 } else { self.values.len() });
+        for parts in self.values.as_chunks::<2>().0 {
+            let re = Self::complex_unary_round(parts[0], self.dtype);
+            let im = Self::complex_unary_round(parts[1], self.dtype);
+            if logical_not {
+                values.push(if re == 0.0 && im == 0.0 { 1.0 } else { 0.0 });
+                continue;
+            }
+            let result = match op {
+                UnaryOp::Negative => (-re, -im),
+                UnaryOp::Positive => (re, im),
+                UnaryOp::Square => Self::complex_unary_square((re, im), self.dtype, fused_square, &mut flags),
+                UnaryOp::Sign => Self::complex_unary_sign(re, im, self.dtype, &mut flags),
+                UnaryOp::Sqrt => Self::complex_unary_sqrt(re, im, self.dtype),
+                UnaryOp::Exp => Self::complex_unary_exp(re, im, &mut flags),
+                UnaryOp::Log => Self::complex_unary_log(re, im, &mut flags),
+                _ => return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name()))),
+            };
+            let result = (
+                Self::complex_unary_round(result.0, self.dtype),
+                Self::complex_unary_round(result.1, self.dtype),
+            );
+            if re.is_finite() && im.is_finite() {
+                let minimum = Self::complex_unary_min_normal(self.dtype);
+                match op {
+                    UnaryOp::Sqrt if im != 0.0 && (result.0.abs() < minimum || result.1.abs() < minimum) => {
+                        flags.note(FloatErrorKind::Under);
+                    }
+                    UnaryOp::Exp => {
+                        if result.0.is_infinite() || result.1.is_infinite() {
+                            flags.note(FloatErrorKind::Over);
+                        }
+                        if result.0.abs() < minimum || (im != 0.0 && result.1.abs() < minimum) {
+                            flags.note(FloatErrorKind::Under);
+                        }
+                    }
+                    UnaryOp::Log if (re > 0.0 && im != 0.0 && result.1.abs() < minimum)
+                        || (re.abs().max(im.abs()) == 1.0 && re.abs().min(im.abs()) != 0.0 && result.0.abs() < minimum) => {
+                        flags.note(FloatErrorKind::Under);
+                    }
+                    _ => {}
+                }
+            }
+            values.extend([result.0, result.1]);
+        }
+        let array = if logical_not {
+            Self::from_values_with_dtype(logical_shape, values, DType::Bool)?
+        } else {
+            Self::new(self.shape.clone(), values, self.dtype)?
+        };
+        Ok((array, flags))
     }
 
     fn complex_logical_predicate(&self, op: UnaryOp) -> Result<Self, UFuncError> {
@@ -50544,6 +50928,9 @@ pub fn logaddexp2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncE
 /// Returns a boolean array where True indicates x1 == x2.
 /// NumPy equivalent: `np.equal(x1, x2)`.
 pub fn equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::Equal);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50564,6 +50951,9 @@ pub fn equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError>
 /// Returns a boolean array where True indicates x1 != x2.
 /// NumPy equivalent: `np.not_equal(x1, x2)`.
 pub fn not_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::NotEqual);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50584,6 +50974,9 @@ pub fn not_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
 /// Returns a boolean array where True indicates x1 > x2.
 /// NumPy equivalent: `np.greater(x1, x2)`.
 pub fn greater(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::Greater);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50604,6 +50997,9 @@ pub fn greater(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncErro
 /// Returns a boolean array where True indicates x1 >= x2.
 /// NumPy equivalent: `np.greater_equal(x1, x2)`.
 pub fn greater_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::GreaterEqual);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50624,6 +51020,9 @@ pub fn greater_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFu
 /// Returns a boolean array where True indicates x1 < x2.
 /// NumPy equivalent: `np.less(x1, x2)`.
 pub fn less(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::Less);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50644,6 +51043,9 @@ pub fn less(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
 /// Returns a boolean array where True indicates x1 <= x2.
 /// NumPy equivalent: `np.less_equal(x1, x2)`.
 pub fn less_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::LessEqual);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50664,6 +51066,9 @@ pub fn less_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncE
 /// Returns a boolean array where True indicates both x1 and x2 are truthy.
 /// NumPy equivalent: `np.logical_and(x1, x2)`.
 pub fn logical_and(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::LogicalAnd);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50684,6 +51089,9 @@ pub fn logical_and(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFunc
 /// Returns a boolean array where True indicates x1 or x2 (or both) are truthy.
 /// NumPy equivalent: `np.logical_or(x1, x2)`.
 pub fn logical_or(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::LogicalOr);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
@@ -50704,6 +51112,9 @@ pub fn logical_or(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncE
 /// Returns a boolean array where True indicates exactly one of x1 or x2 is truthy.
 /// NumPy equivalent: `np.logical_xor(x1, x2)`.
 pub fn logical_xor(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x1.dtype.is_complex() || x2.dtype.is_complex() {
+        return x1.elementwise_binary(x2, BinaryOp::LogicalXor);
+    }
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
     let values: Vec<f64> = x1_bc
