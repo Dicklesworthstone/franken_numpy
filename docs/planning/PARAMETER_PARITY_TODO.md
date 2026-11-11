@@ -97,6 +97,11 @@
 
 ---
 
+## GROUP 14: logical complex extrema and index reductions
+- [x] Rust-core `reduce_min`, `reduce_max`, their tuple-axis variants, `argmin`, `argmax`, `nanmin`, `nanmax`, `nanargmin`, `nanargmax`, and `ptp` compare complete complex elements with logical axes and output shapes. Complex64 inputs and peak-to-peak subtraction use component precision; ties preserve the first complete pair and logical index.
+- [x] Ordinary extrema propagate the first whole-element NaN; NaN-aware extrema retain valid pairs and preserve NumPy's infinity replacement ties for argument reductions. Joint tuple reductions preserve C-order traversal, scalar axis rules, signed zeros, empty-axis errors, and checked output capacity.
+- [x] All 24 tests in `complex_tuple_reductions.rs` pass against NumPy 2.4.3, including six new extrema tests covering source precision, tuple order, NaN/Inf ties, malformed layouts, and huge empty shapes.
+
 ## ALREADY DONE (earlier this session)
 - [x] clip_optional (one-sided clipping with None min/max)
 - [x] reshape_order (F-order reshape)

@@ -9537,6 +9537,9 @@ impl UFuncArray {
     }
 
     pub fn reduce_min(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema(axis, keepdims, false, false);
+        }
         // NumPy's np.min propagates NaN: if any element is NaN, result is NaN.
         // DO NOT vectorize/parallelize: like np.max this is a sequential left-fold,
         // ORDER-DEPENDENT on signed zeros — np.min([0.0, -0.0]) is -0.0 but
@@ -9703,6 +9706,9 @@ impl UFuncArray {
     }
 
     pub fn reduce_max(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema(axis, keepdims, true, false);
+        }
         // NumPy's np.max propagates NaN: if any element is NaN, result is NaN.
         // DO NOT vectorize/parallelize this reduction: NumPy's max is a sequential
         // left-fold and is ORDER-DEPENDENT on signed zeros — np.max([0.0, -0.0]) is
@@ -10356,6 +10362,9 @@ impl UFuncArray {
 
     /// Reduce min over multiple axes simultaneously.
     pub fn reduce_min_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema_axes(axes, keepdims, false, false);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.clone());
@@ -10374,6 +10383,9 @@ impl UFuncArray {
 
     /// Reduce max over multiple axes simultaneously.
     pub fn reduce_max_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema_axes(axes, keepdims, true, false);
+        }
         let norm_axes = normalize_reduction_axes(axes, self.shape.len())?;
         if axes.is_empty() {
             return Ok(self.clone());
@@ -11434,6 +11446,9 @@ impl UFuncArray {
     /// When `axis` is `None`, operates on the flattened array and returns a scalar.
     /// Output dtype is always `I64`.
     pub fn reduce_argmin(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_argextrema(axis, false, false);
+        }
         if self.dtype == DType::I64
             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("argmin")?
         {
@@ -11600,6 +11615,9 @@ impl UFuncArray {
     /// When `axis` is `None`, operates on the flattened array and returns a scalar.
     /// Output dtype is always `I64`.
     pub fn reduce_argmax(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_argextrema(axis, true, false);
+        }
         if self.dtype == DType::I64
             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("argmax")?
         {
@@ -17907,6 +17925,209 @@ impl UFuncArray {
         } else {
             (self.values[logical_flat], 0.0)
         }
+    }
+
+    fn complex_extrema_value(&self, logical_flat: usize) -> (f64, f64) {
+        let (real, imag) = self.logical_complex_value(logical_flat);
+        if self.dtype == DType::Complex64 {
+            (f64::from(real as f32), f64::from(imag as f32))
+        } else {
+            (real, imag)
+        }
+    }
+
+    /// Complex ordering is lexicographic, with the first equal pair retained.
+    /// A NaN in either component makes the entire pair a NaN. Ordinary extrema
+    /// keep the first such pair; NaN-aware extrema keep it only if no valid pair
+    /// is available. This preserves the other component and both signed zeros.
+    fn complex_extrema_prefers(
+        candidate: (f64, f64),
+        current: (f64, f64),
+        maximum: bool,
+        ignore_nan: bool,
+    ) -> bool {
+        let candidate_nan = candidate.0.is_nan() || candidate.1.is_nan();
+        let current_nan = current.0.is_nan() || current.1.is_nan();
+        if candidate_nan || current_nan {
+            return if ignore_nan {
+                current_nan && !candidate_nan
+            } else {
+                candidate_nan && !current_nan
+            };
+        }
+        if maximum {
+            candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 > current.1)
+        } else {
+            candidate.0 < current.0 || (candidate.0 == current.0 && candidate.1 < current.1)
+        }
+    }
+
+    fn reduce_complex_extrema(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        maximum: bool,
+        ignore_nan: bool,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("complex extrema")?;
+        // Like ufunc.reduce, min/max accept scalar axis=0/-1. An explicit
+        // tuple containing those axes remains invalid for a scalar.
+        let axes = match axis {
+            Some(0 | -1) if shape.is_empty() => Vec::new(),
+            Some(axis) => vec![axis],
+            None => (0..shape.len()).map(|axis| axis as isize).collect(),
+        };
+        self.reduce_complex_extrema_axes(&axes, keepdims, maximum, ignore_nan)
+    }
+
+    fn reduce_complex_extrema_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        maximum: bool,
+        ignore_nan: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = match (maximum, ignore_nan) {
+            (false, false) => "min",
+            (true, false) => "max",
+            (false, true) => "nanmin",
+            (true, true) => "nanmax",
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        let normalized = normalize_reduction_axes(axes, shape.len())?;
+        // Extrema have no identity: a selected empty axis fails even if an
+        // unselected empty axis would leave no output lanes. Empty axis tuples
+        // are copies and must still succeed for empty arrays.
+        if normalized.iter().any(|&axis| shape[axis] == 0) {
+            return Err(UFuncError::EmptyReduction { op: operation });
+        }
+        let plan = AxesReductionPlan::new(&shape, axes, keepdims)?;
+        if plan.output_count > isize::MAX as usize / std::mem::size_of::<(f64, f64)>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        let mut values = vec![0.0; plan.output_count * 2];
+        let mut initialized = vec![false; plan.output_count];
+        // Read complete logical elements directly from source storage. A joint
+        // C-order traversal preserves the first NaN/equal pair across an axis
+        // tuple without allocating a gathered input or intermediate reductions.
+        for index in 0..self.values.len() / 2 {
+            let value = self.complex_extrema_value(index);
+            let output = plan.output_index(index);
+            let base = output * 2;
+            if !initialized[output]
+                || Self::complex_extrema_prefers(
+                    value,
+                    (values[base], values[base + 1]),
+                    maximum,
+                    ignore_nan,
+                )
+            {
+                values[base] = value.0;
+                values[base + 1] = value.1;
+                initialized[output] = true;
+            }
+        }
+        let mut output_shape = plan.output_shape;
+        output_shape.push(2);
+        Self::new(output_shape, values, self.dtype)
+    }
+
+    fn reduce_complex_argextrema(
+        &self,
+        axis: Option<isize>,
+        maximum: bool,
+        ignore_nan: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = match (maximum, ignore_nan) {
+            (false, false) => "argmin",
+            (true, false) => "argmax",
+            (false, true) => "nanargmin",
+            (true, true) => "nanargmax",
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        let axis = match axis {
+            Some(0 | -1) if shape.is_empty() => None,
+            Some(axis) => {
+                // argmin/argmax flatten scalars before checking their axis;
+                // nanargmin/nanargmax first reduce the original scalar mask.
+                let ndim = if shape.is_empty() && !ignore_nan {
+                    1
+                } else {
+                    shape.len()
+                };
+                Some(normalize_axis(axis, ndim)?)
+            }
+            None => None,
+        };
+        let axis_len = axis.map_or(self.values.len() / 2, |axis| shape[axis]);
+        if axis_len == 0 {
+            return Err(UFuncError::EmptyReduction { op: operation });
+        }
+        let axes: Vec<isize> = match axis {
+            Some(axis) => vec![axis as isize],
+            None => (0..shape.len()).map(|axis| axis as isize).collect(),
+        };
+        let plan = AxesReductionPlan::new(&shape, &axes, false)?;
+        let mut indices = vec![usize::MAX; plan.output_count];
+        let mut valid = if ignore_nan {
+            vec![false; plan.output_count]
+        } else {
+            Vec::new()
+        };
+        let value_at = |index| {
+            let value = self.complex_extrema_value(index);
+            if ignore_nan && (value.0.is_nan() || value.1.is_nan()) {
+                // NumPy replaces NaNs with real +/-inf before argmin/argmax.
+                // Preserve that replacement's observable ties with actual
+                // infinities, while independently rejecting all-NaN lanes.
+                (
+                    if maximum {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    },
+                    0.0,
+                )
+            } else {
+                value
+            }
+        };
+        for index in 0..self.values.len() / 2 {
+            let output = plan.output_index(index);
+            if ignore_nan {
+                let value = self.complex_extrema_value(index);
+                valid[output] |= !value.0.is_nan() && !value.1.is_nan();
+            }
+            let best = &mut indices[output];
+            if *best == usize::MAX
+                || Self::complex_extrema_prefers(value_at(index), value_at(*best), maximum, false)
+            {
+                *best = index;
+            }
+        }
+        if valid.iter().any(|&valid| !valid) {
+            return Err(UFuncError::EmptyReduction { op: operation });
+        }
+        // Empty outputs may contain enormous unused extents. No lane indexes
+        // are needed, so avoid computing an irrelevant overflowing stride.
+        let inner = if indices.is_empty() {
+            1
+        } else if let Some(axis) = axis {
+            element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?
+        } else {
+            1
+        };
+        let indices = indices
+            .into_iter()
+            .map(|index| {
+                if axis.is_some() {
+                    (index / inner % axis_len) as i64
+                } else {
+                    index as i64
+                }
+            })
+            .collect();
+        Self::from_storage(plan.output_shape, ArrayStorage::I64(indices))
     }
 
     /// Cast logical elements without sending imaginary components through the
@@ -29862,6 +30083,21 @@ impl UFuncArray {
 
     /// Peak-to-peak (max - min) along an axis or over all elements.
     pub fn ptp(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let mut maximum = self.reduce_max(axis, false)?;
+            let minimum = self.reduce_min(axis, false)?;
+            // Extrema return source-rounded components. The subtraction must
+            // also round at source precision: an f64 working-cell difference
+            // can retain bits that NumPy's complex64 subtraction discards.
+            for (maximum, minimum) in maximum.values.iter_mut().zip(minimum.values) {
+                *maximum = if self.dtype == DType::Complex64 {
+                    f64::from((*maximum as f32) - (minimum as f32))
+                } else {
+                    *maximum - minimum
+                };
+            }
+            return Ok(maximum);
+        }
         match axis {
             None => {
                 if self.dtype == DType::I64
@@ -32196,6 +32432,9 @@ impl UFuncArray {
 
     /// `np.nanmin` — minimum ignoring NaN values.
     pub fn nanmin(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema(axis, keepdims, false, true);
+        }
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_min(axis, keepdims);
         }
@@ -32258,6 +32497,9 @@ impl UFuncArray {
 
     /// `np.nanmax` — maximum ignoring NaN values.
     pub fn nanmax(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_extrema(axis, keepdims, true, true);
+        }
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_max(axis, keepdims);
         }
@@ -32468,6 +32710,9 @@ impl UFuncArray {
 
     /// `np.nanargmin` — index of minimum ignoring NaN values.
     pub fn nanargmin(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_argextrema(axis, false, true);
+        }
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmin(axis);
         }
@@ -32566,6 +32811,9 @@ impl UFuncArray {
 
     /// `np.nanargmax` — index of maximum ignoring NaN values.
     pub fn nanargmax(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_argextrema(axis, true, true);
+        }
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmax(axis);
         }

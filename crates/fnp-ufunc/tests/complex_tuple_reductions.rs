@@ -49,6 +49,8 @@ fn reduce_tuple(
         "mean" => input.reduce_mean_axes(axes, keepdims),
         "var" => input.reduce_var_axes(axes, keepdims, ddof),
         "std" => input.reduce_std_axes(axes, keepdims, ddof),
+        "min" => input.reduce_min_axes(axes, keepdims),
+        "max" => input.reduce_max_axes(axes, keepdims),
         "nansum" => input.nansum_axes(axes, keepdims),
         "nanprod" => input.nanprod_axes(axes, keepdims),
         "nanmean" => input.nanmean_axes(axes, keepdims),
@@ -181,6 +183,31 @@ impl OracleBatch {
             "all" => array.all(axis),
             "count_nonzero" => array.count_nonzero(axis, keepdims),
             _ => unreachable!("truth reduction operation"),
+        });
+    }
+
+    fn push_extrema_single(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        op: &str,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) {
+        self.cases.push(json!({
+            "input": input, "op": op, "axis": axis, "keepdims": keepdims,
+        }));
+        self.actual.push(match op {
+            "min" => array.reduce_min(axis, keepdims),
+            "max" => array.reduce_max(axis, keepdims),
+            "nanmin" => array.nanmin(axis, keepdims),
+            "nanmax" => array.nanmax(axis, keepdims),
+            "argmin" => array.reduce_argmin(axis),
+            "argmax" => array.reduce_argmax(axis),
+            "nanargmin" => array.nanargmin(axis),
+            "nanargmax" => array.nanargmax(axis),
+            "ptp" => array.ptp(axis),
+            _ => unreachable!("complex extrema operation"),
         });
     }
 
@@ -1143,5 +1170,286 @@ fn complex_truth_counts_each_pair_once_and_checks_layout_before_axes() {
         assert_eq!(malformed.flatnonzero().values(), &[1.0, 2.0]);
         assert_eq!(malformed.argwhere().shape(), &[2, 1]);
         assert_eq!(malformed.argwhere().values(), &[1.0, 2.0]);
+    }
+}
+
+#[test]
+fn complex_extrema_compare_logical_pairs_and_return_logical_indices() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(
+            &[2, 2],
+            &[(2.0, 100.0), (1.0, 5.0), (1.0, 3.0), (2.0, -100.0)],
+            dtype,
+        );
+        let minimum = array.reduce_min(None, false).unwrap();
+        assert_eq!(minimum.shape(), &[2]);
+        assert_eq!(minimum.dtype(), dtype);
+        assert_eq!(minimum.values(), &[1.0, 3.0]);
+        assert_eq!(
+            array.reduce_max(None, false).unwrap().values(),
+            &[2.0, 100.0]
+        );
+        assert_eq!(array.reduce_argmin(None).unwrap().values(), &[2.0]);
+        assert_eq!(array.reduce_argmax(None).unwrap().values(), &[0.0]);
+        assert_eq!(array.reduce_argmin(Some(0)).unwrap().values(), &[1.0, 0.0]);
+        assert_eq!(array.reduce_argmax(Some(-1)).unwrap().values(), &[0.0, 1.0]);
+        assert_eq!(array.ptp(None).unwrap().values(), &[1.0, 97.0]);
+        let reduced = array.reduce_min_axes(&[1, 0], true).unwrap();
+        assert_eq!(reduced.shape(), &[1, 1, 2]);
+        assert_eq!(reduced.values(), &[1.0, 3.0]);
+
+        let masked = complex_array(
+            &[3],
+            &[(f64::NAN, 7.0), (2.0, f64::NAN), (3.0, -4.0)],
+            dtype,
+        );
+        assert_eq!(masked.nanmin(None, false).unwrap().values(), &[3.0, -4.0]);
+        assert_eq!(masked.nanmax(None, false).unwrap().values(), &[3.0, -4.0]);
+        assert_eq!(masked.nanargmin(None).unwrap().values(), &[2.0]);
+        assert_eq!(masked.nanargmax(None).unwrap().values(), &[2.0]);
+        let minimum = masked.reduce_min(None, false).unwrap();
+        assert!(minimum.values()[0].is_nan());
+        assert_eq!(minimum.values()[1], 7.0);
+
+        let rounded = complex_array(&[2], &[(16_777_216.0, 0.0), (-3.0, 0.0)], dtype);
+        let expected = if dtype == DType::Complex64 {
+            16_777_220.0
+        } else {
+            16_777_219.0
+        };
+        assert_eq!(rounded.ptp(None).unwrap().values(), &[expected, 0.0]);
+    }
+}
+
+#[test]
+fn complex_extrema_shapes_axes_keepdims_and_source_precision_match_numpy() {
+    let mut batch = OracleBatch::default();
+    // Real components that collapse to one float32 value must be compared by
+    // their imaginary components after source rounding, not as raw f64 cells.
+    let pattern = [
+        (16_777_217.0, 1.0),
+        (16_777_216.0, 2.0),
+        (-3.0, 4.0),
+        (-3.0, -5.0),
+        (2.0, -100.0),
+        (2.0, 100.0),
+        (16_777_217.0, -1.0),
+        (16_777_216.0, -2.0),
+        (1.0e-50, -1.0e-50),
+        (-0.0, 0.0),
+        (0.0, -0.0),
+        (3.0, 4.0),
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![2], vec![12], vec![3, 4], vec![2, 1, 3, 2]] {
+            let values = (0..shape.iter().product())
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, dtype);
+            let input = batch.add_input(&array);
+            let mut axes: Vec<_> = (0..shape.len()).map(|axis| Some(axis as isize)).collect();
+            axes.extend([
+                None,
+                Some(-1),
+                Some(0),
+                Some(shape.len() as isize),
+                Some(-6),
+            ]);
+            for axis in axes {
+                for op in ["min", "max", "nanmin", "nanmax"] {
+                    for keepdims in [false, true] {
+                        batch.push_extrema_single(input, &array, op, axis, keepdims);
+                    }
+                }
+                for op in ["argmin", "argmax", "nanargmin", "nanargmax", "ptp"] {
+                    batch.push_extrema_single(input, &array, op, axis, false);
+                }
+            }
+            let mut tuples = axis_subsets(shape.len());
+            tuples.extend([vec![0, 0], vec![0, -(shape.len() as isize)], vec![6]]);
+            for axes in tuples {
+                for op in ["min", "max"] {
+                    for keepdims in [false, true] {
+                        batch.push(input, &array, op, &axes, keepdims, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_extrema_preserve_first_nan_pairs_signed_zeros_and_infinity_ties() {
+    let mut batch = OracleBatch::default();
+    let cases = [
+        vec![(0.0, -0.0), (-0.0, 0.0)],
+        vec![(-0.0, 0.0), (0.0, -0.0)],
+        vec![(f64::NAN, 7.0), (2.0, f64::NAN), (f64::NAN, -3.0)],
+        vec![(2.0, f64::NAN), (f64::NAN, -3.0), (f64::NAN, 7.0)],
+        vec![(f64::NAN, 7.0), (f64::INFINITY, 0.0)],
+        vec![(f64::NAN, 7.0), (f64::INFINITY, -2.0)],
+        vec![(f64::INFINITY, 0.0), (f64::NAN, 7.0)],
+        vec![(f64::NAN, 7.0), (f64::NEG_INFINITY, 0.0)],
+        vec![(f64::NAN, 7.0), (f64::NEG_INFINITY, 2.0)],
+        vec![(f64::NEG_INFINITY, 0.0), (f64::NAN, 7.0)],
+        vec![(1.0, f64::NEG_INFINITY), (1.0, f64::INFINITY)],
+        vec![(1.0e100, -2.0), (f64::INFINITY, 2.0)],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for values in &cases {
+            for shape in [
+                vec![values.len()],
+                vec![1, values.len()],
+                vec![values.len(), 1],
+            ] {
+                let array = complex_array(&shape, values, dtype);
+                let input = batch.add_input(&array);
+                for axis in [None, Some(0), Some(-1)] {
+                    for op in ["min", "max", "nanmin", "nanmax"] {
+                        for keepdims in [false, true] {
+                            batch.push_extrema_single(input, &array, op, axis, keepdims);
+                        }
+                    }
+                    for op in ["argmin", "argmax", "nanargmin", "nanargmax", "ptp"] {
+                        batch.push_extrema_single(input, &array, op, axis, false);
+                    }
+                }
+                for axes in axis_subsets(shape.len()) {
+                    for op in ["min", "max"] {
+                        batch.push(input, &array, op, &axes, false, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_extrema_joint_tuple_order_and_nan_lane_errors_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let pattern = [
+        (0.0, -0.0),
+        (-0.0, 0.0),
+        (f64::NAN, 3.0),
+        (2.0, f64::NAN),
+        (f64::NAN, -7.0),
+        (1.0, 8.0),
+        (1.0, -8.0),
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for width in [1, 2, 7, 8, 9, 17, 129] {
+            let values = (0..3 * 4 * width)
+                .map(|index| {
+                    if index / width % 4 == 2 {
+                        // Some retained-axis choices contain all-NaN lanes.
+                        (index as f64, f64::NAN)
+                    } else {
+                        pattern[index % pattern.len()]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let array = complex_array(&[3, 4, width], &values, dtype);
+            let input = batch.add_input(&array);
+            for axes in axis_subsets(3) {
+                for op in ["min", "max"] {
+                    for keepdims in [false, true] {
+                        batch.push(input, &array, op, &axes, keepdims, 0);
+                    }
+                }
+            }
+            for axis in [None, Some(0), Some(1), Some(-1)] {
+                for op in ["min", "max", "nanmin", "nanmax"] {
+                    for keepdims in [false, true] {
+                        batch.push_extrema_single(input, &array, op, axis, keepdims);
+                    }
+                }
+                for op in ["argmin", "argmax", "nanargmin", "nanargmax", "ptp"] {
+                    batch.push_extrema_single(input, &array, op, axis, false);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_extrema_empty_inputs_and_selected_zero_axes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![0], vec![0, 2], vec![2, 0], vec![0, 0], vec![2, 0, 3]] {
+            let array = complex_array(&shape, &[], dtype);
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1), Some(3)] {
+                for op in ["min", "max", "nanmin", "nanmax"] {
+                    for keepdims in [false, true] {
+                        batch.push_extrema_single(input, &array, op, axis, keepdims);
+                    }
+                }
+                for op in ["argmin", "argmax", "nanargmin", "nanargmax", "ptp"] {
+                    batch.push_extrema_single(input, &array, op, axis, false);
+                }
+            }
+            for axes in axis_subsets(shape.len()) {
+                for op in ["min", "max"] {
+                    for keepdims in [false, true] {
+                        batch.push(input, &array, op, &axes, keepdims, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_extrema_validate_storage_and_skip_unused_empty_extents() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let malformed = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], dtype).unwrap();
+        for result in [
+            malformed.reduce_min(None, false),
+            malformed.reduce_max(None, true),
+            malformed.reduce_min_axes(&[], false),
+            malformed.reduce_max_axes(&[5], true),
+            malformed.nanmin(Some(0), false),
+            malformed.nanmax(None, true),
+            malformed.reduce_argmin(None),
+            malformed.reduce_argmax(Some(5)),
+            malformed.nanargmin(None),
+            malformed.nanargmax(Some(-1)),
+            malformed.ptp(None),
+        ] {
+            assert!(matches!(result, Err(UFuncError::Msg(message))
+                if message.contains("interleaved trailing-dimension shape")));
+        }
+        let empty = complex_array(&[usize::MAX, 0, 3], &[], dtype);
+        for result in [
+            empty.reduce_min(Some(0), false),
+            empty.reduce_max(Some(0), false),
+            empty.reduce_min_axes(&[0], false),
+            empty.reduce_max_axes(&[0], false),
+            empty.nanmin(Some(0), false),
+            empty.nanmax(Some(0), false),
+            empty.ptp(Some(0)),
+        ] {
+            let result = result.unwrap();
+            assert_eq!(result.shape(), &[0, 3, 2]);
+            assert!(result.values().is_empty());
+        }
+        for result in [
+            empty.reduce_argmin(Some(0)),
+            empty.reduce_argmax(Some(0)),
+            empty.nanargmin(Some(0)),
+            empty.nanargmax(Some(0)),
+        ] {
+            let result = result.unwrap();
+            assert_eq!(result.shape(), &[0, 3]);
+            assert!(result.values().is_empty());
+        }
+        assert!(empty.reduce_min_axes(&[1], false).is_err());
+        assert!(empty.reduce_max_axes(&[0, 1], false).is_err());
+        assert!(empty.nanargmin(Some(1)).is_err());
+        assert!(empty.nanargmax(Some(1)).is_err());
     }
 }
