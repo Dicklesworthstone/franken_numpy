@@ -70,6 +70,12 @@
 - [x] `MaskedArray` reshape, flatten, expansion, squeeze, and transpose keep existing physical masks aligned with logical complex data, preserving mask dtype, raw payload, exact integer sidecars, and fill/hard-mask settings.
 - [x] `complex_shape_transforms.rs` adds NumPy differential cases for logical shapes, component bits and signed zero, all numeric dtypes, C/F order, tuple and negative axes, scalar/empty inputs, malformed layouts, exact integer sidecars, and parallel-sized relocation kernels. Executable validation status is recorded with the implementing commit.
 
+## GROUP 10: logical complex matrix and vector contractions
+- [x] `matmul` handles logical complex dimensions, vector promotion, broadcasted batches, mixed numeric input dtypes, declared source precision, exact wide-integer conversion, empty contractions, and checked physical output capacity. Complex128 uses the existing complex matrix kernel; Complex64 accumulates in its component type.
+- [x] `matvec` and `vecmat` preserve logical output dimensions and singleton batch axes; `vecmat` conjugates the vector. Complex `vdot` flattens complete elements and conjugates the first operand; `vecdot` contracts independently normalized logical axes and broadcasts the remaining dimensions.
+- [x] `complex_matmul.rs` adds 11 tests with 1,866 NumPy differential cases plus direct arithmetic, malformed-layout, and allocation assertions. Finite comparisons use componentwise forward-error bounds derived from promoted input values; executable Rust validation remains recorded with the implementing commit.
+- [D] Portable complex accumulation can differ from vendor BLAS in reduction order, rounding, cancellation, and exceptional-value behavior. These APIs do not yet establish backend-identical numerical or floating-error-policy parity.
+
 ---
 
 ## ALREADY DONE (earlier this session)

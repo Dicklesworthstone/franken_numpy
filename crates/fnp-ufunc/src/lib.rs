@@ -15756,8 +15756,164 @@ impl UFuncArray {
         })
     }
 
-    /// Matrix multiplication (2-D x 2-D).
+    /// Multiply logical complex elements without exposing the storage component
+    /// axis to matrix or batch dimensions. Real inputs use the same typed cast
+    /// bridge as complex reductions, including exact wide-integer conversion.
+    fn matmul_complex(&self, rhs: &Self) -> Result<Self, UFuncError> {
+        let mut a_shape = self.complex_logical_shape("matmul")?;
+        let mut b_shape = rhs.complex_logical_shape("matmul")?;
+        if a_shape.is_empty() || b_shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "matmul: inputs must have at least one dimension".to_string(),
+            ));
+        }
+        for input in [self, rhs] {
+            if !(input.dtype.is_numeric() || input.dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "matmul: unsupported input dtype {:?}",
+                    input.dtype
+                )));
+            }
+        }
+        let dtype = self.complex_output_dtype(Some(rhs));
+        let a_is_1d = a_shape.len() == 1;
+        let b_is_1d = b_shape.len() == 1;
+        if a_is_1d {
+            a_shape.insert(0, 1);
+        }
+        if b_is_1d {
+            b_shape.push(1);
+        }
+        let adim = a_shape.len();
+        let bdim = b_shape.len();
+        let (m, k) = (a_shape[adim - 2], a_shape[adim - 1]);
+        let (b_k, n) = (b_shape[bdim - 2], b_shape[bdim - 1]);
+        if k != b_k {
+            return Err(UFuncError::Msg(format!(
+                "matmul: logical shapes {:?} and {:?} not aligned: {k} != {b_k}",
+                a_shape, b_shape
+            )));
+        }
+        let a_batch = &a_shape[..adim - 2];
+        let b_batch = &b_shape[..bdim - 2];
+        let out_batch = broadcast_shape(a_batch, b_batch).map_err(UFuncError::Shape)?;
+        let mut shape = out_batch.clone();
+        shape.extend([m, n]);
+        let logical_count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = logical_count
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if a_is_1d {
+            shape.remove(shape.len() - 2);
+        }
+        if b_is_1d {
+            shape.pop();
+        }
+        shape.push(2);
+        let mut values = try_zeroed_f64(physical_count, "matmul")?;
+        // No source cells or stride products are needed for empty outputs or
+        // empty contractions. In particular, a zero core dimension yields zeros.
+        if logical_count == 0 || k == 0 {
+            return Ok(Self {
+                shape,
+                values,
+                dtype,
+                integer_sidecar: None,
+            });
+        }
+        let matrix_size = |rows: usize, cols: usize| {
+            rows.checked_mul(cols)
+                .and_then(|count| count.checked_mul(2))
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        };
+        let a_matrix_size = matrix_size(m, k)?;
+        let b_matrix_size = matrix_size(k, n)?;
+        let out_matrix_size = matrix_size(m, n)?;
+        let lhs = self.cast_numeric_storage(dtype, false)?;
+        let rhs = rhs.cast_numeric_storage(dtype, false)?;
+        let a_steps = aligned_broadcast_axis_steps(
+            out_batch.len(),
+            a_batch,
+            &contiguous_strides_elems(a_batch),
+        );
+        let b_steps = aligned_broadcast_axis_steps(
+            out_batch.len(),
+            b_batch,
+            &contiguous_strides_elems(b_batch),
+        );
+        let batch_count = logical_count / (m * n);
+        let mut coordinates = vec![0usize; out_batch.len()];
+        let (mut a_batch_flat, mut b_batch_flat) = (0usize, 0usize);
+        for batch in 0..batch_count {
+            let a_start = a_batch_flat * a_matrix_size;
+            let b_start = b_batch_flat * b_matrix_size;
+            let out_start = batch * out_matrix_size;
+            let a = &lhs.values[a_start..a_start + a_matrix_size];
+            let b = &rhs.values[b_start..b_start + b_matrix_size];
+            let out = &mut values[out_start..out_start + out_matrix_size];
+            if dtype == DType::Complex128 {
+                out.copy_from_slice(&fnp_linalg::complex_matmul(a, b, m, k, n));
+            } else {
+                // Accumulate in the promoted component type. Accumulating f64
+                // working cells and narrowing only at the end changes complex64.
+                for row in 0..m {
+                    for inner in 0..k {
+                        let a_index = 2 * (row * k + inner);
+                        let left = (a[a_index], a[a_index + 1]);
+                        for column in 0..n {
+                            let b_index = 2 * (inner * n + column);
+                            let out_index = 2 * (row * n + column);
+                            let product = Self::complex_reduction_multiply(
+                                left,
+                                (b[b_index], b[b_index + 1]),
+                                dtype,
+                            );
+                            let sum = Self::complex_reduction_add(
+                                (out[out_index], out[out_index + 1]),
+                                product,
+                                dtype,
+                            );
+                            out[out_index] = sum.0;
+                            out[out_index + 1] = sum.1;
+                        }
+                    }
+                }
+            }
+            if batch + 1 < batch_count {
+                for axis in (0..out_batch.len()).rev() {
+                    coordinates[axis] += 1;
+                    a_batch_flat += a_steps[axis];
+                    b_batch_flat += b_steps[axis];
+                    if coordinates[axis] < out_batch[axis] {
+                        break;
+                    }
+                    coordinates[axis] = 0;
+                    a_batch_flat -= a_steps[axis] * out_batch[axis];
+                    b_batch_flat -= b_steps[axis] * out_batch[axis];
+                }
+            }
+        }
+        Ok(Self {
+            shape,
+            values,
+            dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Matrix multiplication with broadcast batch dimensions and 1-D promotion.
+    ///
+    /// Complex products use portable accumulation in the promoted component type.
+    /// Vendor BLAS may differ in reduction order, rounding, and exceptional values.
     pub fn matmul(&self, rhs: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || rhs.dtype.is_complex() {
+            return self.matmul_complex(rhs);
+        }
         let mut a_shape = self.shape.clone();
         let mut b_shape = rhs.shape.clone();
         let a_is_1d = a_shape.len() == 1;
@@ -16349,6 +16505,26 @@ impl UFuncArray {
 
     /// Vector dot product (np.vdot). Flattens both inputs and computes dot product.
     pub fn vdot(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || other.dtype.is_complex() {
+            let a_shape = self.complex_logical_shape("vdot")?;
+            let b_shape = other.complex_logical_shape("vdot")?;
+            let a_count = element_count(&a_shape).map_err(UFuncError::Shape)?;
+            let b_count = element_count(&b_shape).map_err(UFuncError::Shape)?;
+            if a_count != b_count {
+                return Err(UFuncError::Msg(format!(
+                    "vdot: input sizes must match, got {a_count} and {b_count}"
+                )));
+            }
+            // Flatten complete elements and conjugate only the first operand.
+            // The shared complex matmul path applies source precision before
+            // promotion and returns a scalar with its component axis intact.
+            let left = if self.dtype.is_complex() {
+                self.conj()?.ravel()
+            } else {
+                self.ravel()
+            };
+            return left.matmul(&other.ravel());
+        }
         if self.values.len() != other.values.len() {
             return Err(UFuncError::Msg(format!(
                 "vdot: input sizes must match, got {} and {}",
@@ -16376,6 +16552,36 @@ impl UFuncArray {
     /// The non-contracted dimensions broadcast independently of the vector axis.
     /// `axis` is normalized against each input's rank, as in NumPy.
     pub fn vecdot(&self, other: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || other.dtype.is_complex() {
+            let a_shape = self.complex_logical_shape("vecdot")?;
+            let b_shape = other.complex_logical_shape("vecdot")?;
+            if a_shape.is_empty() || b_shape.is_empty() {
+                return Err(UFuncError::Msg(
+                    "vecdot: inputs must have at least 1 dimension".to_string(),
+                ));
+            }
+            let axis = axis.unwrap_or(-1);
+            let a_axis = normalize_axis(axis, a_shape.len())?;
+            let b_axis = normalize_axis(axis, b_shape.len())?;
+            if a_shape[a_axis] != b_shape[b_axis] {
+                return Err(UFuncError::Msg(format!(
+                    "vecdot: contracted dimensions must match, got {} and {}",
+                    a_shape[a_axis], b_shape[b_axis]
+                )));
+            }
+            // Move each independently normalized logical core axis to the end.
+            // Row-by-column matmul broadcasts the remaining batch dimensions;
+            // remove exactly its two inserted unit axes, keeping batch units.
+            let left = self.moveaxis(a_axis as isize, -1)?;
+            let left = if self.dtype.is_complex() {
+                left.conj()?
+            } else {
+                left
+            };
+            let right = other.moveaxis(b_axis as isize, -1)?;
+            let product = left.expand_dims(-2)?.matmul(&right.expand_dims(-1)?)?;
+            return product.squeeze(Some(-1))?.squeeze(Some(-1));
+        }
         if self.shape.is_empty() || other.shape.is_empty() {
             return Err(UFuncError::Msg(
                 "vecdot: inputs must have at least 1 dimension".to_string(),
@@ -16465,23 +16671,26 @@ impl UFuncArray {
     ///
     /// Batch dimensions broadcast together.
     pub fn matvec(matrix: &Self, vector: &Self) -> Result<Self, UFuncError> {
-        if matrix.shape.len() < 2 {
+        let matrix_shape = matrix.complex_logical_shape("matvec")?;
+        let vector_shape = vector.complex_logical_shape("matvec")?;
+        if matrix_shape.len() < 2 {
             return Err(UFuncError::Msg(
                 "matvec: matrix must have at least 2 dimensions".to_string(),
             ));
         }
-        if vector.shape.is_empty() {
+        if vector_shape.is_empty() {
             return Err(UFuncError::Msg(
                 "matvec: vector must have at least 1 dimension".to_string(),
             ));
         }
-        if vector.shape.len() == 1 {
+        if vector_shape.len() == 1 {
             return matrix.matmul(vector);
         }
         // matmul treats a rank-2 RHS as a matrix, not a batch of vectors.
         // Give every vector its own trailing column dimension before batching.
         let mut result = matrix.matmul(&vector.expand_dims(-1)?)?;
-        result.shape.pop();
+        let column_axis = result.shape.len() - if result.dtype.is_complex() { 2 } else { 1 };
+        result.shape.remove(column_axis);
         Ok(result)
     }
 
@@ -16494,25 +16703,35 @@ impl UFuncArray {
     /// - `matrix` shape: (..., n, m)
     /// - output shape: (..., m)
     ///
-    /// Batch dimensions broadcast together.
+    /// Batch dimensions broadcast together. Complex vectors are conjugated,
+    /// matching NumPy's vecmat; matmul and matvec do not conjugate their inputs.
     pub fn vecmat(vector: &Self, matrix: &Self) -> Result<Self, UFuncError> {
-        if vector.shape.is_empty() {
+        let vector_shape = vector.complex_logical_shape("vecmat")?;
+        let matrix_shape = matrix.complex_logical_shape("vecmat")?;
+        if vector_shape.is_empty() {
             return Err(UFuncError::Msg(
                 "vecmat: vector must have at least 1 dimension".to_string(),
             ));
         }
-        if matrix.shape.len() < 2 {
+        if matrix_shape.len() < 2 {
             return Err(UFuncError::Msg(
                 "vecmat: matrix must have at least 2 dimensions".to_string(),
             ));
         }
-        if vector.shape.len() == 1 {
+        let conjugated = if vector.dtype.is_complex() {
+            Some(vector.conj()?)
+        } else {
+            None
+        };
+        let vector = conjugated.as_ref().unwrap_or(vector);
+        if vector_shape.len() == 1 {
             return vector.matmul(matrix);
         }
         // Insert a row dimension after the vector's batch axes, then remove
-        // precisely that dimension without squeezing singleton batch axes.
+        // precisely that logical dimension without touching the component axis.
         let mut result = vector.expand_dims(-2)?.matmul(matrix)?;
-        result.shape.remove(result.shape.len() - 2);
+        let row_axis = result.shape.len() - if result.dtype.is_complex() { 3 } else { 2 };
+        result.shape.remove(row_axis);
         Ok(result)
     }
 
