@@ -64,6 +64,12 @@
 - [x] Complex branches broadcast logical shapes, promote numeric dtypes, and select complete component pairs; exact integer branches retain the existing sidecar-aware real selection path
 - [x] Live NumPy coverage includes scalar/empty/broadcast inputs, mixed dtypes, source rounding, signed zero, NaN/Inf, exact wide integers, and malformed complex layouts (`complex_selection.rs`)
 
+## GROUP 9: logical complex shape transformations
+- [x] `reshape`, C/F/A `reshape_order`, transpose/permutation, matrix transpose, squeeze/expand tuple axes, swap/move/roll axes, ravel/flatten, and `broadcast_to` operate on logical complex elements while retaining the trailing physical component dimension and declared component precision. Reshape accepts one negative inferred extent and case-insensitive order tokens.
+- [x] Flip, tuple-axis flip, left/right and up/down flips, and quarter-turn rotations validate logical dimensions and keep real/imaginary pairs intact. Duplicate flip axes are rejected; real transforms retain exact wide-integer sidecars.
+- [x] `MaskedArray` reshape, flatten, expansion, squeeze, and transpose keep existing physical masks aligned with logical complex data, preserving mask dtype, raw payload, exact integer sidecars, and fill/hard-mask settings.
+- [x] `complex_shape_transforms.rs` adds NumPy differential cases for logical shapes, component bits and signed zero, all numeric dtypes, C/F order, tuple and negative axes, scalar/empty inputs, malformed layouts, exact integer sidecars, and parallel-sized relocation kernels. Executable validation status is recorded with the implementing commit.
+
 ---
 
 ## ALREADY DONE (earlier this session)
@@ -83,5 +89,6 @@
 - [x] `place` and `putmask` validate logical mask sizes and safe array casts, evaluate numeric masks at their declared precision, and assign complete complex elements or exact wide integers. Their distinct selected-position and flat-position value cycles, empty-value behavior, and validation precedence have live NumPy coverage (`complex_mask_mutation.rs`).
 - [x] `put` and `put_along_axis` scatter complete numeric logical elements with source/destination precision, exact wide integers, repeated and negative indices, and logical axis/value broadcasting. Live NumPy coverage includes scalar versus array cast timing, destination state after errors, and uint32 conversion-loop boundaries (`complex_scatter.rs`).
 - [x] Scalar `boolean_set` accepts full, prefix, scalar, and empty Boolean masks over logical dimensions, writes complete complex pairs, and preserves unselected exact wide integers. Python-float scalar packing truncates valid integer values, rejects invalid/out-of-range integers before writes, and reports floating overflow even for empty selections; live NumPy coverage checks all numeric dtypes and floating-error policies (`complex_boolean_assignment.rs`).
-- [D] Complex logical-element handling remains incomplete in scalar mutation helpers such as `fancy_set` and `put_mask`. Array-valued Boolean assignment is not yet exposed by `boolean_set`. The separate NumPy `ComplexWarning` channel for discarding imaginary components is not yet modeled by the Rust floating-error runtime.
+- [x] Scalar-sequence `fancy_set` and `put_mask` preserve complete logical complex elements and exact integer sidecars. Python-float values are packed before writes; short sequences cycle, flat assignment preserves earlier writes before a later bounds error, and floating overflow reporting remains per scalar. Differential cases are added to `complex_mask_mutation.rs`.
+- [D] Array-valued Boolean assignment is not yet exposed by `boolean_set`. The separate NumPy `ComplexWarning` channel for discarding imaginary components is not yet modeled by the Rust floating-error runtime.
 - [x] Rust-core `reduce_sum_axes_with_dtype`, `reduce_prod_axes_with_dtype`, `reduce_mean_axes_with_dtype`, `reduce_var_axes_with_dtype`, and `reduce_std_axes_with_dtype` support joint tuple reductions across all numeric accumulator dtypes; dedicated coverage includes exact integer wrapping, complex-to-real deviations, conversion buffers, float16 source precision, and impossible output capacities

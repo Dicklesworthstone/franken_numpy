@@ -6670,9 +6670,6 @@ impl UFuncArray {
     /// Equivalent to `self.transpose(None)` for arrays with 2+ dimensions.
     /// For 0-D and 1-D arrays, returns a copy (same as NumPy).
     pub fn t(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() <= 1 {
-            return Ok(self.clone());
-        }
         self.transpose(None)
     }
 
@@ -11638,17 +11635,51 @@ impl UFuncArray {
         }
     }
 
-    /// Reshape the array to `new_shape`, supporting a single `-1` dimension for inference.
+    /// Copy a validated logical shape while keeping complex components last.
+    fn copy_with_logical_shape(&self, mut shape: Vec<usize>) -> Self {
+        if self.dtype.is_complex() {
+            shape.push(2);
+        }
+        let mut result = self.clone();
+        result.shape = shape;
+        result.round_complex_transform_components();
+        result
+    }
+
+    /// Complex64 values use f64 working cells, but a relocation observes the
+    /// declared source precision just like a copy from a NumPy complex64 buffer.
+    fn round_complex_transform_components(&mut self) {
+        if self.dtype == DType::Complex64 {
+            for value in &mut self.values {
+                *value = f64::from(*value as f32);
+            }
+        }
+    }
+
+    /// NumPy accepts any negative extent as its single inferred dimension.
+    /// Canonicalize it to the SCE's -1 marker before validating the shape.
+    fn resolve_numpy_reshape(
+        new_shape: &[isize],
+        old_count: usize,
+    ) -> Result<Vec<usize>, UFuncError> {
+        let canonical = new_shape.iter().any(|&dimension| dimension < -1).then(|| {
+            new_shape
+                .iter()
+                .map(|&dimension| if dimension < 0 { -1 } else { dimension })
+                .collect::<Vec<_>>()
+        });
+        fix_unknown_dimension(canonical.as_deref().unwrap_or(new_shape), old_count)
+            .map_err(UFuncError::Shape)
+    }
+
+    /// Reshape the array to `new_shape`, supporting one negative dimension for inference.
     /// Matches `numpy.reshape` semantics: total element count must be preserved.
+    /// Complex shapes count complete elements, excluding the stored component axis.
     pub fn reshape(&self, new_shape: &[isize]) -> Result<Self, UFuncError> {
-        let old_count = self.values.len();
-        let resolved = fix_unknown_dimension(new_shape, old_count).map_err(UFuncError::Shape)?;
-        Ok(Self {
-            shape: resolved,
-            values: self.values.clone(),
-            dtype: self.dtype,
-            integer_sidecar: self.cloned_integer_sidecar(),
-        })
+        let logical_shape = self.complex_logical_shape("reshape")?;
+        let old_count = element_count(&logical_shape).map_err(UFuncError::Shape)?;
+        let resolved = Self::resolve_numpy_reshape(new_shape, old_count)?;
+        Ok(self.copy_with_logical_shape(resolved))
     }
 
     /// Reshape with memory order (`np.reshape(a, shape, order='C'|'F')`).
@@ -11656,31 +11687,28 @@ impl UFuncArray {
     /// `order='C'` (default) reads/writes elements in C (row-major) order.
     /// `order='F'` reads/writes elements in Fortran (column-major) order.
     pub fn reshape_order(&self, new_shape: &[isize], order: &str) -> Result<Self, UFuncError> {
-        let old_count = self.values.len();
-        let resolved = fix_unknown_dimension(new_shape, old_count).map_err(UFuncError::Shape)?;
-        if order == "C" || order == "A" || order == "K" {
-            return Ok(Self {
-                shape: resolved,
-                values: self.values.clone(),
-                dtype: self.dtype,
-                integer_sidecar: self.cloned_integer_sidecar(),
-            });
-        }
-        if order != "F" {
+        if !matches!(order, "C" | "F" | "A" | "c" | "f" | "a") {
             return Err(UFuncError::Msg(format!(
-                "reshape: order must be 'C' or 'F', got '{order}'"
+                "reshape: order must be 'C', 'F', or 'A', got '{order}'"
             )));
+        }
+        let old_shape = self.complex_logical_shape("reshape")?;
+        let n = element_count(&old_shape).map_err(UFuncError::Shape)?;
+        let mut resolved = Self::resolve_numpy_reshape(new_shape, n)?;
+        // Owned arrays are C-contiguous, so automatic order has C semantics.
+        if !order.eq_ignore_ascii_case("F") {
+            return Ok(self.copy_with_logical_shape(resolved));
         }
         // F-order reshape: read source in Fortran (column-major) order,
         // write to output in Fortran (column-major) order.
         // Since we store in C-order, we compute the C-order indices for both.
-        let n = self.values.len();
-        let old_shape = &self.shape;
         let old_ndim = old_shape.len();
-        let old_c_strides = c_strides_elems(old_shape);
+        let old_c_strides = c_strides_elems(&old_shape);
         let new_ndim = resolved.len();
         let new_c_strides = c_strides_elems(&resolved);
-        let mut values = vec![0.0; n];
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let mut values = try_zeroed_f64(self.values.len(), "reshape")?;
+        let mut source_indices = self.integer_sidecar.as_ref().map(|_| vec![0usize; n]);
         for f_flat in 0..n {
             // Convert F-order flat index to SOURCE multi-index, then to C-order source index
             let mut rem = f_flat;
@@ -11704,21 +11732,60 @@ impl UFuncArray {
                     out_c += coord * new_c_strides[d];
                 }
             }
-            if src_c < n && out_c < n {
-                values[out_c] = self.values[src_c];
+            values[out_c * width..(out_c + 1) * width]
+                .copy_from_slice(&self.values[src_c * width..(src_c + 1) * width]);
+            if let Some(indices) = &mut source_indices {
+                indices[out_c] = src_c;
             }
         }
-        Ok(Self {
+        if self.dtype.is_complex() {
+            resolved.push(2);
+        }
+        let mut result = Self {
             shape: resolved,
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
-        })
+            integer_sidecar: source_indices
+                .as_ref()
+                .and_then(|indices| self.reindexed_integer_sidecar(indices)),
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     /// Transpose (permute) axes. When `axes` is `None`, reverses all dimensions.
     /// Matches `numpy.transpose` semantics.
     pub fn transpose(&self, axes: Option<&[usize]>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let ndim = self.complex_logical_shape("transpose")?.len();
+            let mut permutation = match axes {
+                Some(axes) if axes.len() == ndim => axes.to_vec(),
+                Some(axes) => {
+                    return Err(UFuncError::AxisOutOfBounds {
+                        axis: axes.len() as isize,
+                        ndim,
+                    });
+                }
+                None => (0..ndim).rev().collect(),
+            };
+            if let Some(&axis) = permutation.iter().find(|&&axis| axis >= ndim) {
+                return Err(UFuncError::AxisOutOfBounds {
+                    axis: axis as isize,
+                    ndim,
+                });
+            }
+            // The physical permutation fixes the component axis, so the existing
+            // suffix-block kernel moves complete real/imaginary pairs together.
+            permutation.push(ndim);
+            let mut result = self.transpose_physical(Some(&permutation))?;
+            result.round_complex_transform_components();
+            return Ok(result);
+        }
+        self.transpose_physical(axes)
+    }
+
+    /// Relocate physical working cells after the public logical-axis validation.
+    fn transpose_physical(&self, axes: Option<&[usize]>) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         let perm: Vec<usize> = match axes {
             Some(ax) => {
@@ -11979,7 +12046,7 @@ impl UFuncArray {
 
     /// Transpose the last two axes of an array (np.matrix_transpose, NumPy 2.0).
     pub fn matrix_transpose(&self) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
+        let ndim = self.complex_logical_shape("matrix_transpose")?.len();
         if ndim < 2 {
             return Err(UFuncError::Msg(
                 "matrix_transpose: input must be at least 2-D".to_string(),
@@ -12003,52 +12070,31 @@ impl UFuncArray {
     /// Return a 1-D copy of the array. Matches `numpy.ndarray.flatten()`.
     #[must_use]
     pub fn flatten(&self) -> Self {
-        Self {
-            shape: vec![self.values.len()],
-            values: self.values.clone(),
-            dtype: self.dtype,
-            integer_sidecar: self.cloned_integer_sidecar(),
-        }
+        self.ravel()
     }
 
     /// Remove size-1 dimensions. When `axis` is `None`, removes all size-1 dims.
     /// Matches `numpy.squeeze` semantics.
     pub fn squeeze(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        let mut shape = self.complex_logical_shape("squeeze")?;
         match axis {
             None => {
-                let new_shape: Vec<usize> =
-                    self.shape.iter().copied().filter(|&d| d != 1).collect();
-                let new_shape = if new_shape.is_empty() && !self.shape.is_empty() {
-                    // Scalar result — keep shape empty (0-d array)
-                    Vec::new()
-                } else {
-                    new_shape
-                };
-                Ok(Self {
-                    shape: new_shape,
-                    values: self.values.clone(),
-                    dtype: self.dtype,
-                    integer_sidecar: self.cloned_integer_sidecar(),
-                })
+                shape.retain(|&dimension| dimension != 1);
             }
+            // NumPy permits scalar axis=0/-1 on a scalar, but not tuple axes.
+            Some(0 | -1) if shape.is_empty() => {}
             Some(axis) => {
-                let axis = normalize_axis(axis, self.shape.len())?;
-                if self.shape[axis] != 1 {
+                let axis = normalize_axis(axis, shape.len())?;
+                if shape[axis] != 1 {
                     return Err(UFuncError::Shape(ShapeError::IncompatibleElementCount {
-                        old: self.shape[axis],
+                        old: shape[axis],
                         new: 1,
                     }));
                 }
-                let mut new_shape = self.shape.clone();
-                new_shape.remove(axis);
-                Ok(Self {
-                    shape: new_shape,
-                    values: self.values.clone(),
-                    dtype: self.dtype,
-                    integer_sidecar: self.cloned_integer_sidecar(),
-                })
+                shape.remove(axis);
             }
         }
+        Ok(self.copy_with_logical_shape(shape))
     }
 
     /// Squeeze multiple axes simultaneously (np.squeeze with tuple of axes).
@@ -12056,101 +12102,52 @@ impl UFuncArray {
     /// All specified axes must have size 1. Axes are removed from highest to
     /// lowest to preserve correct indexing.
     pub fn squeeze_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
-        let mut normalized: Vec<usize> = axes
-            .iter()
-            .map(|&a| normalize_axis(a, self.shape.len()))
-            .collect::<Result<_, _>>()?;
+        let mut shape = self.complex_logical_shape("squeeze")?;
+        let normalized = normalize_reduction_axes(axes, shape.len())?;
         for &ax in &normalized {
-            if self.shape[ax] != 1 {
+            if shape[ax] != 1 {
                 return Err(UFuncError::Shape(ShapeError::IncompatibleElementCount {
-                    old: self.shape[ax],
+                    old: shape[ax],
                     new: 1,
                 }));
             }
         }
-        // Sort descending so we remove from the end first
-        normalized.sort_unstable();
-        normalized.dedup();
-        let mut new_shape = self.shape.clone();
-        for &ax in normalized.iter().rev() {
-            new_shape.remove(ax);
+        for ax in normalized {
+            shape.remove(ax);
         }
-        Ok(Self {
-            shape: new_shape,
-            values: self.values.clone(),
-            dtype: self.dtype,
-            integer_sidecar: self.cloned_integer_sidecar(),
-        })
+        Ok(self.copy_with_logical_shape(shape))
     }
 
     /// Insert a size-1 dimension at position `axis`. Matches `numpy.expand_dims`.
     pub fn expand_dims(&self, axis: isize) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len() + 1; // new ndim after insertion
-        let axis = if axis < 0 {
-            let normalized = ndim as isize + axis;
-            if normalized < 0 {
-                return Err(UFuncError::AxisOutOfBounds { axis, ndim });
-            }
-            normalized as usize
-        } else {
-            let a = axis as usize;
-            if a > self.shape.len() {
-                return Err(UFuncError::AxisOutOfBounds { axis, ndim });
-            }
-            a
-        };
-        let mut new_shape = self.shape.clone();
-        new_shape.insert(axis, 1);
-        Ok(Self {
-            shape: new_shape,
-            values: self.values.clone(),
-            dtype: self.dtype,
-            integer_sidecar: self.cloned_integer_sidecar(),
-        })
+        let mut shape = self.complex_logical_shape("expand_dims")?;
+        let axis = normalize_axis(axis, shape.len() + 1)?;
+        shape.insert(axis, 1);
+        Ok(self.copy_with_logical_shape(shape))
     }
 
     /// Insert size-1 dimensions at multiple positions (np.expand_dims with tuple, NumPy 1.18+).
     ///
     /// Axes are normalized relative to the final ndim (original ndim + number of new axes).
     pub fn expand_dims_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
-        let new_ndim = self.shape.len() + axes.len();
-        let mut normalized: Vec<usize> = axes
-            .iter()
-            .map(|&a| {
-                let n = if a < 0 {
-                    (new_ndim as isize + a) as usize
-                } else {
-                    a as usize
-                };
-                if n > new_ndim {
-                    Err(UFuncError::AxisOutOfBounds {
-                        axis: a,
-                        ndim: new_ndim,
-                    })
-                } else {
-                    Ok(n)
-                }
-            })
-            .collect::<Result<_, _>>()?;
-        normalized.sort_unstable();
-        let mut new_shape = self.shape.clone();
-        for (offset, &ax) in normalized.iter().enumerate() {
-            new_shape.insert(ax.min(new_shape.len()), 1);
-            let _ = offset; // insertions shift indices but we sorted ascending
+        let mut shape = self.complex_logical_shape("expand_dims")?;
+        let new_ndim = shape
+            .len()
+            .checked_add(axes.len())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let normalized = normalize_reduction_axes(axes, new_ndim)?;
+        // Ascending insertions use positions in the completed output shape.
+        for &axis in normalized.iter().rev() {
+            shape.insert(axis, 1);
         }
-        Ok(Self {
-            shape: new_shape,
-            values: self.values.clone(),
-            dtype: self.dtype,
-            integer_sidecar: self.cloned_integer_sidecar(),
-        })
+        Ok(self.copy_with_logical_shape(shape))
     }
 
     /// Swap two axes of an array.
     ///
     /// Mimics `np.swapaxes(a, axis1, axis2)`.
     pub fn swapaxes(&self, axis1: isize, axis2: isize) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
+        let ndim = self.complex_logical_shape("swapaxes")?.len();
         let a1 = normalize_axis(axis1, ndim)?;
         let a2 = normalize_axis(axis2, ndim)?;
         let mut perm: Vec<usize> = (0..ndim).collect();
@@ -12178,33 +12175,33 @@ impl UFuncArray {
                 "moveaxis: source and destination must have same length".to_string(),
             ));
         }
-        let ndim = self.shape.len();
-        let mut srcs: Vec<usize> = source
+        let ndim = self.complex_logical_shape("moveaxis")?.len();
+        let srcs: Vec<usize> = source
             .iter()
             .map(|&s| normalize_axis(s, ndim))
             .collect::<Result<_, _>>()?;
-        let mut dsts: Vec<usize> = destination
+        let dsts: Vec<usize> = destination
             .iter()
             .map(|&d| normalize_axis(d, ndim))
             .collect::<Result<_, _>>()?;
+        for (name, axes) in [("source", &srcs), ("destination", &dsts)] {
+            let mut seen = vec![false; ndim];
+            for &axis in axes {
+                if std::mem::replace(&mut seen[axis], true) {
+                    return Err(UFuncError::Msg(format!(
+                        "moveaxis: repeated axis in {name}"
+                    )));
+                }
+            }
+        }
 
-        // Build permutation: NumPy algorithm
-        // 1. Sort (source, destination) pairs by source
-        let mut order: Vec<usize> = (0..srcs.len()).collect();
-        order.sort_by_key(|&i| srcs[i]);
-        srcs = order.iter().map(|&i| srcs[i]).collect();
-        dsts = order.iter().map(|&i| dsts[i]).collect();
-
-        // 2. Build perm by removing sources and inserting at destinations
+        // Remove all sources, then insert each at its final destination in order.
         let mut perm: Vec<usize> = (0..ndim).filter(|a| !srcs.contains(a)).collect();
-        // Sort destinations for correct insertion order
         let mut dst_src_pairs: Vec<(usize, usize)> =
             dsts.iter().copied().zip(srcs.iter().copied()).collect();
         dst_src_pairs.sort_by_key(|&(d, _)| d);
-        for (i, &(d, s)) in dst_src_pairs.iter().enumerate() {
-            perm.insert(d.min(perm.len()), s);
-            // Adjust subsequent insertion points if needed
-            let _ = i; // pairs are pre-sorted
+        for (destination, source) in dst_src_pairs {
+            perm.insert(destination, source);
         }
 
         self.transpose(Some(&perm))
@@ -12215,7 +12212,7 @@ impl UFuncArray {
     /// Mimics `np.rollaxis(a, axis, start=0)`.
     /// Rolls `axis` backwards until it lies before `start`.
     pub fn rollaxis(&self, axis: isize, start: isize) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
+        let ndim = self.complex_logical_shape("rollaxis")?.len();
         let ax = normalize_axis(axis, ndim)?;
         // start can be 0..=ndim
         let st = if start < 0 {
@@ -12669,41 +12666,25 @@ impl UFuncArray {
     ///
     /// Rotates in the plane defined by `axes`. Default is `(0, 1)`.
     pub fn rot90_axes(&self, k: i32, axes: (isize, isize)) -> Result<Self, UFuncError> {
-        if self.shape.len() < 2 {
+        let logical_shape = self.complex_logical_shape("rot90")?;
+        if logical_shape.len() < 2 {
             return Err(UFuncError::Msg(
                 "rot90 requires at least 2-D input".to_string(),
             ));
         }
-        let ax0 = normalize_axis(axes.0, self.shape.len())? as isize;
-        let ax1 = normalize_axis(axes.1, self.shape.len())? as isize;
+        let ax0 = normalize_axis(axes.0, logical_shape.len())? as isize;
+        let ax1 = normalize_axis(axes.1, logical_shape.len())? as isize;
         if ax0 == ax1 {
             return Err(UFuncError::Msg("rot90: axes must be different".to_string()));
         }
         let k = k.rem_euclid(4);
         match k {
-            0 => Ok(self.clone()),
+            0 => Ok(self.copy_with_logical_shape(logical_shape)),
             1 => self.swapaxes(ax0, ax1).and_then(|t| t.flip(Some(ax0))),
             // A rank-2 half-turn reverses both axes, which is exactly one
-            // reverse traversal of the contiguous value plane. The generic
-            // path below materializes two full flip intermediates.
-            2 if self.shape.len() == 2 => {
-                let values = self.values.iter().rev().copied().collect();
-                let integer_sidecar = match &self.integer_sidecar {
-                    Some(IntegerSidecar::I64(v)) => {
-                        Some(IntegerSidecar::I64(v.iter().rev().copied().collect()))
-                    }
-                    Some(IntegerSidecar::U64(v)) => {
-                        Some(IntegerSidecar::U64(v.iter().rev().copied().collect()))
-                    }
-                    None => None,
-                };
-                Ok(Self {
-                    shape: self.shape.clone(),
-                    values,
-                    dtype: self.dtype,
-                    integer_sidecar,
-                })
-            }
+            // reverse traversal of the logical elements. Keep complex pairs
+            // together and avoid materializing two full flip intermediates.
+            2 if logical_shape.len() == 2 => self.flip(None),
             2 => self.flip(Some(ax0)).and_then(|f| f.flip(Some(ax1))),
             3 => self.flip(Some(ax0)).and_then(|f| f.swapaxes(ax0, ax1)),
             _ => Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
@@ -15455,10 +15436,18 @@ impl UFuncArray {
     }
 
     pub fn flip(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        match axis {
+        let logical_shape = self.complex_logical_shape("flip")?;
+        let mut result = match axis {
             None => {
                 let mut values = self.values.clone();
                 values.reverse();
+                if self.dtype.is_complex() {
+                    // Reversing all physical cells also reverses each pair.
+                    // Restore real/imaginary order within every logical element.
+                    for pair in values.chunks_exact_mut(2) {
+                        pair.swap(0, 1);
+                    }
+                }
                 let mut sidecar_vals = self.cloned_integer_sidecar();
                 if let Some(ref mut sidecar) = sidecar_vals {
                     match sidecar {
@@ -15466,15 +15455,15 @@ impl UFuncArray {
                         IntegerSidecar::U64(v) => v.reverse(),
                     }
                 }
-                Ok(Self {
+                Self {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
                     integer_sidecar: sidecar_vals,
-                })
+                }
             }
             Some(ax) => {
-                let ax = normalize_axis(ax, self.shape.len())?;
+                let ax = normalize_axis(ax, logical_shape.len())?;
                 // Reversing a singleton (or empty) axis is the identity
                 // relocation: return an independently owned copy instead of
                 // zero-filling an output and running the block-copy kernel,
@@ -15482,8 +15471,8 @@ impl UFuncArray {
                 // (.319 retry under its quiet-worker low-variance predicate;
                 // profile: the degenerate rayon consumer held 46% of cycles
                 // on [131071, 1] axis 1).
-                if self.shape[ax] <= 1 {
-                    return Ok(self.clone());
+                if self.shape[ax] <= 1 || self.values.is_empty() {
+                    return Ok(self.copy_with_logical_shape(logical_shape));
                 }
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
@@ -15500,40 +15489,39 @@ impl UFuncArray {
                     )),
                     None => None,
                 };
-                Ok(Self {
+                Self {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
                     integer_sidecar: sidecar_vals,
-                })
+                }
             }
-        }
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     /// Flip along multiple axes (np.flip with tuple of axes).
     ///
     /// Applies flip sequentially along each specified axis.
     pub fn flip_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("flip")?;
+        let axes = normalize_reduction_axes(axes, logical_shape.len())?;
         // On a rank-2 array, flipping both distinct axes is exactly the
         // contiguous half-turn handled by rot90(2). Avoid materializing two
-        // full flip intermediates; duplicate-axis semantics still fall through
-        // to the sequential path (and therefore cancel as before).
-        if self.shape.len() == 2 && axes.len() == 2 {
-            let first = normalize_axis(axes[0], 2)?;
-            let second = normalize_axis(axes[1], 2)?;
-            if first != second {
-                return self.rot90(2);
-            }
+        // full flip intermediates after rejecting duplicate axes.
+        if logical_shape.len() == 2 && axes.len() == 2 {
+            return self.rot90(2);
         }
         // Flip the first axis straight from self rather than cloning to seed the
         // loop. Bit-identical (each flip is read-only; same sequence of flips).
         let mut axes_iter = axes.iter();
         let Some(&first) = axes_iter.next() else {
-            return Ok(self.clone());
+            return Ok(self.copy_with_logical_shape(logical_shape));
         };
-        let mut current = self.flip(Some(first))?;
+        let mut current = self.flip(Some(first as isize))?;
         for &ax in axes_iter {
-            current = current.flip(Some(ax))?;
+            current = current.flip(Some(ax as isize))?;
         }
         Ok(current)
     }
@@ -15543,7 +15531,7 @@ impl UFuncArray {
     /// Reverses the elements along axis 1 (columns).
     /// Input must be at least 2-D.
     pub fn fliplr(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() < 2 {
+        if self.complex_logical_shape("fliplr")?.len() < 2 {
             return Err(UFuncError::Msg("fliplr: input must be at least 2-D".into()));
         }
         self.flip(Some(1))
@@ -15554,7 +15542,7 @@ impl UFuncArray {
     /// Reverses the elements along axis 0 (rows).
     /// Input must be at least 1-D.
     pub fn flipud(&self) -> Result<Self, UFuncError> {
-        if self.shape.is_empty() {
+        if self.complex_logical_shape("flipud")?.is_empty() {
             return Err(UFuncError::Msg("flipud: input must be at least 1-D".into()));
         }
         self.flip(Some(0))
@@ -28800,12 +28788,11 @@ impl UFuncArray {
     /// Return a contiguous flattened copy (np.ravel).
     pub fn ravel(&self) -> Self {
         let n = self.values.len();
+        if self.dtype.is_complex() && self.complex_logical_shape("ravel").is_ok() {
+            return self.copy_with_logical_shape(vec![n / 2]);
+        }
         Self {
-            shape: if self.dtype.is_complex() && self.complex_logical_shape("ravel").is_ok() {
-                vec![n / 2, 2]
-            } else {
-                vec![n]
-            },
+            shape: vec![n],
             values: self.values.clone(),
             dtype: self.dtype,
             integer_sidecar: self.cloned_integer_sidecar(),
@@ -33036,6 +33023,19 @@ impl UFuncArray {
 
     /// Broadcast an array to a new shape (np.broadcast_to).
     pub fn broadcast_to(&self, target_shape: &[usize]) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("broadcast_to")?;
+            let mut physical_shape = target_shape.to_vec();
+            physical_shape.push(2);
+            let mut result = self.broadcast_to_physical(&physical_shape)?;
+            result.round_complex_transform_components();
+            return Ok(result);
+        }
+        self.broadcast_to_physical(target_shape)
+    }
+
+    /// Broadcast physical working cells after validating the public logical shape.
+    fn broadcast_to_physical(&self, target_shape: &[usize]) -> Result<Self, UFuncError> {
         let ndim = target_shape.len();
         if self.shape.len() > ndim {
             return Err(UFuncError::Msg(format!(
@@ -33058,10 +33058,21 @@ impl UFuncArray {
                 )));
             }
         }
-        let src_strides = c_strides_elems(&padded);
-        let out_strides = c_strides_elems(target_shape);
         let out_count: usize =
             fnp_ndarray::element_count(target_shape).map_err(UFuncError::Shape)?;
+        if out_count > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        if out_count == 0 {
+            return Ok(Self {
+                shape: target_shape.to_vec(),
+                values: Vec::new(),
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&[]),
+            });
+        }
+        let src_strides = c_strides_elems(&padded);
+        let out_strides = c_strides_elems(target_shape);
         const BROADCAST_CHUNK: usize = 1 << 14;
         const BROADCAST_PAR_MIN: usize = 1 << 15;
 
@@ -33078,15 +33089,7 @@ impl UFuncArray {
             if let Some(axis) = broadcast_axis {
                 let reps = target_shape[axis];
                 let inner: usize = target_shape[axis + 1..].iter().product();
-                let mut values = vec![0.0f64; out_count];
-                if out_count == 0 {
-                    return Ok(Self {
-                        shape: target_shape.to_vec(),
-                        values,
-                        dtype: self.dtype,
-                        integer_sidecar: None,
-                    });
-                }
+                let mut values = try_zeroed_f64(out_count, "broadcast_to")?;
 
                 if inner > 1 {
                     let fill_row = |(row_idx, row): (usize, &mut [f64])| {
@@ -33129,7 +33132,13 @@ impl UFuncArray {
         let src_step: Vec<usize> = (0..ndim)
             .map(|d| if padded[d] > 1 { src_strides[d] } else { 0 })
             .collect();
-        let mut source_indices = vec![0usize; out_count];
+        let mut source_indices = Vec::new();
+        source_indices.try_reserve_exact(out_count).map_err(|_| {
+            UFuncError::Msg(format!(
+                "broadcast_to: unable to allocate output array of {out_count} cells"
+            ))
+        })?;
+        source_indices.resize(out_count, 0usize);
         let fill_chunk = |(ci, chunk): (usize, &mut [usize])| {
             if chunk.is_empty() {
                 return;
@@ -44016,13 +44025,21 @@ impl MaskedArray {
 
     // ── Shape manipulation ─────────────────────────────────────────
 
+    /// Keep the per-working-cell mask aligned with a shape-only data transform.
+    /// Complex data exposes logical dimensions, while this mask retains the
+    /// constructor's physical shape, including the final component dimension.
+    fn mask_reshaped_like(&self, data: &UFuncArray) -> Option<UFuncArray> {
+        self.mask.as_ref().map(|mask| {
+            let mut mask = mask.clone();
+            mask.shape = data.shape.clone();
+            mask
+        })
+    }
+
     /// Reshape the masked array. Both data and mask are reshaped.
     pub fn reshape(&self, new_shape: &[isize]) -> Result<Self, MAError> {
         let new_data = self.data.reshape(new_shape)?;
-        let new_mask = match &self.mask {
-            None => None,
-            Some(m) => Some(m.reshape(new_shape)?),
-        };
+        let new_mask = self.mask_reshaped_like(&new_data);
         Ok(Self {
             data: new_data,
             mask: new_mask,
@@ -44034,9 +44051,11 @@ impl MaskedArray {
     /// Flatten the masked array to 1-D.
     #[must_use]
     pub fn ravel(&self) -> Self {
+        let data = self.data.flatten();
+        let mask = self.mask_reshaped_like(&data);
         Self {
-            data: self.data.flatten(),
-            mask: self.mask.as_ref().map(UFuncArray::flatten),
+            data,
+            mask,
             fill_value: self.fill_value,
             hard_mask: self.hard_mask,
         }
@@ -44047,7 +44066,17 @@ impl MaskedArray {
         let new_data = self.data.transpose(axes)?;
         let new_mask = match &self.mask {
             None => None,
-            Some(m) => Some(m.transpose(axes)?),
+            Some(mask) if self.data.dtype.is_complex() => {
+                // Data validation above guarantees a final component dimension.
+                // Apply the same logical permutation to the mask's leading
+                // dimensions and keep each pair of component masks together.
+                let ndim = self.data.shape.len() - 1;
+                let mut physical_axes = axes
+                    .map_or_else(|| (0..ndim).rev().collect::<Vec<_>>(), <[usize]>::to_vec);
+                physical_axes.push(ndim);
+                Some(mask.transpose_physical(Some(&physical_axes))?)
+            }
+            Some(mask) => Some(mask.transpose_physical(axes)?),
         };
         Ok(Self {
             data: new_data,
@@ -44590,10 +44619,7 @@ impl MaskedArray {
     /// Expand dimensions of a masked array (np.ma.expand_dims).
     pub fn expand_dims(&self, axis: isize) -> Result<Self, MAError> {
         let new_data = self.data.expand_dims(axis)?;
-        let new_mask = match &self.mask {
-            Some(m) => Some(m.expand_dims(axis)?),
-            None => None,
-        };
+        let new_mask = self.mask_reshaped_like(&new_data);
         Ok(Self {
             data: new_data,
             mask: new_mask,
@@ -44605,10 +44631,7 @@ impl MaskedArray {
     /// Squeeze singleton dimensions (np.ma.squeeze).
     pub fn squeeze(&self, axis: Option<isize>) -> Result<Self, MAError> {
         let new_data = self.data.squeeze(axis)?;
-        let new_mask = match &self.mask {
-            Some(m) => Some(m.squeeze(axis)?),
-            None => None,
-        };
+        let new_mask = self.mask_reshaped_like(&new_data);
         Ok(Self {
             data: new_data,
             mask: new_mask,
