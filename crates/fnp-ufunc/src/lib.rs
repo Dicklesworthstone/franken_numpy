@@ -20776,11 +20776,15 @@ impl UFuncArray {
             }
             _ => return flags,
         };
-        for ((real, imaginary), (cast_real, cast_imaginary)) in source
-            .to_complex128_vec()
-            .into_iter()
-            .zip(converted.to_complex128_vec())
-        {
+        // Read typed cells directly: status collection must not allocate two
+        // full complex buffers just to inspect a narrowing real conversion.
+        for index in 0..source.len().min(converted.len()) {
+            let (real, imaginary) = source
+                .get_complex128(index)
+                .expect("cast source index is in bounds");
+            let (cast_real, cast_imaginary) = converted
+                .get_complex128(index)
+                .expect("cast destination index is in bounds");
             let components = [(real, cast_real), (imaginary, cast_imaginary)];
             for &(before, after) in &components[..if dtype.is_complex() { 2 } else { 1 }] {
                 if before.is_finite() {
@@ -20820,17 +20824,17 @@ impl UFuncArray {
     /// Convert numeric logical elements through typed storage. The public
     /// storage bridge remains real-valued; complex arrays add/remove their
     /// trailing component dimension only at this private casting boundary.
-    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
+    fn cast_numeric_storage(&self, dtype: DType, report_errors: bool) -> Result<Self, UFuncError> {
         let (shape, source) = self.numeric_cast_source()?;
-        if report_invalid
-            && geterr().invalid != FloatErrorMode::Ignore
-            && source.has_invalid_float_to_integer_cast(dtype)
-        {
-            dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
-        }
         let converted = source
             .cast_to(dtype)
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+        if report_errors && !geterr().is_all_ignore() {
+            // Status follows the same typed inputs and outputs as assignment
+            // casts. Narrowing can overflow or underflow either retained
+            // component; discarded imaginary components never participate.
+            dispatch_float_error_flags(Self::numeric_cast_flags(&source, &converted), "cast")?;
+        }
         Self::from_numeric_storage(shape, converted)
     }
 
@@ -20840,8 +20844,8 @@ impl UFuncArray {
     /// component for real/integer targets, or either component for bool.
     ///
     /// This infallible value-conversion API does not consult floating-point error
-    /// policy. Use [`Self::astype_with_casting`] for invalid-cast warnings,
-    /// callbacks, and errors from real or complex floating-point inputs.
+    /// policy. Use [`Self::astype_with_casting`] for cast warnings, callbacks,
+    /// and errors, including overflow and underflow from narrowing.
     pub fn astype(&self, dtype: DType) -> Self {
         if self.dtype == dtype {
             return self.clone();
@@ -20968,8 +20972,9 @@ impl UFuncArray {
     ///
     /// Validates the cast using `fnp_dtype::can_cast` before performing it.
     /// `casting` must be one of `"no"`, `"equiv"`, `"safe"`, `"same_kind"`, or `"unsafe"`.
-    /// Real and complex floating-to-integer casts also honor the current
-    /// `invalid` error mode, reporting at most one event for the whole cast.
+    /// Numeric casts honor the current floating-point error modes, reporting
+    /// at most one event of each kind for the whole cast. Narrowing real or
+    /// complex floating-point components can report overflow and underflow.
     /// Only the real component of a complex input participates in integer
     /// conversion. NaN, infinity, and overflow of the conversion intermediate
     /// report invalid; ordinary narrow integer wrapping does not.
@@ -20984,16 +20989,27 @@ impl UFuncArray {
             self.complex_logical_shape("astype")?;
             return Ok(self.clone());
         }
-        if (self.dtype.is_float() && dtype.is_integer())
-            || ((self.dtype.is_complex() || dtype.is_complex())
-                && (self.dtype.is_numeric() || self.dtype == DType::Bool)
-                && (dtype.is_numeric() || dtype == DType::Bool))
+        if (self.dtype.is_float() || self.dtype.is_complex() || dtype.is_complex())
+            && (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (dtype.is_numeric() || dtype == DType::Bool)
         {
             // The same typed source drives status and conversion, preserving
-            // source precision, complex uint32 vector tails, and exact integers.
+            // source precision, complex uint32 vector tails, exact integers,
+            // and narrowing status without double-rounding source values.
             return self.cast_numeric_storage(dtype, true);
         }
-        Ok(self.astype(dtype))
+        // Preserve the real integer path's exact-sidecar and raw working-cell
+        // conversion semantics. Integer-to-half is its only floating cast
+        // that can overflow; finite integers cannot introduce underflow.
+        let converted = self.astype(dtype);
+        if self.dtype.is_integer()
+            && dtype == DType::F16
+            && geterr().over != FloatErrorMode::Ignore
+            && converted.values.iter().any(|value| value.is_infinite())
+        {
+            dispatch_float_error(FloatErrorKind::Over, "cast")?;
+        }
+        Ok(converted)
     }
 
     /// Return a contiguous array in memory (C order) — np.ascontiguousarray.

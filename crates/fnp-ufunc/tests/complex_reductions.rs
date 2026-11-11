@@ -1666,3 +1666,369 @@ fn complex_same_dtype_casts_preserve_values_after_policy_and_layout_validation()
     }
     assert!(take_float_error_events().is_empty());
 }
+
+#[test]
+fn narrowing_cast_error_modes_report_each_retained_component_kind_once() {
+    let real = UFuncArray::new(
+        vec![4],
+        vec![1.0e300, -1.0e300, 1.0e-300, -1.0e-300],
+        DType::F64,
+    )
+    .unwrap();
+    let complex = complex_array(
+        &[2],
+        &[(1.0e300, 1.0e-300), (-1.0e300, -1.0e-300)],
+        DType::Complex128,
+    );
+    for array in [&real, &complex] {
+        for target in [DType::F16, DType::F32, DType::Complex64] {
+            // The real target discards the complex fixture's tiny imaginary
+            // components, so those casts report overflow alone.
+            let expected = if array.dtype().is_complex() && !target.is_complex() {
+                vec![FloatErrorKind::Over]
+            } else {
+                vec![FloatErrorKind::Over, FloatErrorKind::Under]
+            };
+            for mode in [
+                FloatErrorMode::Ignore,
+                FloatErrorMode::Warn,
+                FloatErrorMode::Print,
+                FloatErrorMode::Log,
+            ] {
+                take_float_error_events();
+                let _guard = errstate(Some(mode), None, None, None, None);
+                let result = array.astype_with_casting(target, "unsafe").unwrap();
+                assert_eq!(result.dtype(), target);
+                assert!(result.values().iter().any(|value| value.is_infinite()));
+                let events = take_float_error_events();
+                let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
+                if mode == FloatErrorMode::Ignore {
+                    assert!(kinds.is_empty());
+                } else {
+                    assert_eq!(kinds, expected, "{:?} -> {target:?}", array.dtype());
+                    assert!(
+                        events
+                            .iter()
+                            .all(|event| event.mode == mode && event.op == "cast")
+                    );
+                }
+            }
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            let callback_sink = Arc::clone(&sink);
+            let previous = seterrcall(Some(Arc::new(move |event| {
+                callback_sink.lock().unwrap().push(event);
+            })));
+            let result = {
+                let _guard = errstate(Some(FloatErrorMode::Call), None, None, None, None);
+                array.astype_with_casting(target, "unsafe")
+            };
+            let _ = seterrcall(previous);
+            result.unwrap();
+            assert_eq!(
+                sink.lock()
+                    .unwrap()
+                    .iter()
+                    .map(|event| event.kind)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(take_float_error_events().is_empty());
+        }
+    }
+}
+
+#[test]
+fn narrowing_cast_raise_preserves_validation_precedence_and_value_only_api() {
+    take_float_error_events();
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for source in [DType::F64, DType::Complex128] {
+        let array = if source.is_complex() {
+            complex_array(&[2], &[(1.0e300, 0.0), (1.0e-300, 0.0)], source)
+        } else {
+            UFuncArray::new(vec![2], vec![1.0e300, 1.0e-300], source).unwrap()
+        };
+        for target in [DType::F16, DType::F32, DType::Complex64] {
+            for policy in ["safe", "no", "equiv", "unknown"] {
+                assert!(matches!(
+                    array.astype_with_casting(target, policy),
+                    Err(UFuncError::Msg(_))
+                ));
+            }
+            assert!(matches!(
+                array.astype_with_casting(target, "unsafe"),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Over,
+                    ..
+                })
+            ));
+            let _overflow_ignored = errstate(None, None, Some(FloatErrorMode::Ignore), None, None);
+            assert!(matches!(
+                array.astype_with_casting(target, "unsafe"),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Under,
+                    ..
+                })
+            ));
+            let value_only = array.astype(target);
+            assert_eq!(value_only.dtype(), target);
+            assert!(value_only.values()[0].is_infinite());
+        }
+    }
+    let malformed = UFuncArray::new(vec![3], vec![1.0e300; 3], DType::Complex128).unwrap();
+    assert!(matches!(
+        malformed.astype_with_casting(DType::Complex64, "unsafe"),
+        Err(UFuncError::Msg(message)) if message.contains("interleaved")
+    ));
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn narrowing_cast_status_uses_source_precision_and_ignores_nonfinite_inputs() {
+    take_float_error_events();
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for source in [DType::F16, DType::F32, DType::Complex64] {
+        // These unquantized working values are already infinity/zero in the
+        // declared source dtype. Casting them again must not report new flags.
+        let array = if source.is_complex() {
+            complex_array(
+                &[2],
+                &[(1.0e300, 1.0e-300), (-1.0e300, -1.0e-300)],
+                source,
+            )
+        } else {
+            UFuncArray::new(
+                vec![4],
+                vec![1.0e300, -1.0e300, 1.0e-300, -1.0e-300],
+                source,
+            )
+            .unwrap()
+        };
+        for target in [DType::F16, DType::F32, DType::Complex64] {
+            array.astype_with_casting(target, "unsafe").unwrap();
+        }
+    }
+    for source in [DType::F64, DType::Complex128] {
+        let array = if source.is_complex() {
+            complex_array(
+                &[2],
+                &[(f64::NAN, f64::INFINITY), (f64::NEG_INFINITY, f64::NAN)],
+                source,
+            )
+        } else {
+            UFuncArray::new(
+                vec![3],
+                vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+                source,
+            )
+            .unwrap()
+        };
+        for target in [DType::F16, DType::F32, DType::Complex64] {
+            array.astype_with_casting(target, "unsafe").unwrap();
+        }
+    }
+    let discarded = complex_array(
+        &[2],
+        &[(1.0, 1.0e300), (-0.0, 1.0e-300)],
+        DType::Complex128,
+    );
+    for target in [DType::F16, DType::F32] {
+        let output = discarded.astype_with_casting(target, "unsafe").unwrap();
+        assert_eq!(output.values(), &[1.0, -0.0]);
+        assert!(output.values()[1].is_sign_negative());
+    }
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn narrowing_integer_to_half_reports_overflow_without_losing_wide_input_bits() {
+    let array = UFuncArray::from_storage(
+        vec![3],
+        ArrayStorage::U64(vec![u64::MAX, (1_u64 << 63) + 1, 65_504]),
+    )
+    .unwrap();
+    take_float_error_events();
+    {
+        let _guard = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+        let output = array.astype_with_casting(DType::F16, "same_kind").unwrap();
+        assert_eq!(output.values(), &[f64::INFINITY, f64::INFINITY, 65_504.0]);
+        let events = take_float_error_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FloatErrorKind::Over);
+    }
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    assert!(matches!(
+        array.astype_with_casting(DType::F16, "same_kind"),
+        Err(UFuncError::FloatingPoint {
+            kind: FloatErrorKind::Over,
+            ..
+        })
+    ));
+    assert_eq!(
+        array
+            .astype_with_casting(DType::U64, "no")
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![u64::MAX, (1_u64 << 63) + 1, 65_504])
+    );
+    // Raw integer working cells retain the same conversions as astype, even
+    // when no exact-integer sidecar was supplied to the constructor.
+    for source in [DType::I64, DType::U64] {
+        let raw = UFuncArray::new(vec![1], vec![2.0_f64.powi(54)], source).unwrap();
+        for target in [DType::F32, DType::F64] {
+            assert_eq!(
+                raw.astype_with_casting(target, "unsafe").unwrap().values(),
+                raw.astype(target).values()
+            );
+        }
+        assert!(matches!(
+            raw.astype_with_casting(DType::F16, "unsafe"),
+            Err(UFuncError::FloatingPoint {
+                kind: FloatErrorKind::Over,
+                ..
+            })
+        ));
+    }
+    let empty = complex_array(&[2, 0], &[], DType::Complex128);
+    assert!(
+        empty
+            .astype_with_casting(DType::F16, "unsafe")
+            .unwrap()
+            .values()
+            .is_empty()
+    );
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn narrowing_cast_flags_and_target_bytes_match_numpy() {
+    let _guard = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+    let mut batch = OracleBatch::default();
+    let mut expected_cases = Vec::new();
+    let mut actual = Vec::new();
+    let half_tiny = f64::from(fnp_dtype::f16::MIN_POSITIVE);
+    let single_tiny = f64::from(f32::MIN_POSITIVE);
+    let single_step = f64::from(f32::from_bits(1));
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.0,
+        1.0e300,
+        -1.0e300,
+        1.0e-300,
+        -1.0e-300,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        65_504.0,
+        65_519.0,
+        65_520.0,
+        f64::from(f32::MAX),
+        f64::from(f32::MAX) + 2.0_f64.powi(103),
+    ];
+    for fraction in [0.0, 0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5] {
+        values.push(half_tiny - 2.0_f64.powi(-24) * fraction);
+        values.push(single_tiny - single_step * fraction);
+    }
+    for source in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for &value in &values {
+            // Scalar cases isolate each boundary instead of letting one
+            // overflow/underflow elsewhere in a vector hide a missing flag.
+            let array = if source.is_complex() {
+                // The JSON fixture encodes NaN as text, which does not retain
+                // its sign. Keep both source NaNs positive in this byte test.
+                let imaginary = if value.is_nan() { value } else { -value };
+                complex_array(&[1], &[(value, imaginary)], source)
+            } else {
+                UFuncArray::new(vec![1], vec![value], source).unwrap()
+            };
+            let input = batch.add_input(&array);
+            for target in [DType::F16, DType::F32, DType::Complex64] {
+                if source == target {
+                    continue;
+                }
+                take_float_error_events();
+                let output = array.astype_with_casting(target, "unsafe").unwrap();
+                let flags = take_float_error_events()
+                    .into_iter()
+                    .map(|event| event.message)
+                    .collect::<Vec<_>>();
+                let bytes = match target {
+                    DType::F16 => output
+                        .values()
+                        .iter()
+                        .flat_map(|&value| fnp_dtype::f16_from_f64(value).to_bits().to_le_bytes())
+                        .collect::<Vec<_>>(),
+                    DType::F32 | DType::Complex64 => output
+                        .values()
+                        .iter()
+                        .flat_map(|&value| (value as f32).to_bits().to_le_bytes())
+                        .collect::<Vec<_>>(),
+                    _ => unreachable!("narrowing cast target"),
+                };
+                expected_cases.push(json!({"input": input, "dtype": numpy_dtype(target)}));
+                actual.push(json!({"flags": flags, "bytes": bytes}));
+            }
+        }
+    }
+    let script = r#"
+import json, sys, warnings
+import numpy as np
+payload = json.load(sys.stdin)
+inputs = []
+with np.errstate(all='ignore'), warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    for item in payload['inputs']:
+        dtype = np.dtype(item['dtype'])
+        if dtype.kind == 'c':
+            values = [complex(float(pair[0]), float(pair[1])) for pair in item['values']]
+        else:
+            values = [float(value) for value in item['values']]
+        inputs.append(np.array(values, dtype=dtype).reshape(item['shape']))
+rows = []
+for case in payload['cases']:
+    with np.errstate(all='warn'), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        output = inputs[case['input']].astype(case['dtype'])
+    flags = [str(item.message) for item in caught if issubclass(item.category, RuntimeWarning)]
+    rows.append(dict(flags=flags, bytes=list(output.astype(output.dtype.newbyteorder('<')).tobytes())))
+print(json.dumps(rows))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch NumPy narrowing cast oracle");
+    let mut stdin = child.stdin.take().expect("oracle stdin");
+    serde_json::to_writer(
+        &mut stdin,
+        &json!({"inputs": batch.inputs, "cases": expected_cases}),
+    )
+    .expect("write narrowing cast cases");
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("collect narrowing cast oracle");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+    assert_eq!(actual.len(), expected.len());
+    for ((case, actual), expected) in expected_cases.iter().zip(actual).zip(expected) {
+        assert_eq!(
+            actual, expected,
+            "{case}: narrowing flags and exact target bytes"
+        );
+    }
+}
