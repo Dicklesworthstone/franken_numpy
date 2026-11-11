@@ -435,6 +435,16 @@ fn push_float_error_event(event: FloatErrorEvent) {
 }
 
 fn dispatch_float_error(kind: FloatErrorKind, op: &'static str) -> Result<(), UFuncError> {
+    dispatch_float_error_with_reporting(kind, op, true)
+}
+
+/// Array loops aggregate error kinds, while Python scalar packing reports
+/// each conversion. Both paths share the same policy and callback handling.
+fn dispatch_float_error_with_reporting(
+    kind: FloatErrorKind,
+    op: &'static str,
+    deduplicate: bool,
+) -> Result<(), UFuncError> {
     let mode = geterr().mode_for(kind);
     if matches!(mode, FloatErrorMode::Ignore) {
         return Ok(());
@@ -446,16 +456,23 @@ fn dispatch_float_error(kind: FloatErrorKind, op: &'static str) -> Result<(), UF
         op,
         message: kind.default_message(op),
     };
+    let report = |event| {
+        if deduplicate {
+            push_float_error_event(event);
+        } else {
+            FLOAT_ERROR_EVENTS.with(|events| events.borrow_mut().push(event));
+        }
+    };
 
     match mode {
         FloatErrorMode::Ignore => Ok(()),
         FloatErrorMode::Warn | FloatErrorMode::Log => {
-            push_float_error_event(event);
+            report(event);
             Ok(())
         }
         FloatErrorMode::Print => {
             eprintln!("{}", event.message);
-            push_float_error_event(event);
+            report(event);
             Ok(())
         }
         FloatErrorMode::Call => {
@@ -467,7 +484,7 @@ fn dispatch_float_error(kind: FloatErrorKind, op: &'static str) -> Result<(), UF
                 }
             });
             if !handled {
-                push_float_error_event(event);
+                report(event);
             }
             Ok(())
         }
@@ -5313,6 +5330,71 @@ impl UFuncArray {
 
     fn cloned_integer_sidecar(&self) -> Option<IntegerSidecar> {
         self.integer_sidecar.clone()
+    }
+
+    /// Pack Python float scalars before an assignment starts. Unlike ndarray
+    /// casts, Python integers produced by truncation must fit the destination;
+    /// narrow floating-point packing reports overflow once per scalar and
+    /// suppresses underflow. Keep the conversion in one typed buffer so exact
+    /// wide integers and complete complex elements share the assignment path.
+    fn pack_python_float_values(
+        values: &[f64],
+        dtype: DType,
+        context: &str,
+    ) -> Result<Self, UFuncError> {
+        if dtype.is_complex()
+            && values.len() > isize::MAX as usize / (2 * std::mem::size_of::<f64>())
+        {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        let mut packed = Vec::with_capacity(values.len());
+        for &value in values {
+            let converted = if dtype.is_integer() {
+                if value.is_nan() {
+                    return Err(UFuncError::Msg(format!(
+                        "{context}: cannot convert float NaN to integer"
+                    )));
+                }
+                if !value.is_finite() {
+                    return Err(UFuncError::Msg(format!(
+                        "{context}: cannot convert float infinity to integer"
+                    )));
+                }
+                let truncated = value.trunc();
+                let (lower, upper) = match dtype {
+                    DType::I8 => (-128.0, 128.0),
+                    DType::I16 => (-32_768.0, 32_768.0),
+                    DType::I32 => (-2_147_483_648.0, 2_147_483_648.0),
+                    DType::I64 => (i64::MIN as f64, -(i64::MIN as f64)),
+                    DType::U8 => (0.0, 256.0),
+                    DType::U16 => (0.0, 65_536.0),
+                    DType::U32 => (0.0, 4_294_967_296.0),
+                    DType::U64 => (0.0, 2.0_f64.powi(64)),
+                    _ => unreachable!("integer scalar packing requires an integer dtype"),
+                };
+                if truncated < lower || truncated >= upper {
+                    return Err(UFuncError::Msg(format!(
+                        "{context}: scalar {value} out of bounds for {dtype:?}"
+                    )));
+                }
+                truncated
+            } else {
+                let rounded = match dtype {
+                    DType::F16 => fnp_dtype::f16_from_f64(value).to_f64(),
+                    DType::F32 | DType::Complex64 => f64::from(value as f32),
+                    _ => value,
+                };
+                if value.is_finite() && rounded.is_infinite() {
+                    dispatch_float_error_with_reporting(FloatErrorKind::Over, "cast", false)?;
+                }
+                rounded
+            };
+            packed.push(converted);
+        }
+        let storage = ArrayStorage::F64(packed)
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{context}: storage cast failed: {err}")))?;
+        Self::from_numeric_storage(vec![values.len()], storage)
     }
 
     /// Store one already-cast logical element without separating a complex
@@ -19235,26 +19317,49 @@ impl UFuncArray {
         Ok(())
     }
 
-    /// Set elements by integer indices (flat). Equivalent to `a.flat[indices] = values`.
+    /// Assign a sequence of Python float scalars through flat logical indices.
+    /// Equivalent to `a.flat[indices] = values`: short value sequences cycle,
+    /// empty sequences do nothing, and a later invalid index preserves earlier
+    /// writes. All scalar packing finishes before any destination is changed.
     pub fn fancy_set(&mut self, indices: &[i64], values: &[f64]) -> Result<(), UFuncError> {
-        if indices.len() != values.len() {
-            return Err(UFuncError::Msg(format!(
-                "fancy_set: indices length {} != values length {}",
-                indices.len(),
-                values.len()
-            )));
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("fancy_set")?;
         }
-        let n = self.values.len() as i64;
-        for (&idx, &val) in indices.iter().zip(values) {
-            let i = if idx < 0 { idx + n } else { idx };
-            if i < 0 || i >= n {
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let n = self.values.len() / components;
+        let numeric = self.dtype.is_numeric() || self.dtype == DType::Bool;
+        let packed = if numeric && self.dtype != DType::F64 {
+            Some(Self::pack_python_float_values(
+                values,
+                self.dtype,
+                "fancy_set",
+            )?)
+        } else {
+            None
+        };
+        if values.is_empty() {
+            return Ok(());
+        }
+        for (source_index, &idx) in indices.iter().enumerate() {
+            let resolved = if idx < 0 {
+                i128::from(idx) + n as i128
+            } else {
+                i128::from(idx)
+            };
+            if resolved < 0 || resolved >= n as i128 {
                 return Err(UFuncError::Msg(format!(
                     "fancy_set: index {idx} out of bounds for size {n}"
                 )));
             }
-            let flat_index = i as usize;
-            self.values[flat_index] = val;
-            self.write_integer_mutation(flat_index, val, None, flat_index, "fancy_set")?;
+            let flat_index = resolved as usize;
+            let source_index = source_index % values.len();
+            if let Some(packed) = &packed {
+                self.write_numeric_assignment(flat_index, packed, source_index, "fancy_set")?;
+            } else {
+                let value = values[source_index];
+                self.write_integer_mutation(flat_index, value, None, source_index, "fancy_set")?;
+                self.values[flat_index] = value;
+            }
         }
         Ok(())
     }
@@ -34972,21 +35077,39 @@ impl UFuncArray {
         (ptr, end)
     }
 
-    /// Set elements using a boolean mask (np.putmask / np.put_mask).
-    ///
-    /// For each position where `mask` is non-zero, the corresponding
-    /// value from `values` is placed. Values are cycled if shorter than
-    /// the number of `True` positions.
+    /// Assign Python float scalars to selected logical elements (np.place).
+    /// Values cycle over selected positions only; masks and the destination
+    /// are flattened over logical elements, preserving complex component pairs.
+    /// Use [`Self::putmask`] for NumPy's different flat-position value cycle.
     pub fn put_mask(&mut self, mask: &Self, values: &[f64]) -> Result<(), UFuncError> {
-        if mask.values.len() != self.values.len() {
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("put_mask")?;
+        }
+        if mask.dtype.is_complex() {
+            mask.complex_logical_shape("put_mask")?;
+        }
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let count = self.values.len() / components;
+        let mask_count = mask.values.len() / if mask.dtype.is_complex() { 2 } else { 1 };
+        if mask_count != count {
             return Err(UFuncError::Msg(
                 "put_mask: mask must have same size as array".to_string(),
             ));
         }
+        let typed_mask = if (mask.dtype.is_numeric() || mask.dtype == DType::Bool)
+            && !matches!(mask.dtype, DType::Bool | DType::F64)
+        {
+            Some(mask.cast_numeric_storage(DType::Bool, false)?)
+        } else {
+            None
+        };
+        let mask = typed_mask.as_ref().unwrap_or(mask);
         if values.is_empty() {
-            return Err(UFuncError::Msg(
-                "put_mask: values must not be empty".to_string(),
-            ));
+            return if mask.values.iter().any(|&value| value != 0.0) {
+                Err(UFuncError::Msg("put_mask: values must not be empty".into()))
+            } else {
+                Ok(())
+            };
         }
         if self.dtype == DType::F64
             && mask.dtype == DType::Bool
@@ -35064,13 +35187,27 @@ impl UFuncArray {
             }
             return Ok(());
         }
+        let numeric = self.dtype.is_numeric() || self.dtype == DType::Bool;
+        let packed = if numeric {
+            Some(Self::pack_python_float_values(
+                values,
+                self.dtype,
+                "put_mask",
+            )?)
+        } else {
+            None
+        };
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
                 let src_index = vi % values.len();
-                let value = values[src_index];
-                self.values[i] = value;
-                self.write_integer_mutation(i, value, None, src_index, "put_mask")?;
+                if let Some(packed) = &packed {
+                    self.write_numeric_assignment(i, packed, src_index, "put_mask")?;
+                } else {
+                    let value = values[src_index];
+                    self.write_integer_mutation(i, value, None, src_index, "put_mask")?;
+                    self.values[i] = value;
+                }
                 vi += 1;
             }
         }

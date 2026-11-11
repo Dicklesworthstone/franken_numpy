@@ -1,4 +1,4 @@
-//! place/putmask must cast and cycle complete logical array elements.
+//! Masked and flat assignments must cast and cycle complete logical elements.
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
@@ -30,6 +30,8 @@ const NUMERIC: [DType; 14] = [
 enum Operation {
     Place,
     Putmask,
+    PutMask,
+    FancySet,
 }
 
 impl Operation {
@@ -37,6 +39,8 @@ impl Operation {
         match self {
             Self::Place => "place",
             Self::Putmask => "putmask",
+            Self::PutMask => "put_mask",
+            Self::FancySet => "fancy_set",
         }
     }
 
@@ -49,6 +53,13 @@ impl Operation {
         match self {
             Self::Place => dst.place(mask, values),
             Self::Putmask => dst.putmask(mask, values),
+            Self::PutMask => dst.put_mask(mask, values.values()),
+            Self::FancySet => {
+                let ArrayStorage::I64(indices) = mask.to_storage()? else {
+                    panic!("flat assignment fixture requires signed integer indices");
+                };
+                dst.fancy_set(&indices, values.values())
+            }
         }
     }
 }
@@ -213,6 +224,14 @@ fn error_category(error: UFuncError) -> String {
         "cast-dtype"
     } else if message.contains("must not be empty") {
         "empty-values"
+    } else if message.contains("float NaN") {
+        "scalar-nan"
+    } else if message.contains("float infinity") {
+        "scalar-infinity"
+    } else if message.contains("scalar") && message.contains("out of bounds") {
+        "scalar-range"
+    } else if message.contains("index") && message.contains("out of bounds") {
+        "index-bounds"
     } else {
         panic!("unexpected mask-mutation error: {message}");
     }
@@ -314,18 +333,30 @@ def category(error):
     if (text.startswith(('Cannot cast array data from ', 'Cannot cast scalar from '))
             and "according to the rule 'safe'" in text): return 'cast-dtype'
     if 'Cannot insert from an empty array' in text: return 'empty-values'
+    if isinstance(error, IndexError): return 'index-bounds'
+    if 'cannot convert float NaN to integer' in text: return 'scalar-nan'
+    if 'cannot convert float infinity to integer' in text: return 'scalar-infinity'
+    if isinstance(error, OverflowError): return 'scalar-range'
     raise AssertionError((type(error).__name__, text))
 
 rows = []
 for case in json.load(sys.stdin):
-    dst, mask, values = load(case['dst']), load(case['mask']), load(case['values'])
+    dst, mask = load(case['dst']), load(case['mask'])
+    if case['op'] in ('fancy_set', 'put_mask'):
+        values = [float(value) for value in case['values']['values']]
+    else:
+        values = load(case['values'])
     calls = []
     previous_callback = np.seterrcall(lambda message, flags: calls.append(float_kind(message)))
     failure = None
     with warnings.catch_warnings(record=True) as caught, np.errstate(all=case['mode']):
         warnings.simplefilter('always')
-        try: getattr(np, case['op'])(dst, mask, values)
-        except (TypeError, ValueError, FloatingPointError) as error: failure = category(error)
+        try:
+            if case['op'] == 'fancy_set': dst.flat[mask.ravel()] = values
+            elif case['op'] == 'put_mask': np.place(dst, mask, values)
+            else: getattr(np, case['op'])(dst, mask, values)
+        except (TypeError, ValueError, IndexError, OverflowError, FloatingPointError) as error:
+            failure = category(error)
     np.seterrcall(previous_callback)
     messages = [float_kind(str(warning.message)) for warning in caught
                 if issubclass(warning.category, RuntimeWarning)
@@ -561,4 +592,201 @@ fn masked_mutations_reject_malformed_complex_layouts_before_writing() {
         assert!(op.apply(&mut dst, &mask, &malformed).is_err());
         assert_eq!(dst.values(), valid.values());
     }
+}
+
+fn float_sequence(values: &[f64]) -> UFuncArray {
+    UFuncArray::new(vec![values.len()], values.to_vec(), DType::F64).unwrap()
+}
+
+fn flat_indices(indices: &[i64]) -> UFuncArray {
+    UFuncArray::from_storage(vec![indices.len()], ArrayStorage::I64(indices.to_vec())).unwrap()
+}
+
+fn float_sequence_destination(shape: &[usize], dtype: DType) -> UFuncArray {
+    if matches!(dtype, DType::I64 | DType::U64) {
+        source(shape, dtype)
+    } else {
+        destination(shape, dtype)
+    }
+}
+
+#[test]
+fn float_sequence_assignments_cycle_logical_values_and_preserve_exact_destinations() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[&[], &[1], &[2, 3], &[0], &[2, 0, 3]];
+    let sequences: &[&[f64]] = &[&[], &[1.5], &[-0.0, 2.5], &[-2.75, 0.0, 7.0, 11.0]];
+    let indices: &[&[i64]] = &[
+        &[],
+        &[0],
+        &[-1],
+        &[0, -1, 0, 2],
+        &[0, 99],
+        &[99, 0],
+        &[i64::MIN],
+        &[i64::MAX],
+    ];
+    for dtype in NUMERIC {
+        for shape in shapes {
+            let dst = float_sequence_destination(shape, dtype);
+            for values in sequences {
+                let values = float_sequence(values);
+                for indices in indices {
+                    batch.push(Operation::FancySet, &dst, &flat_indices(indices), &values);
+                }
+                for pattern in [&[false][..], &[true][..], &[false, true, true][..]] {
+                    batch.push(
+                        Operation::PutMask,
+                        &dst,
+                        &bool_mask(&[count(shape)], pattern),
+                        &values,
+                    );
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn float_sequence_packing_precedes_selection_and_preserves_error_state() {
+    let mut batch = OracleBatch::default();
+    let cases: &[&[f64]] = &[
+        &[1.5, -0.75],
+        &[127.99, 128.0],
+        &[-128.99, -129.0],
+        &[255.99, 256.0],
+        &[65_504.0, 65_520.0],
+        &[1.0e40, 1.0e40],
+        &[1.0e-50, -1.0e-50],
+        &[1.0, f64::NAN],
+        &[1.0, f64::INFINITY],
+        &[1.0, f64::NEG_INFINITY],
+        &[1.0, -1.0],
+        &[1.0, i64::MIN as f64],
+        &[(1_u64 << 53) as f64, ((1_u64 << 53) + 2) as f64],
+        &[2.0_f64.powi(63) - 1024.0, 2.0_f64.powi(63)],
+        &[2.0_f64.powi(64) - 2048.0, 2.0_f64.powi(64)],
+    ];
+    for dtype in NUMERIC {
+        let dst = float_sequence_destination(&[3], dtype);
+        for values in cases {
+            let values = float_sequence(values);
+            for mode in [
+                FloatErrorMode::Ignore,
+                FloatErrorMode::Warn,
+                FloatErrorMode::Raise,
+                FloatErrorMode::Call,
+            ] {
+                for indices in [&[][..], &[0][..], &[0, 99][..], &[99, 0][..]] {
+                    batch.push_policy(
+                        Operation::FancySet,
+                        &dst,
+                        &flat_indices(indices),
+                        &values,
+                        mode,
+                    );
+                }
+                for pattern in [&[false][..], &[true, false][..]] {
+                    batch.push_policy(
+                        Operation::PutMask,
+                        &dst,
+                        &bool_mask(&[3], pattern),
+                        &values,
+                        mode,
+                    );
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn float_sequence_masks_use_logical_source_precision_before_cycling() {
+    let mut batch = OracleBatch::default();
+    let parts = [
+        (0.0, 1.0e-50),
+        (1.0e-50, 0.0),
+        (0.0, -2.0),
+        (-0.0, 0.0),
+        (f64::NAN, 0.0),
+        (0.0, f64::NAN),
+        (f64::INFINITY, 0.0),
+        (0.0, f64::NEG_INFINITY),
+    ];
+    let masks = [
+        complex(&[2, 4], &parts, DType::Complex64),
+        complex(&[8], &parts, DType::Complex128),
+        UFuncArray::new(
+            vec![8],
+            parts.iter().map(|&(real, _)| real).collect(),
+            DType::F32,
+        )
+        .unwrap(),
+        source(&[8], DType::I64),
+        source(&[2, 2, 2], DType::U64),
+    ];
+    for dtype in NUMERIC {
+        for mask in &masks {
+            for values in [&[][..], &[-0.0, 1.5, 2.75][..]] {
+                batch.push(
+                    Operation::PutMask,
+                    &float_sequence_destination(&[4, 2], dtype),
+                    mask,
+                    &float_sequence(values),
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn float_sequence_masks_validate_size_before_scalar_packing() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::I8, DType::U64, DType::F32, DType::Complex64] {
+        for shape in [&[][..], &[0][..], &[2][..]] {
+            for mask_shape in [&[0][..], &[1][..], &[2][..], &[3][..]] {
+                for selected in [false, true] {
+                    for values in [&[][..], &[f64::NAN][..], &[1.0e40][..]] {
+                        batch.push_policy(
+                            Operation::PutMask,
+                            &float_sequence_destination(shape, dtype),
+                            &bool_mask(mask_shape, &[selected]),
+                            &float_sequence(values),
+                            FloatErrorMode::Raise,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn float_sequence_mutations_reject_invalid_complex_layouts_without_writes() {
+    let malformed = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex128).unwrap();
+    let mut dst = malformed.clone();
+    assert!(dst.fancy_set(&[0], &[7.0]).is_err());
+    assert_eq!(dst.values(), malformed.values());
+    assert!(dst.put_mask(&bool_mask(&[3], &[true]), &[7.0]).is_err());
+    assert_eq!(dst.values(), malformed.values());
+    let mut dst = destination(&[3], DType::Complex128);
+    let before = dst.values().to_vec();
+    assert!(dst.put_mask(&malformed, &[7.0]).is_err());
+    assert_eq!(dst.values(), before);
+
+    // No operation should form an overflowing trailing product for a valid
+    // empty logical array, even when individual dimensions are enormous.
+    let mut empty = UFuncArray::new(
+        vec![0, usize::MAX, usize::MAX, 2],
+        Vec::new(),
+        DType::Complex128,
+    )
+    .unwrap();
+    empty.fancy_set(&[], &[7.0]).unwrap();
+    empty.fancy_set(&[i64::MAX], &[]).unwrap();
+    empty.put_mask(&bool_mask(&[0], &[true]), &[]).unwrap();
+    assert!(empty.values().is_empty());
 }
