@@ -27889,6 +27889,7 @@ impl UFuncArray {
             Vec::with_capacity(raw_input_subs.len());
         if any_input_ellipsis {
             for (sub, op) in raw_input_subs.iter().zip(operands.iter()) {
+                let shape = op.complex_logical_shape("einsum")?;
                 if sub.contains("...") {
                     if sub.matches("...").count() > 1 {
                         return Err(UFuncError::Msg(format!(
@@ -27902,22 +27903,22 @@ impl UFuncArray {
                         )));
                     }
                     let explicit_count = stripped.chars().count();
-                    if explicit_count > op.shape.len() {
+                    if explicit_count > shape.len() {
                         return Err(UFuncError::Msg(format!(
                             "einsum: subscript '{}' has {} explicit indices but operand has {} dimensions",
                             sub,
                             explicit_count,
-                            op.shape.len()
+                            shape.len()
                         )));
                     }
-                    let n_bcast = op.shape.len() - explicit_count;
+                    let n_bcast = shape.len() - explicit_count;
                     let Some((prefix, _)) = sub.split_once("...") else {
                         return Err(UFuncError::Msg(format!(
                             "einsum: subscript '{sub}' has no ellipsis"
                         )));
                     };
                     let prefix_len = prefix.chars().count();
-                    let dims: Vec<usize> = op.shape[prefix_len..prefix_len + n_bcast].to_vec();
+                    let dims: Vec<usize> = shape[prefix_len..prefix_len + n_bcast].to_vec();
                     bcast_dims = Some(match bcast_dims.take() {
                         None => dims.clone(),
                         Some(existing) => broadcast_shape(&existing, &dims).map_err(|_| {
@@ -28021,27 +28022,28 @@ impl UFuncArray {
             std::collections::HashMap::new();
 
         for (sub, op) in input_subs.iter().zip(operands.iter()) {
+            let shape = op.complex_logical_shape(context)?;
             let chars: Vec<char> = sub.chars().collect();
-            if chars.len() != op.shape.len() {
+            if chars.len() != shape.len() {
                 return Err(UFuncError::Msg(format!(
                     "{context}: subscript '{}' has {} indices but operand has {} dimensions",
                     sub,
                     chars.len(),
-                    op.shape.len()
+                    shape.len()
                 )));
             }
 
             for (idx, &label) in chars.iter().enumerate() {
-                let dim = op.shape[idx];
+                let dim = shape[idx];
                 // Repeated labels select a diagonal within one operand. Only
                 // labels shared by different operands may broadcast.
                 if validate_diagonals
                     && let Some(previous) = chars[..idx].iter().position(|&c| c == label)
-                    && op.shape[previous] != dim
+                    && shape[previous] != dim
                 {
                     return Err(UFuncError::Msg(format!(
                         "{context}: dimensions for repeated label '{label}' differ: {} vs {dim}",
-                        op.shape[previous]
+                        shape[previous]
                     )));
                 }
                 if let Some(existing) = label_sizes.get_mut(&label) {
@@ -28102,7 +28104,7 @@ impl UFuncArray {
     }
 
     pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
-        Self::einsum_impl(subscripts, operands, false)
+        Self::einsum_impl(subscripts, operands, false, false)
     }
 
     // Fast path for a single operand whose subscript is a pure permutation (transpose) or a
@@ -28285,10 +28287,160 @@ impl UFuncArray {
         IntegerContraction::finish_values(dtype, output_shape, values)
     }
 
+    /// Contract logical inexact elements. Complex labels and strides never
+    /// include the trailing storage component axis. Real intermediates in a
+    /// complex expression use their own promoted product/accumulator precision.
+    fn einsum_inexact(
+        input_subs: &[&str],
+        output_labels: &[char],
+        operands: &[&Self],
+        label_sizes: &std::collections::HashMap<char, usize>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let complex = dtype.is_complex();
+        if !(complex || dtype.is_float())
+            || operands
+                .iter()
+                .any(|op| !(op.dtype.is_numeric() || op.dtype == DType::Bool))
+            || (!complex && operands.iter().any(|op| op.dtype.is_complex()))
+        {
+            return Err(UFuncError::Msg(
+                "einsum: inexact contractions require compatible numeric operands".into(),
+            ));
+        }
+
+        let mut output_shape: Vec<usize> = output_labels.iter().map(|c| label_sizes[c]).collect();
+        let output_size = element_count(&output_shape).map_err(UFuncError::Shape)?;
+        if complex {
+            output_shape.push(2);
+        }
+        let physical_size = element_count(&output_shape).map_err(UFuncError::Shape)?;
+        let mut values = try_filled_f64(physical_size, 0.0, "einsum")?;
+
+        let mut all_labels = output_labels.to_vec();
+        for sub in input_subs {
+            for label in sub.chars() {
+                if !all_labels.contains(&label) {
+                    all_labels.push(label);
+                }
+            }
+        }
+        let all_dims: Vec<usize> = all_labels.iter().map(|c| label_sizes[c]).collect();
+        let contracted_size =
+            element_count(&all_dims[output_labels.len()..]).map_err(UFuncError::Shape)?;
+        if output_size == 0 || contracted_size == 0 {
+            return Self::new(output_shape, values, dtype);
+        }
+        // The joint extent is used to decode output and contraction coordinates
+        // below; reject unrepresentable iteration spaces before index arithmetic.
+        element_count(&all_dims).map_err(UFuncError::Shape)?;
+
+        let label_pos: std::collections::HashMap<char, usize> = all_labels
+            .iter()
+            .enumerate()
+            .map(|(index, &label)| (label, index))
+            .collect();
+        let op_terms = input_subs
+            .iter()
+            .zip(operands)
+            .map(|(sub, op)| {
+                let shape = op.complex_logical_shape("einsum")?;
+                let mut stride = 1usize;
+                let mut terms = Vec::with_capacity(shape.len());
+                for (label, &dim) in sub.chars().rev().zip(shape.iter().rev()) {
+                    terms.push((label_pos[&label], if dim == 1 { 0 } else { stride }));
+                    stride = stride
+                        .checked_mul(dim)
+                        .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+                }
+                Ok(terms)
+            })
+            .collect::<Result<Vec<_>, UFuncError>>()?;
+        let inputs = operands
+            .iter()
+            .map(|op| {
+                if complex {
+                    return op.complex_reduction_values(dtype);
+                }
+                // Source storage rounds raw working cells before promotion and
+                // retains exact wide integers, including same-dtype float casts.
+                Ok(op
+                    .to_storage()?
+                    .cast_to(dtype)
+                    .map_err(|error| {
+                        UFuncError::Msg(format!("einsum: input cast failed: {error}"))
+                    })?
+                    .to_f64_vec()
+                    .into_iter()
+                    .map(|value| (value, 0.0))
+                    .collect())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut coordinates = vec![0usize; all_labels.len()];
+        let has_contraction = output_labels.len() != all_labels.len();
+
+        let components = if complex { 2 } else { 1 };
+        for (output_index, output) in values.chunks_exact_mut(components).enumerate() {
+            let mut sum = (0.0, 0.0);
+            for contracted in 0..contracted_size {
+                let mut remaining = output_index * contracted_size + contracted;
+                for axis in (0..all_dims.len()).rev() {
+                    coordinates[axis] = remaining % all_dims[axis];
+                    remaining /= all_dims[axis];
+                }
+                let source_index = |terms: &[(usize, usize)]| {
+                    terms
+                        .iter()
+                        .map(|&(axis, stride)| coordinates[axis] * stride)
+                        .sum::<usize>()
+                };
+                // Start from the first operand rather than multiplying it by
+                // 1+0j: that would corrupt infinities and signed zero in a pure
+                // transpose, diagonal, or single-operand reduction.
+                let mut product = inputs[0][source_index(&op_terms[0])];
+                for (input, terms) in inputs.iter().zip(&op_terms).skip(1) {
+                    let value = input[source_index(terms)];
+                    product = if complex {
+                        Self::complex_reduction_multiply(product, value, dtype)
+                    } else if matches!(dtype, DType::F16 | DType::F32) {
+                        (f64::from((product.0 as f32) * (value.0 as f32)), 0.0)
+                    } else {
+                        (product.0 * value.0, 0.0)
+                    };
+                }
+                if has_contraction {
+                    sum = if complex {
+                        Self::complex_reduction_add(sum, product, dtype)
+                    } else if matches!(dtype, DType::F16 | DType::F32) {
+                        (f64::from((sum.0 as f32) + (product.0 as f32)), 0.0)
+                    } else {
+                        (sum.0 + product.0, 0.0)
+                    };
+                } else {
+                    // A relocation does not perform arithmetic. Preserve its
+                    // source bits, including negative zero and NaN payloads.
+                    sum = product;
+                }
+            }
+            output[0] = if dtype == DType::F16 {
+                // Optimized half contractions accumulate in float32 and pack
+                // only the final output; per-product half rounding can overflow.
+                f16::from_f32(sum.0 as f32).to_f64()
+            } else {
+                sum.0
+            };
+            if complex {
+                output[1] = sum.1;
+            }
+        }
+        Self::new(output_shape, values, dtype)
+    }
+
     fn einsum_impl(
         subscripts: &str,
         operands: &[&Self],
         allow_private_labels: bool,
+        allow_ellipsis_reduction: bool,
     ) -> Result<Self, UFuncError> {
         let normalized_subscripts =
             Self::normalize_einsum_subscripts("einsum", subscripts, allow_private_labels)?;
@@ -28321,6 +28473,14 @@ impl UFuncArray {
         };
         let (processed_input_subs, processed_output_sub, placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
+        if !allow_ellipsis_reduction
+            && !placeholders.is_empty()
+            && raw_output_sub.is_some_and(|output| !output.contains("..."))
+        {
+            return Err(UFuncError::Msg(
+                "einsum: output needs an ellipsis to preserve broadcast dimensions".into(),
+            ));
+        }
         let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
 
         // Determine output labels
@@ -28354,6 +28514,15 @@ impl UFuncArray {
             .iter()
             .skip(1)
             .fold(operands[0].dtype, |dtype, op| promote(dtype, op.dtype));
+        if operands.iter().any(|op| op.dtype.is_complex()) {
+            return Self::einsum_inexact(
+                &input_subs,
+                &output_labels,
+                operands,
+                &label_sizes,
+                dtype,
+            );
+        }
         if dtype.is_integer() || dtype == DType::Bool {
             // Reassociation is exact in a single integer ring (or the Boolean
             // semiring). Mixed dtypes must first use the full expression's dtype;
@@ -28785,7 +28954,7 @@ impl UFuncArray {
     /// Evaluate the optimal contraction order for `einsum` (np.einsum_path).
     ///
     /// Returns a tuple of `(contraction_list, description_string)`.
-    /// The contraction list contains pairs of operand indices to contract.
+    /// The contraction list contains operand indices for each contraction step.
     /// The description string provides a human-readable summary of the path.
     ///
     /// This is a greedy heuristic: at each step, it picks the pair of operands
@@ -28843,10 +29012,21 @@ impl UFuncArray {
         Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands, false)?;
 
         let n = operands.len();
-        if n <= 2 {
-            // Trivial: just contract all at once
+        let reduces_labels = input_subs
+            .iter()
+            .flat_map(|sub| sub.chars())
+            .any(|label| !output_labels.contains(&label));
+        if n <= 2 || !reduces_labels {
+            // NumPy keeps all operands together when every input label appears
+            // in the output: pairwise products cannot eliminate an index.
             let path = vec![(0..n).collect::<Vec<usize>>()];
-            let sizes: Vec<usize> = operands.iter().map(|o| o.values.len()).collect();
+            let sizes = operands
+                .iter()
+                .map(|op| {
+                    element_count(&op.complex_logical_shape("einsum_path")?)
+                        .map_err(UFuncError::Shape)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let desc = format!(
                 "  Complete contraction:  {}\n  Naive scaling:  {}\n  Optimized scaling:  {}\n  Input shapes:  {:?}\n",
                 subscripts, n, n, sizes,
@@ -28861,8 +29041,10 @@ impl UFuncArray {
         // before Hadamard- or outer-style steps.
         let mut path = Vec::new();
         let mut current_subs: Vec<String> = processed_input_subs.clone();
-        let mut current_shapes: Vec<Vec<usize>> =
-            operands.iter().map(|o| o.shape.clone()).collect();
+        let mut current_shapes = operands
+            .iter()
+            .map(|op| op.complex_logical_shape("einsum_path"))
+            .collect::<Result<Vec<_>, _>>()?;
 
         while current_shapes.len() > 1 {
             let (best_lo, best_hi) =
@@ -28887,7 +29069,12 @@ impl UFuncArray {
             current_subs.push(inter_str);
         }
 
-        let input_sizes: Vec<usize> = operands.iter().map(|o| o.values.len()).collect();
+        let input_sizes = operands
+            .iter()
+            .map(|op| {
+                element_count(&op.complex_logical_shape("einsum_path")?).map_err(UFuncError::Shape)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let desc = format!(
             "  Complete contraction:  {}\n  Input shapes:  {:?}\n  Path:  {:?}\n",
             subscripts, input_sizes, path,
@@ -28899,22 +29086,24 @@ impl UFuncArray {
     ///
     /// `optimize` values:
     /// - `"greedy"`: greedily pick the cheapest pairwise contraction at each step
-    /// - `"optimal"`: dynamic programming over all pairwise contraction orders (≤10 operands)
+    /// - `"optimal"`: pick the pair with the smallest retained intermediate (≤10 operands)
     /// - `"auto"`: use greedy
     ///
-    /// For ≤2 operands this is identical to `einsum()`.
+    /// For ≤2 operands or expressions without label reduction, all operands
+    /// are evaluated in one step. As in NumPy's optimized evaluator, captured
+    /// ellipsis dimensions may also be reduced.
     pub fn einsum_optimized(
         subscripts: &str,
         operands: &[&Self],
         optimize: &str,
     ) -> Result<Self, UFuncError> {
-        if operands.len() <= 2 {
-            return Self::einsum(subscripts, operands);
-        }
         if !matches!(optimize, "greedy" | "optimal" | "auto") {
             return Err(UFuncError::Msg(format!(
                 "einsum_optimized: unknown optimize value '{optimize}'"
             )));
+        }
+        if operands.len() <= 2 {
+            return Self::einsum_impl(subscripts, operands, false, true);
         }
 
         // Parse subscripts
@@ -28973,16 +29162,39 @@ impl UFuncArray {
         Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands, true)?;
         let output_str: String = output_labels.iter().collect();
 
+        if input_subs
+            .iter()
+            .flat_map(|sub| sub.chars())
+            .all(|label| output_labels.contains(&label))
+        {
+            // NumPy's planner evaluates an expression without index reduction
+            // in one step. Narrow pairwise intermediates could otherwise wrap
+            // or overflow before a later operand promotes the full expression.
+            // Input syntax was validated above; internal mode also prevents
+            // the integer evaluator's planner fast path from re-entering here.
+            return Self::einsum_impl(subscripts, operands, true, true);
+        }
+
         // Inline greedy contraction: repeatedly pick and contract the cheapest pair
         let mut current_ops: Vec<Self> = operands.iter().map(|o| (*o).clone()).collect();
         let mut current_subs: Vec<String> = processed_input_subs.clone();
+        let contains_complex = operands.iter().any(|op| op.dtype.is_complex());
+        if contains_complex
+            && operands
+                .iter()
+                .any(|op| !(op.dtype.is_numeric() || op.dtype == DType::Bool))
+        {
+            return Err(UFuncError::Msg(
+                "einsum_optimized: complex contractions require numeric operands".into(),
+            ));
+        }
 
         while current_ops.len() > 1 {
             // Pick the best pair to contract
             let (best_lo, best_hi) = if optimize == "optimal" && current_ops.len() <= 10 {
-                Self::pick_optimal_pair(&current_ops, &current_subs, &output_labels)
+                Self::pick_optimal_pair(&current_ops, &current_subs, &output_labels)?
             } else {
-                Self::pick_greedy_pair(&current_ops, &current_subs, &output_labels)
+                Self::pick_greedy_pair(&current_ops, &current_subs, &output_labels)?
             };
 
             let sub_a = current_subs[best_lo].clone();
@@ -28991,8 +29203,8 @@ impl UFuncArray {
                 &current_subs,
                 &current_ops
                     .iter()
-                    .map(|op| op.shape.clone())
-                    .collect::<Vec<_>>(),
+                    .map(|op| op.complex_logical_shape("einsum_optimized"))
+                    .collect::<Result<Vec<_>, _>>()?,
                 &output_labels,
                 best_lo,
                 best_hi,
@@ -29001,11 +29213,27 @@ impl UFuncArray {
             );
 
             let pair_sub = format!("{sub_a},{sub_b}->{inter_str}");
-            let result = Self::einsum_impl(
-                &pair_sub,
-                &[&current_ops[best_lo], &current_ops[best_hi]],
-                true,
-            )?;
+            let left = &current_ops[best_lo];
+            let right = &current_ops[best_hi];
+            let pair_dtype = promote(left.dtype, right.dtype);
+            let pair_inputs = [left, right];
+            let result = if contains_complex && pair_dtype.is_float() {
+                // A real-only intermediate must retain both the pair's dtype
+                // and its arithmetic precision. Computing in f64 then casting
+                // would erase float32 overflow/underflow before the later
+                // complex contraction, and same-dtype astype is only a clone.
+                let pair_subs = [sub_a.as_str(), sub_b.as_str()];
+                let labels = Self::validate_einsum_input_shapes(
+                    "einsum_optimized",
+                    &pair_subs,
+                    &pair_inputs,
+                    true,
+                )?;
+                let output: Vec<char> = inter_str.chars().collect();
+                Self::einsum_inexact(&pair_subs, &output, &pair_inputs, &labels, pair_dtype)?
+            } else {
+                Self::einsum_impl(&pair_sub, &pair_inputs, true, true)?
+            };
 
             // Remove hi first (larger index), then lo
             current_ops.remove(best_hi);
@@ -29022,7 +29250,7 @@ impl UFuncArray {
             Ok(current_ops.remove(0))
         } else {
             let s = format!("{final_sub}->{output_str}");
-            Self::einsum_impl(&s, &[&current_ops[0]], true)
+            Self::einsum_impl(&s, &[&current_ops[0]], true, true)
         }
     }
 
@@ -29051,7 +29279,14 @@ impl UFuncArray {
         ] {
             for (idx, c) in sub.chars().enumerate() {
                 if idx < shape.len() {
-                    label_sizes.entry(c).or_insert(shape[idx]);
+                    label_sizes
+                        .entry(c)
+                        .and_modify(|size| {
+                            if *size == 1 {
+                                *size = shape[idx];
+                            }
+                        })
+                        .or_insert(shape[idx]);
                 }
             }
         }
@@ -29087,7 +29322,16 @@ impl UFuncArray {
         i: usize,
         j: usize,
     ) -> (std::cmp::Reverse<usize>, usize, usize, usize) {
-        let input_sizes = shapes[i].iter().product::<usize>() + shapes[j].iter().product::<usize>();
+        let input_sizes = shapes[i]
+            .iter()
+            .copied()
+            .fold(1usize, usize::saturating_mul)
+            .saturating_add(
+                shapes[j]
+                    .iter()
+                    .copied()
+                    .fold(1usize, usize::saturating_mul),
+            );
         let mut label_sizes = std::collections::HashMap::new();
         for (shape, sub) in [
             (shapes[i].as_slice(), &subs[i]),
@@ -29095,7 +29339,14 @@ impl UFuncArray {
         ] {
             for (idx, c) in sub.chars().enumerate() {
                 if idx < shape.len() {
-                    label_sizes.entry(c).or_insert(shape[idx]);
+                    label_sizes
+                        .entry(c)
+                        .and_modify(|size| {
+                            if *size == 1 {
+                                *size = shape[idx];
+                            }
+                        })
+                        .or_insert(shape[idx]);
                 }
             }
         }
@@ -29121,15 +29372,15 @@ impl UFuncArray {
         let new_size = new_result_labels
             .iter()
             .map(|label| label_sizes.get(label).copied().unwrap_or(1))
-            .product::<usize>()
+            .fold(1usize, usize::saturating_mul)
             .max(1);
         let removed_size = input_sizes.saturating_sub(new_size);
         let idx_removed = contract_labels.difference(&new_result_labels).count();
         let cost = contract_labels
             .iter()
             .map(|label| label_sizes.get(label).copied().unwrap_or(1))
-            .product::<usize>()
-            * if idx_removed > 0 { 2 } else { 1 };
+            .fold(1usize, usize::saturating_mul)
+            .saturating_mul(if idx_removed > 0 { 2 } else { 1 });
 
         (std::cmp::Reverse(removed_size), cost, i, j)
     }
@@ -29168,14 +29419,33 @@ impl UFuncArray {
 
     /// Pick the pair with NumPy-style greedy priority: maximize removed
     /// intermediate size, then minimize flop cost.
-    fn pick_greedy_pair(ops: &[Self], subs: &[String], output_labels: &[char]) -> (usize, usize) {
-        let shapes = ops.iter().map(|op| op.shape.clone()).collect::<Vec<_>>();
-        Self::pick_greedy_pair_from_specs(&shapes, subs, output_labels)
+    fn pick_greedy_pair(
+        ops: &[Self],
+        subs: &[String],
+        output_labels: &[char],
+    ) -> Result<(usize, usize), UFuncError> {
+        let shapes = ops
+            .iter()
+            .map(|op| op.complex_logical_shape("einsum_optimized"))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::pick_greedy_pair_from_specs(
+            &shapes,
+            subs,
+            output_labels,
+        ))
     }
 
     /// Pick the optimal pair by trying all pairs and choosing the one that
     /// minimizes intermediate result size (accounts for shared indices).
-    fn pick_optimal_pair(ops: &[Self], subs: &[String], output_labels: &[char]) -> (usize, usize) {
+    fn pick_optimal_pair(
+        ops: &[Self],
+        subs: &[String],
+        output_labels: &[char],
+    ) -> Result<(usize, usize), UFuncError> {
+        let shapes = ops
+            .iter()
+            .map(|op| op.complex_logical_shape("einsum_optimized"))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut best_lo = 0;
         let mut best_hi = 1;
         let mut best_inter_size = usize::MAX;
@@ -29197,14 +29467,21 @@ impl UFuncArray {
                     std::collections::HashMap::new();
                 let chars_i: Vec<char> = subs[i].chars().collect();
                 for (idx, &c) in chars_i.iter().enumerate() {
-                    if idx < ops[i].shape.len() {
-                        label_sizes.insert(c, ops[i].shape[idx]);
+                    if idx < shapes[i].len() {
+                        label_sizes.insert(c, shapes[i][idx]);
                     }
                 }
                 let chars_j: Vec<char> = subs[j].chars().collect();
                 for (idx, &c) in chars_j.iter().enumerate() {
-                    if idx < ops[j].shape.len() {
-                        label_sizes.entry(c).or_insert(ops[j].shape[idx]);
+                    if idx < shapes[j].len() {
+                        label_sizes
+                            .entry(c)
+                            .and_modify(|size| {
+                                if *size == 1 {
+                                    *size = shapes[j][idx];
+                                }
+                            })
+                            .or_insert(shapes[j][idx]);
                     }
                 }
                 let inter_size: usize = subs[i]
@@ -29214,7 +29491,7 @@ impl UFuncArray {
                     .collect::<std::collections::HashSet<_>>()
                     .iter()
                     .map(|c| label_sizes.get(c).copied().unwrap_or(1))
-                    .product::<usize>()
+                    .fold(1usize, usize::saturating_mul)
                     .max(1);
 
                 if inter_size < best_inter_size {
@@ -29224,7 +29501,7 @@ impl UFuncArray {
                 }
             }
         }
-        (best_lo, best_hi)
+        Ok((best_lo, best_hi))
     }
 
     /// Stack arrays vertically (np.vstack). Row-wise concatenation.

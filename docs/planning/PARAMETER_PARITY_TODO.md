@@ -73,8 +73,27 @@
 ## GROUP 10: logical complex matrix and vector contractions
 - [x] `matmul` handles logical complex dimensions, vector promotion, broadcasted batches, mixed numeric input dtypes, declared source precision, exact wide-integer conversion, empty contractions, and checked physical output capacity. Complex128 uses the existing complex matrix kernel; Complex64 accumulates in its component type.
 - [x] `matvec` and `vecmat` preserve logical output dimensions and singleton batch axes; `vecmat` conjugates the vector. Complex `vdot` flattens complete elements and conjugates the first operand; `vecdot` contracts independently normalized logical axes and broadcasts the remaining dimensions.
-- [x] `complex_matmul.rs` adds 11 tests with 1,866 NumPy differential cases plus direct arithmetic, malformed-layout, and allocation assertions. Finite comparisons use componentwise forward-error bounds derived from promoted input values; executable Rust validation remains recorded with the implementing commit.
+- [x] The original matrix/vector coverage in `complex_matmul.rs` includes 11 tests with 1,866 NumPy differential cases plus direct arithmetic, malformed-layout, and allocation assertions. Finite comparisons use componentwise forward-error bounds derived from promoted input values; executable Rust validation remains recorded with the implementing commit.
 - [D] Portable complex accumulation can differ from vendor BLAS in reduction order, rounding, cancellation, and exceptional-value behavior. These APIs do not yet establish backend-identical numerical or floating-error-policy parity.
+- [D] `multi_dot` chains with three or more complex operands still plan using physical component shapes. Logical matrix-chain dimensions and the corresponding NumPy coverage remain open.
+
+## GROUP 11: logical complex comparisons and Boolean operations
+- [x] Rust-core `equal`, `not_equal`, `less`, `less_equal`, `greater`, `greater_equal`, `logical_and`, `logical_or`, and `logical_xor` broadcast logical complex shapes and return one Boolean per element. Mixed numeric inputs retain declared source precision and exact integer conversion; malformed layouts and unsupported dtypes are rejected.
+- [x] Ordered comparisons use NumPy's complex lexicographic and quiet-NaN rules; corresponding invalid events are aggregated once through the existing floating-error policy. Dispatch planning uses logical output shapes and Boolean output dtype while retaining registry and signature validation.
+- [D] Signaling-NaN invalid-event parity remains open for equality, logical ufuncs, and some ordered short-circuit cases; coverage requires bit-preserving fixtures because the JSON oracle canonicalizes NaNs.
+- [~] `complex_comparisons.rs` adds live NumPy cases for broadcasting, numeric promotion, source precision, wide integers, NaN ordering, registry selection, and all floating-error modes. Runtime verification is pending: library rebuilds were killed before these tests executed, and the executor subsequently became unavailable. The all-targets metadata check identified two nonexistent test dtype variants; they are corrected to the actual `Structured` variant, but a fresh check is still required.
+
+## GROUP 12: logical complex tensor products and explicit contraction axes
+- [x] Rust-core complex `dot`, `inner`, `outer`, `kron`, and count-based `tensordot` preserve complete elements, logical scalar/array shapes, mixed numeric promotion, source precision, and exact wide-integer conversion. These products do not conjugate inputs; empty outputs/contractions and physical output capacities are checked.
+- [x] New Rust-core `tensordot_axes` accepts paired explicit axis lists, including negative axes, for real and complex operands. It validates duplicates and dimension matches, preserves the original order of free axes, and retains typed source/result precision and exact integer sidecars.
+- [~] Expanded `complex_matmul.rs` has 18 tests, adding NumPy cases for these products, explicit axes, real dtypes, scalar/empty inputs, exact integers, and allocation/error cases. Final executable validation is pending executor recovery; the numerical and floating-error limitations in Group 10 remain applicable.
+
+## GROUP 13: logical complex Einstein summation
+- [x] Rust-core `einsum`, `einsum_optimized` (`greedy`, `optimal`, and `auto`), and `einsum_path` interpret logical dimensions without exposing the physical component axis. Execution supports implicit/explicit outputs, repeated labels and diagonals, permutations, ellipsis broadcasting, scalar/empty inputs, and multiple operands.
+- [x] Direct execution and optimized expressions without index reduction promote the full expression together; optimized reduction paths apply pairwise promotion. The no-reduction path matches NumPy's all-operand shortcut and avoids premature narrow-integer wrapping or half/float32 overflow. Paired arithmetic preserves source precision and exact real-integer conversion, pure relocations preserve component bits, and shape/layout validation and physical output capacity checks run before evaluation.
+- [D] Full optimizer-path parity remains open: the existing `optimal` mode chooses pairs by retained intermediate size rather than performing NumPy's complete optimal-path search. Different contraction orders can also change mixed-dtype intermediates.
+- [~] `complex_einsum.rs` adds live NumPy coverage for execution and planning, including signed zero, non-finite values, and invalid expressions. Final executable validation is pending executor recovery. Numerical comparisons use forward-error bounds; backend-identical accumulation and floating-error-policy parity remain open as described in Group 10.
+
 
 ---
 
@@ -84,6 +103,9 @@
 - [x] histogram_full (density, range, weights parameters)
 
 ## KNOWN PARITY DEBT / ARCHITECTURE NOTES
+- [D] Rust-core generic complex unary dispatch remains incomplete for `square`, `sqrt`, `exp`, `log`, `sign`, and `logical_not`. Beyond the dedicated absolute-value and NaN/Inf/finiteness predicates, paired-element kernels, source precision, logical Boolean output shapes, and floating-error behavior still need implementation and NumPy coverage.
+- [D] Standard Rust-core `sort`, `argsort`, `partition`/`argpartition`, and `unique` variants still interpret complex component storage as ordinary axes or values. `searchsorted` rejects a valid logical complex vector because its physical storage has rank two. Logical complex ordering, NaN placement, and index/inverse/count metadata remain to be implemented consistently; the separate `sort_complex` helper does not close these API gaps.
+- [D] Public Rust-core `from_storage`, `from_storage_with_dtype`, and `to_storage` still reject complex typed storage. The private numeric conversion path supports paired components, but a public `ArrayStorage::Complex64`/`Complex128` bridge with logical shape validation, precision-preserving round trips, and tests remains open.
 - [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
 - [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
 - [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces

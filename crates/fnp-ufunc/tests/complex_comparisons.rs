@@ -419,8 +419,7 @@ fn complex_comparisons_validate_shapes_layouts_and_dtypes_before_execution() {
         DType::DateTime64,
         DType::TimeDelta64,
         DType::Str,
-        DType::Object,
-        DType::Void,
+        DType::Structured,
     ] {
         let other = UFuncArray::new(vec![3], vec![0.0; 3], dtype).unwrap();
         for op in OPS[..6].iter().copied() {
