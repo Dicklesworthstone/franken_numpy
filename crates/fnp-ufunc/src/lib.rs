@@ -2615,10 +2615,42 @@ pub fn plan_binary_dispatch_with_registry(
     registry: &UFuncLoopRegistry,
     fixed_signature: Option<&FixedSignature>,
 ) -> Result<BinaryDispatchSelection, UFuncError> {
-    let out_shape = broadcast_shape(lhs.shape(), rhs.shape()).map_err(UFuncError::Shape)?;
+    let complex_boolean = (lhs.dtype().is_complex() || rhs.dtype().is_complex())
+        && matches!(
+            ufunc_name.trim(),
+            "equal"
+                | "not_equal"
+                | "less"
+                | "less_equal"
+                | "greater"
+                | "greater_equal"
+                | "logical_and"
+                | "logical_or"
+                | "logical_xor"
+        );
+    let out_shape = if complex_boolean {
+        for operand in [lhs, rhs] {
+            if !(operand.dtype().is_numeric() || operand.dtype() == DType::Bool) {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail: format!(
+                        "ufunc '{ufunc_name}' cannot compare complex and {:?} operands",
+                        operand.dtype()
+                    ),
+                });
+            }
+        }
+        let lhs_shape = lhs.complex_logical_shape(ufunc_name)?;
+        let rhs_shape = rhs.complex_logical_shape(ufunc_name)?;
+        broadcast_shape(&lhs_shape, &rhs_shape).map_err(UFuncError::Shape)?
+    } else {
+        broadcast_shape(lhs.shape(), rhs.shape()).map_err(UFuncError::Shape)?
+    };
     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-    let (method, out_dtype, custom_loop_name) =
+    let (method, mut out_dtype, custom_loop_name) =
         resolve_binary_output_dtype(ufunc_name, lhs, rhs, Some(registry), fixed_signature)?;
+    if complex_boolean && method == BinaryDispatchMethod::BuiltinPromoted {
+        out_dtype = DType::Bool;
+    }
     Ok(BinaryDispatchSelection {
         method,
         plan: BinaryDispatchPlan {
@@ -6964,6 +6996,18 @@ impl UFuncArray {
         registry: &UFuncLoopRegistry,
     ) -> Result<Self, UFuncError> {
         let selection = plan_binary_dispatch_with_registry(op.name(), self, rhs, registry, None)?;
+        if op.is_bool_output() && (self.dtype.is_complex() || rhs.dtype.is_complex()) {
+            if selection.plan.out_dtype != DType::Bool {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail: format!(
+                        "ufunc '{}' requires bool output for complex comparison, got {:?}",
+                        op.name(),
+                        selection.plan.out_dtype
+                    ),
+                });
+            }
+            return self.elementwise_complex_boolean(rhs, op, selection.plan.out_shape);
+        }
         if matches!(
             op,
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
@@ -8311,6 +8355,89 @@ impl UFuncArray {
             }
         }
         Self::from_values_with_dtype(out_shape, values, out_dtype)
+    }
+
+    /// Compare complete complex values, keeping the storage component axis
+    /// out of both broadcasting and Boolean output shapes. Comparisons use the
+    /// common numeric dtype after applying each operand's source precision.
+    fn elementwise_complex_boolean(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        out_shape: Vec<usize>,
+    ) -> Result<Self, UFuncError> {
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let mut out_values = try_zeroed_f64(out_count, op.name())?;
+        if out_count == 0 {
+            return Self::new(out_shape, out_values, DType::Bool);
+        }
+
+        let lhs_shape = self.complex_logical_shape(op.name())?;
+        let rhs_shape = rhs.complex_logical_shape(op.name())?;
+        let dtype = promote(self.dtype, rhs.dtype);
+        // This typed conversion also avoids double rounding of exact wide
+        // integers and rounds Complex64 before widening to Complex128.
+        let lhs_values = self.complex_reduction_values(dtype)?;
+        let rhs_values = rhs.complex_reduction_values(dtype)?;
+        let lhs_steps = aligned_broadcast_axis_steps(
+            out_shape.len(),
+            &lhs_shape,
+            &contiguous_strides_elems(&lhs_shape),
+        );
+        let rhs_steps = aligned_broadcast_axis_steps(
+            out_shape.len(),
+            &rhs_shape,
+            &contiguous_strides_elems(&rhs_shape),
+        );
+        let ordered = matches!(
+            op,
+            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+        );
+        let mut flags = FloatErrorFlags::default();
+        let mut coordinates = vec![0usize; out_shape.len()];
+        let mut lhs_flat = 0usize;
+        let mut rhs_flat = 0usize;
+        for (flat, slot) in out_values.iter_mut().enumerate() {
+            let (lr, li) = lhs_values[lhs_flat];
+            let (rr, ri) = rhs_values[rhs_flat];
+            let imaginary_nan = li.is_nan() || ri.is_nan();
+            if ordered && (lr.is_nan() || rr.is_nan() || (lr == rr && imaginary_nan)) {
+                // NumPy orders real components first. An imaginary NaN makes
+                // the result unordered but raises invalid only when the tied
+                // real parts require an ordered imaginary comparison.
+                flags.note(FloatErrorKind::Invalid);
+            }
+            let matched = match op {
+                BinaryOp::Equal => lr == rr && li == ri,
+                BinaryOp::NotEqual => lr != rr || li != ri,
+                BinaryOp::Less => (lr < rr && !imaginary_nan) || (lr == rr && li < ri),
+                BinaryOp::LessEqual => (lr < rr && !imaginary_nan) || (lr == rr && li <= ri),
+                BinaryOp::Greater => (lr > rr && !imaginary_nan) || (lr == rr && li > ri),
+                BinaryOp::GreaterEqual => (lr > rr && !imaginary_nan) || (lr == rr && li >= ri),
+                BinaryOp::LogicalAnd => (lr != 0.0 || li != 0.0) && (rr != 0.0 || ri != 0.0),
+                BinaryOp::LogicalOr => (lr != 0.0 || li != 0.0) || (rr != 0.0 || ri != 0.0),
+                BinaryOp::LogicalXor => (lr != 0.0 || li != 0.0) != (rr != 0.0 || ri != 0.0),
+                _ => unreachable!("complex Boolean dispatch requires a Boolean operation"),
+            };
+            *slot = if matched { 1.0 } else { 0.0 };
+
+            if flat + 1 == out_count {
+                break;
+            }
+            for axis in (0..out_shape.len()).rev() {
+                coordinates[axis] += 1;
+                lhs_flat += lhs_steps[axis];
+                rhs_flat += rhs_steps[axis];
+                if coordinates[axis] < out_shape[axis] {
+                    break;
+                }
+                coordinates[axis] = 0;
+                lhs_flat -= lhs_steps[axis] * out_shape[axis];
+                rhs_flat -= rhs_steps[axis] * out_shape[axis];
+            }
+        }
+        dispatch_float_error_flags(flags, op.name())?;
+        Self::new(out_shape, out_values, DType::Bool)
     }
 
     fn elementwise_complex_binary_with_dtype(
