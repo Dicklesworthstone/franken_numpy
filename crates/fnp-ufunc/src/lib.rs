@@ -19135,11 +19135,28 @@ impl UFuncArray {
 
         match op {
             UnaryOp::Abs => Some(self.abs_complex()),
-            UnaryOp::Isnan | UnaryOp::Isinf | UnaryOp::Isfinite => {
+            UnaryOp::Isnan | UnaryOp::Isinf | UnaryOp::Isfinite | UnaryOp::LogicalNot => {
                 Some(self.complex_logical_predicate(op))
             }
+            UnaryOp::Positive | UnaryOp::Negative => Some(self.complex_signed_unary(op)),
             _ => None,
         }
+    }
+
+    /// Preserve complete source-typed complex elements for unary signs.
+    fn complex_signed_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+        let _ = self.complex_logical_shape(op.name())?;
+        let mut values = try_zeroed_f64(self.values.len(), op.name())?;
+        for (index, output) in values.chunks_exact_mut(2).enumerate() {
+            let (real, imag) = self.complex_extrema_value(index);
+            let result = match op {
+                UnaryOp::Positive => (real, imag),
+                UnaryOp::Negative => (-real, -imag),
+                _ => unreachable!("complex unary sign operation"),
+            };
+            output.copy_from_slice(&[result.0, result.1]);
+        }
+        Self::new(self.shape.clone(), values, self.dtype)
     }
 
     fn complex_logical_predicate(&self, op: UnaryOp) -> Result<Self, UFuncError> {
@@ -19147,11 +19164,12 @@ impl UFuncArray {
         let count = self.values.len() / 2;
         let values = (0..count)
             .map(|idx| {
-                let (re, im) = self.logical_complex_value(idx);
+                let (re, im) = self.complex_extrema_value(idx);
                 let matched = match op {
                     UnaryOp::Isnan => re.is_nan() || im.is_nan(),
                     UnaryOp::Isinf => re.is_infinite() || im.is_infinite(),
                     UnaryOp::Isfinite => re.is_finite() && im.is_finite(),
+                    UnaryOp::LogicalNot => re == 0.0 && im == 0.0,
                     _ => unreachable!("complex_logical_predicate only handles predicates"),
                 };
                 if matched { 1.0 } else { 0.0 }
@@ -36241,20 +36259,20 @@ impl UFuncArray {
             ));
         }
         let n = self.values.len() / 2;
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let re = self.values[2 * i];
-            let im = self.values[2 * i + 1];
-            out.push(re.hypot(im));
-        }
-        let mut out_shape = self.shape[..self.shape.len() - 1].to_vec();
-        if out_shape.is_empty() {
-            out_shape.push(1);
+        let mut out = try_zeroed_f64(n, "absolute")?;
+        let narrow = self.dtype == DType::Complex64;
+        for (i, result) in out.iter_mut().enumerate() {
+            let (re, im) = (self.values[2 * i], self.values[2 * i + 1]);
+            *result = if narrow {
+                f64::from((re as f32).hypot(im as f32))
+            } else {
+                re.hypot(im)
+            };
         }
         Ok(Self {
-            shape: out_shape,
+            shape: self.shape[..self.shape.len() - 1].to_vec(),
             values: out,
-            dtype: DType::F64,
+            dtype: if narrow { DType::F32 } else { DType::F64 },
             integer_sidecar: None,
         })
     }
@@ -50672,6 +50690,9 @@ pub fn logical_xor(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFunc
 /// Returns a boolean array where True indicates x is falsy (zero).
 /// NumPy equivalent: `np.logical_not(x)`.
 pub fn logical_not(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.complex_logical_predicate(UnaryOp::LogicalNot);
+    }
     let values: Vec<f64> = x
         .values
         .iter()
