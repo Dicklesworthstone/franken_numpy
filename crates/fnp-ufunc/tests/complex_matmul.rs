@@ -80,7 +80,13 @@ fn oracle_input(array: &UFuncArray) -> Value {
                 .collect::<Vec<_>>()
         )
     } else {
-        json!(array.values().iter().map(f64::to_string).collect::<Vec<_>>())
+        json!(
+            array
+                .values()
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+        )
     };
     json!({"shape": shape, "dtype": dtype_name(array.dtype()), "values": values})
 }
@@ -99,12 +105,25 @@ impl OracleBatch {
             "vecmat" => UFuncArray::vecmat(lhs, rhs),
             "vdot" => lhs.vdot(rhs),
             "vecdot" => lhs.vecdot(rhs, axis),
+            "dot" => lhs.dot(rhs),
+            "inner" => lhs.inner(rhs),
+            "outer" => lhs.outer(rhs),
+            "kron" => lhs.kron(rhs),
+            "tensordot" => lhs.tensordot(rhs, axis.unwrap_or(2) as usize),
             _ => panic!("unsupported contraction"),
         };
         self.cases.push(json!({
             "op": op, "lhs": oracle_input(lhs), "rhs": oracle_input(rhs), "axis": axis
         }));
         self.actual.push(actual);
+    }
+
+    fn axes_case(&mut self, lhs: &UFuncArray, rhs: &UFuncArray, a: &[isize], b: &[isize]) {
+        self.cases.push(json!({
+            "op": "tensordot_axes", "lhs": oracle_input(lhs), "rhs": oracle_input(rhs),
+            "axis": null, "axes": [a, b]
+        }));
+        self.actual.push(lhs.tensordot_axes(rhs, a, b));
     }
 
     fn finish(self) {
@@ -126,27 +145,38 @@ def load(item):
         array = np.array([convert(value) for value in item['values']], dtype=dtype)
     return array.reshape(item['shape'])
 
-def operate(op, left, right, axis):
+def operate(op, left, right, axis, axes=None):
     if op == 'vecdot':
         return np.vecdot(left, right, axis=-1 if axis is None else axis)
+    if op == 'tensordot':
+        return np.tensordot(left, right, axes=2 if axis is None else axis)
+    if op == 'tensordot_axes':
+        return np.tensordot(left, right, axes=axes)
     return getattr(np, op)(left, right)
 
 rows = []
 for case in json.load(sys.stdin):
     try:
         left, right = load(case['lhs']), load(case['rhs'])
-        op, axis = case['op'], case['axis']
-        result = np.asarray(operate(op, left, right, axis))
+        op, axis, axes = case['op'], case['axis'], case.get('axes')
+        result = np.asarray(operate(op, left, right, axis, axes))
         # Promote each input before deriving the rounding bound, matching the
         # ufunc's typed conversion rather than its original working cells.
         left = left.astype(result.dtype)
         right = right.astype(result.dtype)
         ar, ai = np.abs(left.real.astype(np.float64)), np.abs(left.imag.astype(np.float64))
         br, bi = np.abs(right.real.astype(np.float64)), np.abs(right.imag.astype(np.float64))
-        real_bound = operate(op, ar, br, axis) + operate(op, ai, bi, axis)
-        imag_bound = operate(op, ar, bi, axis) + operate(op, ai, br, axis)
+        real_bound = operate(op, ar, br, axis, axes) + operate(op, ai, bi, axis, axes)
+        imag_bound = operate(op, ar, bi, axis, axes) + operate(op, ai, br, axis, axes)
         if op == 'vdot':
             contracted = left.size
+        elif op in ('outer', 'kron') or (op in ('dot', 'inner') and (left.ndim == 0 or right.ndim == 0)):
+            contracted = 1
+        elif op == 'tensordot':
+            n = 2 if axis is None else axis
+            contracted = int(np.prod(left.shape[left.ndim-n:], dtype=np.int64))
+        elif op == 'tensordot_axes':
+            contracted = int(np.prod([left.shape[i] for i in axes[0]], dtype=np.int64))
         else:
             contracted = left.shape[(-1 if axis is None else axis) if op == 'vecdot' else -1]
         parts = np.empty(result.size * 2, dtype=np.float64)
@@ -157,7 +187,8 @@ for case in json.load(sys.stdin):
         bounds[1::2] = np.asarray(imag_bound).ravel()
         rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
                          bits=parts.view(np.uint64).tolist(),
-                         bounds=bounds.tolist(), contracted=int(contracted)))
+                         bounds=bounds.tolist(), contracted=int(contracted),
+                         integers=[str(int(x)) for x in result.ravel()] if result.dtype.kind in 'biu' else None))
     except (ValueError, TypeError, IndexError, OverflowError) as error:
         rows.append(dict(error=type(error).__name__, message=str(error)))
 print(json.dumps(rows))
@@ -181,30 +212,57 @@ print(json.dumps(rows))
         assert_eq!(self.cases.len(), expected.len());
         for ((case, actual), expected) in self.cases.iter().zip(self.actual).zip(expected) {
             if expected.get("error").is_some() {
-                assert!(actual.is_err(), "{case}: expected {expected}, got {actual:?}");
+                assert!(
+                    actual.is_err(),
+                    "{case}: expected {expected}, got {actual:?}"
+                );
                 continue;
             }
             let actual = actual.unwrap_or_else(|error| panic!("{case}: {error}"));
-            assert!(actual.dtype().is_complex(), "{case}: expected complex output");
             let mut shape = actual.shape().to_vec();
-            assert_eq!(shape.pop(), Some(2), "{case}: component axis");
+            if actual.dtype().is_complex() {
+                assert_eq!(shape.pop(), Some(2), "{case}: component axis");
+            }
             assert_eq!(json!(shape), expected["shape"], "{case}: logical shape");
-            assert_eq!(dtype_name(actual.dtype()), expected["dtype"], "{case}: dtype");
+            assert_eq!(
+                dtype_name(actual.dtype()),
+                expected["dtype"],
+                "{case}: dtype"
+            );
+            if let Some(integers) = expected["integers"].as_array() {
+                let storage = actual.to_storage().unwrap();
+                let exact = (0..storage.len())
+                    .map(|index| storage.get_i128(index).unwrap().to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    json!(exact),
+                    json!(integers),
+                    "{case}: exact integer values"
+                );
+                continue;
+            }
+            let components = if actual.dtype().is_complex() {
+                actual.values().to_vec()
+            } else {
+                actual
+                    .values()
+                    .iter()
+                    .flat_map(|&value| [value, 0.0])
+                    .collect()
+            };
             let bits = expected["bits"].as_array().unwrap();
             let bounds = expected["bounds"].as_array().unwrap();
-            assert_eq!(actual.values().len(), bits.len(), "{case}: component count");
+            assert_eq!(components.len(), bits.len(), "{case}: component count");
             let contracted = expected["contracted"].as_u64().unwrap() as f64;
-            let (epsilon, smallest) = if actual.dtype() == DType::Complex64 {
+            let (epsilon, smallest) = if matches!(actual.dtype(), DType::Complex64 | DType::F32) {
                 (f64::from(f32::EPSILON), f64::from(f32::from_bits(1)))
+            } else if actual.dtype() == DType::F16 {
+                (2.0_f64.powi(-10), 2.0_f64.powi(-24))
             } else {
                 (f64::EPSILON, f64::from_bits(1))
             };
-            for (index, ((&actual, expected), bound)) in actual
-                .values()
-                .iter()
-                .zip(bits)
-                .zip(bounds)
-                .enumerate()
+            for (index, ((&actual, expected), bound)) in
+                components.iter().zip(bits).zip(bounds).enumerate()
             {
                 let expected = f64::from_bits(expected.as_u64().unwrap());
                 if expected.is_nan() {
@@ -212,7 +270,10 @@ print(json.dumps(rows))
                 } else if expected.is_infinite() {
                     assert_eq!(actual, expected, "{case}: component {index} infinity");
                 } else {
-                    assert!(actual.is_finite(), "{case}: component {index} must be finite");
+                    assert!(
+                        actual.is_finite(),
+                        "{case}: component {index} must be finite"
+                    );
                     let scale = bound.as_f64().unwrap();
                     let tolerance = 8.0 * (contracted + 1.0) * (epsilon * scale + smallest);
                     assert!(
@@ -228,16 +289,27 @@ print(json.dumps(rows))
 #[test]
 fn complex_matmul_logical_shapes_and_broadcasts_match_numpy() {
     let shapes: &[(&[usize], &[usize])] = &[
-        (&[3], &[3]), (&[3], &[3, 4]), (&[2, 3], &[3]),
-        (&[2, 3], &[3, 4]), (&[1, 3], &[3, 1]),
+        (&[3], &[3]),
+        (&[3], &[3, 4]),
+        (&[2, 3], &[3]),
+        (&[2, 3], &[3, 4]),
+        (&[1, 3], &[3, 1]),
         (&[2, 1, 3, 4], &[1, 5, 4, 2]),
-        (&[4], &[2, 3, 4, 5]), (&[2, 3, 4, 5], &[5]),
-        (&[2, 1, 3, 4], &[4, 2]), (&[3, 4], &[2, 1, 4, 2]),
-        (&[0], &[0]), (&[2, 0], &[0, 3]), (&[0, 3], &[3, 4]),
-        (&[2, 3], &[3, 0]), (&[0, 2, 3], &[1, 3, 4]),
+        (&[4], &[2, 3, 4, 5]),
+        (&[2, 3, 4, 5], &[5]),
+        (&[2, 1, 3, 4], &[4, 2]),
+        (&[3, 4], &[2, 1, 4, 2]),
+        (&[0], &[0]),
+        (&[2, 0], &[0, 3]),
+        (&[0, 3], &[3, 4]),
+        (&[2, 3], &[3, 0]),
+        (&[0, 2, 3], &[1, 3, 4]),
         (&[2, 1, 3, 0], &[1, 5, 0, 2]),
-        (&[], &[3]), (&[3], &[]), (&[], &[]),
-        (&[2, 3], &[4, 2]), (&[2, 3, 4], &[3, 4, 2]),
+        (&[], &[3]),
+        (&[3], &[]),
+        (&[], &[]),
+        (&[2, 3], &[4, 2]),
+        (&[2, 3, 4], &[3, 4, 2]),
     ];
     let mut batch = OracleBatch::default();
     for lhs_dtype in [DType::Complex64, DType::Complex128] {
@@ -256,11 +328,402 @@ fn complex_matmul_logical_shapes_and_broadcasts_match_numpy() {
 }
 
 #[test]
+fn complex_dot_and_inner_contract_logical_axes_without_batch_broadcasting() {
+    let dot_shapes: &[(&[usize], &[usize])] = &[
+        (&[], &[]),
+        (&[], &[2, 3]),
+        (&[2, 3], &[]),
+        (&[3], &[3]),
+        (&[3], &[3, 4]),
+        (&[2, 3], &[3]),
+        (&[2, 3, 4], &[5, 4, 6]),
+        (&[2, 3, 4], &[4, 6]),
+        (&[4], &[2, 3, 4, 5]),
+        (&[2, 1, 3], &[5, 3, 2]),
+        (&[0], &[0]),
+        (&[2, 0], &[0, 3]),
+        (&[0, 3], &[3, 4]),
+        (&[2, 3], &[3, 0]),
+        (&[2, 0, 3], &[4, 3, 5]),
+        (&[2, 3], &[4, 2]),
+    ];
+    let inner_shapes: &[(&[usize], &[usize])] = &[
+        (&[], &[]),
+        (&[], &[2, 3]),
+        (&[2, 3], &[]),
+        (&[3], &[3]),
+        (&[3], &[4, 3]),
+        (&[2, 3], &[3]),
+        (&[2, 3, 4], &[5, 6, 4]),
+        (&[2, 3, 4], &[6, 4]),
+        (&[0], &[0]),
+        (&[2, 0], &[3, 0]),
+        (&[0, 3], &[4, 3]),
+        (&[2, 3], &[0, 3]),
+        (&[2, 3], &[2, 4]),
+    ];
+    let mut batch = OracleBatch::default();
+    for complex_dtype in [DType::Complex64, DType::Complex128] {
+        for other_dtype in [DType::Complex64, DType::Complex128, DType::F32, DType::I16] {
+            for (op, shapes) in [("dot", dot_shapes), ("inner", inner_shapes)] {
+                for &(a, b) in shapes {
+                    batch.case(
+                        op,
+                        &source(a, complex_dtype, 1),
+                        &source(b, other_dtype, 4),
+                        None,
+                    );
+                    batch.case(
+                        op,
+                        &source(a, other_dtype, 7),
+                        &source(b, complex_dtype, 2),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_outer_and_kron_preserve_complete_elements_and_numeric_promotion() {
+    let shapes: &[(&[usize], &[usize])] = &[
+        (&[], &[]),
+        (&[], &[2, 3]),
+        (&[2, 3], &[]),
+        (&[3], &[2]),
+        (&[2, 3], &[3, 2]),
+        (&[2, 1, 3], &[3, 2]),
+        (&[1, 2], &[2, 1, 3]),
+        (&[2, 1, 2, 1], &[3, 1, 2]),
+        (&[0], &[3]),
+        (&[2, 0], &[0, 3]),
+        (&[2, 3], &[0]),
+    ];
+    let mut batch = OracleBatch::default();
+    for complex_dtype in [DType::Complex64, DType::Complex128] {
+        for other_dtype in [
+            DType::Bool,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+        ] {
+            for &(a, b) in shapes {
+                for op in ["outer", "kron"] {
+                    batch.case(
+                        op,
+                        &source(a, complex_dtype, 0),
+                        &source(b, other_dtype, 4),
+                        None,
+                    );
+                    batch.case(
+                        op,
+                        &source(a, other_dtype, 7),
+                        &source(b, complex_dtype, 1),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_tensordot_counts_and_explicit_axis_lists_match_numpy() {
+    let cases: &[(&[usize], &[usize], usize)] = &[
+        (&[2, 3, 4], &[3, 4, 5], 2),
+        (&[2, 3], &[3, 4], 1),
+        (&[2, 3, 4], &[2, 3, 4], 3),
+        (&[2, 3], &[4, 5], 0),
+        (&[], &[2, 3], 0),
+        (&[2, 3], &[], 0),
+        (&[], &[], 0),
+        (&[2, 0], &[0, 3], 1),
+        (&[0, 2, 3], &[2, 3, 4], 2),
+        (&[2, 3], &[3, 0], 1),
+        (&[0], &[0], 1),
+        (&[2, 3], &[2, 3], 1),
+        (&[2, 3], &[2, 3], 3),
+        (&[], &[], 1),
+    ];
+    type AxisCase<'a> = (&'a [usize], &'a [usize], &'a [isize], &'a [isize]);
+    let axis_cases: &[AxisCase<'_>] = &[
+        (&[2, 3, 4], &[4, 5, 2], &[2, 0], &[0, 2]),
+        (&[2, 3, 4], &[4, 5, 2], &[-1, -3], &[-3, -1]),
+        (&[2, 3, 4], &[5, 4, 3], &[1, 2], &[2, 1]),
+        (&[2, 3, 4], &[5, 4, 3], &[2, 1], &[1, 2]),
+        (&[2, 3, 4], &[4, 3, 2], &[2, 1, 0], &[0, 1, 2]),
+        (&[2, 3], &[3, 2], &[], &[]),
+        (&[], &[3], &[], &[]),
+        (&[2, 0, 3], &[3, 0, 4], &[1, 2], &[1, 0]),
+        (&[0, 2, 3], &[4, 3], &[-1], &[-1]),
+        (&[2, 3], &[2, 3], &[0, 0], &[0, 0]),
+        (&[2, 3], &[2, 3], &[0, -2], &[0, -2]),
+        (&[2, 3], &[2, 3], &[0], &[0, 1]),
+        (&[2, 3], &[2, 3], &[2], &[1]),
+        (&[2, 3], &[2, 3], &[-3], &[1]),
+        (&[2, 3], &[2, 3], &[0], &[1]),
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for other_dtype in [DType::Complex64, DType::Complex128, DType::F16, DType::I64] {
+            for &(a, b, axes) in cases {
+                batch.case(
+                    "tensordot",
+                    &source(a, dtype, 0),
+                    &source(b, other_dtype, 6),
+                    Some(axes as isize),
+                );
+            }
+            for &(a, b, axes_a, axes_b) in axis_cases {
+                batch.axes_case(
+                    &source(a, dtype, 2),
+                    &source(b, other_dtype, 5),
+                    axes_a,
+                    axes_b,
+                );
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_tensor_products_preserve_exact_integer_conversion_and_source_precision() {
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::I64(vec![
+            i64::MAX,
+            i64::MIN,
+            (1_i64 << 53) + 1,
+            -(1_i64 << 53) - 1,
+        ]),
+        ArrayStorage::U64(vec![
+            u64::MAX,
+            u64::MAX - 1,
+            (1_u64 << 63) + 1,
+            (1_u64 << 53) + 1,
+        ]),
+    ] {
+        let matrix = UFuncArray::from_storage(vec![2, 2], storage).unwrap();
+        for dtype in [DType::Complex64, DType::Complex128] {
+            let complex = source(&[2, 2], dtype, 0);
+            for op in ["dot", "inner", "outer", "kron", "tensordot"] {
+                batch.case(op, &matrix, &complex, Some(1));
+                batch.case(op, &complex, &matrix, Some(1));
+            }
+            batch.axes_case(&matrix, &complex, &[0], &[1]);
+            batch.axes_case(&complex, &matrix, &[1], &[0]);
+        }
+    }
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let scalar = source(&[], dtype, 0);
+        for other in [DType::F16, DType::F32, DType::Complex64] {
+            let input = source(&[2, 3], other, 0);
+            batch.case("dot", &scalar, &input, None);
+            batch.case("inner", &input, &scalar, None);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_tensor_products_do_not_conjugate_inputs() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, -4.0], dtype).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![5.0, -6.0, 7.0, 8.0], dtype).unwrap();
+        for result in [
+            a.dot(&b),
+            a.inner(&b),
+            a.tensordot(&b, 1),
+            a.tensordot_axes(&b, &[0], &[-1]),
+        ] {
+            let result = result.unwrap();
+            assert_eq!(result.shape(), &[2]);
+            assert_eq!(result.values(), &[70.0, 0.0]);
+        }
+        let outer = a.outer(&b).unwrap();
+        assert_eq!(outer.shape(), &[2, 2, 2]);
+        assert_eq!(
+            outer.values(),
+            &[17.0, 4.0, -9.0, 22.0, -9.0, -38.0, 53.0, -4.0]
+        );
+        let kron = a.kron(&b).unwrap();
+        assert_eq!(kron.shape(), &[4, 2]);
+        assert_eq!(kron.values(), outer.values());
+    }
+}
+
+#[test]
+fn explicit_tensordot_axes_preserve_real_dtypes_and_exact_integers() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+    ] {
+        batch.axes_case(
+            &source(&[2, 3, 4], dtype, 1),
+            &source(&[4, 5, 2], dtype, 4),
+            &[2, 0],
+            &[0, 2],
+        );
+        batch.axes_case(
+            &source(&[2, 0], dtype, 0),
+            &source(&[0, 3], dtype, 0),
+            &[1],
+            &[0],
+        );
+        batch.axes_case(&source(&[], dtype, 2), &source(&[3], dtype, 4), &[], &[]);
+    }
+    for storage in [
+        ArrayStorage::I64(vec![
+            i64::MAX,
+            i64::MIN,
+            (1_i64 << 53) + 1,
+            -(1_i64 << 53) - 1,
+        ]),
+        ArrayStorage::U64(vec![
+            u64::MAX,
+            u64::MAX - 1,
+            (1_u64 << 63) + 1,
+            (1_u64 << 53) + 1,
+        ]),
+    ] {
+        let array = UFuncArray::from_storage(vec![2, 2], storage).unwrap();
+        let other = source(&[2, 3], array.dtype(), 3);
+        batch.axes_case(&array, &other, &[0], &[0]);
+        batch.axes_case(&array, &array, &[1, 0], &[0, 1]);
+    }
+    let narrow = UFuncArray::new(vec![1], vec![1.0 + 2.0_f64.powi(-24)], DType::F32).unwrap();
+    let wide = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+    let output = narrow.tensordot_axes(&wide, &[0], &[0]).unwrap();
+    assert_eq!(output.dtype(), DType::F64);
+    assert_eq!(output.values(), &[1.0]);
+    batch.axes_case(&narrow, &wide, &[0], &[0]);
+    batch.axes_case(&wide, &narrow, &[0], &[0]);
+    let overflowing =
+        UFuncArray::from_storage(vec![2], ArrayStorage::F32(vec![f32::MAX; 2])).unwrap();
+    let signs = UFuncArray::from_storage(vec![2], ArrayStorage::F32(vec![2.0, -2.0])).unwrap();
+    assert!(
+        overflowing
+            .tensordot_axes(&signs, &[0], &[0])
+            .unwrap()
+            .values()[0]
+            .is_nan()
+    );
+    batch.axes_case(&overflowing, &signs, &[0], &[0]);
+    let half = UFuncArray::new(vec![3], vec![4096.0, 1.0, -4096.0], DType::F16).unwrap();
+    let factors = UFuncArray::new(vec![3], vec![4096.0, 1.0, 4096.0], DType::F16).unwrap();
+    assert_eq!(
+        half.tensordot_axes(&factors, &[0], &[0]).unwrap().values(),
+        &[0.0]
+    );
+    batch.axes_case(&half, &factors, &[0], &[0]);
+    batch.finish();
+}
+
+#[test]
+fn complex_tensor_products_reject_invalid_layouts_axes_and_output_capacities() {
+    let valid = source(&[2, 2], DType::Complex128, 0);
+    for malformed in [
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
+    ] {
+        for (a, b) in [(&malformed, &valid), (&valid, &malformed)] {
+            for result in [
+                a.dot(b),
+                a.inner(b),
+                a.outer(b),
+                a.kron(b),
+                a.tensordot(b, 1),
+                a.tensordot_axes(b, &[0], &[0]),
+            ] {
+                assert!(
+                    result.is_err(),
+                    "malformed complex storage must be rejected"
+                );
+            }
+        }
+    }
+    for axis in [isize::MIN, isize::MAX] {
+        assert!(valid.tensordot_axes(&valid, &[axis], &[0]).is_err());
+        assert!(valid.tensordot_axes(&valid, &[0], &[axis]).is_err());
+    }
+    let max_count = isize::MAX as usize / std::mem::size_of::<[f64; 2]>();
+    let huge = UFuncArray::new(vec![max_count + 1, 0, 2], vec![], DType::Complex128).unwrap();
+    let rhs = source(&[0, 1], DType::Complex128, 0);
+    for result in [
+        huge.dot(&rhs),
+        huge.tensordot(&rhs, 1),
+        huge.tensordot_axes(&rhs, &[1], &[0]),
+    ] {
+        assert!(matches!(
+            result,
+            Err(UFuncError::Shape(ShapeError::Overflow))
+        ));
+    }
+    let huge_empty = UFuncArray::new(vec![usize::MAX, 0, 2], vec![], DType::Complex128).unwrap();
+    let empty = source(&[0, 0], DType::Complex128, 0);
+    assert_eq!(
+        huge_empty.tensordot(&empty, 1).unwrap().shape(),
+        &[usize::MAX, 0, 2]
+    );
+    assert!(huge_empty.outer(&valid).unwrap().values().is_empty());
+    let scalar = source(&[], DType::Complex64, 0);
+    assert_eq!(
+        huge_empty.kron(&scalar).unwrap().shape(),
+        &[usize::MAX, 0, 2]
+    );
+    assert!(matches!(
+        huge_empty.kron(&valid),
+        Err(UFuncError::Shape(ShapeError::Overflow))
+    ));
+    let opaque = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::Str).unwrap();
+    assert!(valid.outer(&opaque).is_err());
+    assert!(valid.dot(&opaque).is_err());
+    assert!(valid.kron(&opaque).is_err());
+}
+
+#[test]
 fn complex_matmul_mixed_numeric_types_match_numpy() {
     let dtypes = [
-        DType::Bool, DType::I8, DType::I16, DType::I32, DType::I64,
-        DType::U8, DType::U16, DType::U32, DType::U64,
-        DType::F16, DType::F32, DType::F64, DType::Complex64, DType::Complex128,
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
     ];
     let mut batch = OracleBatch::default();
     for lhs_dtype in dtypes {
@@ -289,20 +752,34 @@ fn complex_matmul_mixed_numeric_types_match_numpy() {
 #[test]
 fn complex_matrix_vector_batches_preserve_singleton_axes() {
     let matvec_shapes: &[(&[usize], &[usize])] = &[
-        (&[2, 3], &[3]), (&[2, 3], &[1, 3]),
-        (&[1, 2, 3], &[3]), (&[2, 1, 4, 3], &[1, 5, 3]),
-        (&[4, 3], &[2, 1, 3]), (&[2, 1, 4, 3], &[5, 3]),
-        (&[0, 2, 3], &[1, 3]), (&[2, 0], &[0]),
-        (&[3], &[3]), (&[], &[3]), (&[2, 3], &[]),
-        (&[2, 3], &[4]), (&[2, 4, 3], &[3, 3]),
+        (&[2, 3], &[3]),
+        (&[2, 3], &[1, 3]),
+        (&[1, 2, 3], &[3]),
+        (&[2, 1, 4, 3], &[1, 5, 3]),
+        (&[4, 3], &[2, 1, 3]),
+        (&[2, 1, 4, 3], &[5, 3]),
+        (&[0, 2, 3], &[1, 3]),
+        (&[2, 0], &[0]),
+        (&[3], &[3]),
+        (&[], &[3]),
+        (&[2, 3], &[]),
+        (&[2, 3], &[4]),
+        (&[2, 4, 3], &[3, 3]),
     ];
     let vecmat_shapes: &[(&[usize], &[usize])] = &[
-        (&[3], &[3, 2]), (&[1, 3], &[3, 2]),
-        (&[3], &[1, 3, 2]), (&[2, 1, 3], &[1, 5, 3, 4]),
-        (&[2, 1, 3], &[3, 4]), (&[5, 3], &[2, 1, 3, 4]),
-        (&[1, 3], &[0, 3, 2]), (&[0], &[0, 2]),
-        (&[3], &[3]), (&[], &[3, 2]), (&[3], &[]),
-        (&[4], &[3, 2]), (&[2, 3], &[3, 3, 4]),
+        (&[3], &[3, 2]),
+        (&[1, 3], &[3, 2]),
+        (&[3], &[1, 3, 2]),
+        (&[2, 1, 3], &[1, 5, 3, 4]),
+        (&[2, 1, 3], &[3, 4]),
+        (&[5, 3], &[2, 1, 3, 4]),
+        (&[1, 3], &[0, 3, 2]),
+        (&[0], &[0, 2]),
+        (&[3], &[3]),
+        (&[], &[3, 2]),
+        (&[3], &[]),
+        (&[4], &[3, 2]),
+        (&[2, 3], &[3, 3, 4]),
     ];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
@@ -324,8 +801,18 @@ fn complex_matrix_vector_batches_preserve_singleton_axes() {
 fn complex_matrix_products_cast_exact_wide_integers() {
     let mut batch = OracleBatch::default();
     for storage in [
-        ArrayStorage::I64(vec![i64::MAX, i64::MIN, (1_i64 << 53) + 1, -(1_i64 << 53) - 1]),
-        ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1, (1_u64 << 63) + 1, (1_u64 << 53) + 1]),
+        ArrayStorage::I64(vec![
+            i64::MAX,
+            i64::MIN,
+            (1_i64 << 53) + 1,
+            -(1_i64 << 53) - 1,
+        ]),
+        ArrayStorage::U64(vec![
+            u64::MAX,
+            u64::MAX - 1,
+            (1_u64 << 63) + 1,
+            (1_u64 << 53) + 1,
+        ]),
     ] {
         let matrix = UFuncArray::from_storage(vec![2, 2], storage.clone()).unwrap();
         let vector = UFuncArray::from_storage(vec![4], storage).unwrap();
@@ -384,7 +871,10 @@ fn complex64_accumulates_in_its_component_type() {
         let output = lhs.matmul(&rhs).unwrap();
         assert_eq!(output.dtype(), dtype);
         assert_eq!(output.shape(), &[2, 2, 2]);
-        assert_eq!(output.values(), &[expected, 0.0, expected, 0.0, expected, 0.0, expected, 0.0]);
+        assert_eq!(
+            output.values(),
+            &[expected, 0.0, expected, 0.0, expected, 0.0, expected, 0.0]
+        );
     }
 }
 
@@ -397,17 +887,17 @@ fn complex_matmul_rejects_malformed_layouts_and_impossible_outputs() {
         UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
     ] {
         for result in [
-            malformed.matmul(&valid), valid.matmul(&malformed),
-            UFuncArray::matvec(&malformed, &valid), UFuncArray::matvec(&valid, &malformed),
-            UFuncArray::vecmat(&malformed, &valid), UFuncArray::vecmat(&valid, &malformed),
+            malformed.matmul(&valid),
+            valid.matmul(&malformed),
+            UFuncArray::matvec(&malformed, &valid),
+            UFuncArray::matvec(&valid, &malformed),
+            UFuncArray::vecmat(&malformed, &valid),
+            UFuncArray::vecmat(&valid, &malformed),
         ] {
             assert!(result.is_err(), "malformed complex layout must be rejected");
         }
     }
-    let huge_empty = UFuncArray::new(
-        vec![usize::MAX, 0, 2], vec![], DType::Complex128,
-    )
-    .unwrap();
+    let huge_empty = UFuncArray::new(vec![usize::MAX, 0, 2], vec![], DType::Complex128).unwrap();
     let empty = source(&[0, 0], DType::Complex128, 0);
     let output = huge_empty.matmul(&empty).unwrap();
     assert_eq!(output.shape(), &[usize::MAX, 0, 2]);
@@ -420,7 +910,10 @@ fn complex_matmul_rejects_malformed_layouts_and_impossible_outputs() {
     let max_count = isize::MAX as usize / std::mem::size_of::<[f64; 2]>();
     let lhs = UFuncArray::new(vec![max_count + 1, 0, 2], vec![], DType::Complex128).unwrap();
     let rhs = source(&[0, 1], DType::Complex128, 0);
-    assert!(matches!(lhs.matmul(&rhs), Err(UFuncError::Shape(ShapeError::Overflow))));
+    assert!(matches!(
+        lhs.matmul(&rhs),
+        Err(UFuncError::Shape(ShapeError::Overflow))
+    ));
 }
 
 #[test]
@@ -463,18 +956,8 @@ fn complex_vdot_flattens_logical_elements_and_conjugates_left() {
     }
     // Both components distinguish conjugating the left operand from either
     // an unconjugated product or conjugating the right operand instead.
-    let left = UFuncArray::new(
-        vec![2, 2],
-        vec![1.0, 2.0, 3.0, -4.0],
-        DType::Complex128,
-    )
-    .unwrap();
-    let right = UFuncArray::new(
-        vec![2, 2],
-        vec![5.0, -6.0, 7.0, 8.0],
-        DType::Complex128,
-    )
-    .unwrap();
+    let left = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, -4.0], DType::Complex128).unwrap();
+    let right = UFuncArray::new(vec![2, 2], vec![5.0, -6.0, 7.0, 8.0], DType::Complex128).unwrap();
     batch.case("vdot", &left, &right, None);
     batch.case("vdot", &right, &left, None);
     batch.finish();

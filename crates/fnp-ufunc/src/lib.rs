@@ -15712,6 +15712,27 @@ impl UFuncArray {
     /// - Both 2-D: matrix multiplication.
     /// - 1-D and 2-D: treat 1-D as row/column vector as appropriate.
     pub fn dot(&self, rhs: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || rhs.dtype.is_complex() {
+            let lhs_shape = self.complex_logical_shape("dot")?;
+            let rhs_shape = rhs.complex_logical_shape("dot")?;
+            if lhs_shape.is_empty() || rhs_shape.is_empty() {
+                let shape = if lhs_shape.is_empty() {
+                    rhs_shape.clone()
+                } else {
+                    lhs_shape.clone()
+                };
+                return self.complex_products_with_indices(rhs, shape, "dot", |index| {
+                    (
+                        if lhs_shape.is_empty() { 0 } else { index },
+                        if rhs_shape.is_empty() { 0 } else { index },
+                    )
+                });
+            }
+            // dot takes the Cartesian product of free dimensions, rather than
+            // broadcasting batch dimensions like matmul.
+            let rhs_axis = if rhs_shape.len() == 1 { 0 } else { -2 };
+            return self.tensordot_axes(rhs, &[-1], &[rhs_axis]);
+        }
         let ld = self.shape.len();
         let rd = rhs.shape.len();
 
@@ -16204,6 +16225,15 @@ impl UFuncArray {
     /// Flattens both inputs and computes `result[i, j] = a.ravel()[i] * b.ravel()[j]`.
     /// Output shape is `[a.size, b.size]`.
     pub fn outer(&self, rhs: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || rhs.dtype.is_complex() {
+            let a_shape = self.complex_logical_shape("outer")?;
+            let b_shape = rhs.complex_logical_shape("outer")?;
+            let m = element_count(&a_shape).map_err(UFuncError::Shape)?;
+            let n = element_count(&b_shape).map_err(UFuncError::Shape)?;
+            return self.complex_products_with_indices(rhs, vec![m, n], "outer", |flat| {
+                (flat / n, flat % n)
+            });
+        }
         let a = &self.values;
         let b = &rhs.values;
         let m = a.len();
@@ -16254,12 +16284,67 @@ impl UFuncArray {
         })
     }
 
+    /// Multiply complete complex elements selected by a logical output index.
+    /// Products have no additive identity step, which would lose signed zero.
+    fn complex_products_with_indices(
+        &self,
+        rhs: &Self,
+        mut shape: Vec<usize>,
+        context: &str,
+        mut indices: impl FnMut(usize) -> (usize, usize),
+    ) -> Result<Self, UFuncError> {
+        for input in [self, rhs] {
+            input.complex_logical_shape(context)?;
+            if !(input.dtype.is_numeric() || input.dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "{context}: unsupported input dtype {:?}",
+                    input.dtype
+                )));
+            }
+        }
+        let dtype = promote(self.dtype, rhs.dtype);
+        let count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = count
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut values = try_zeroed_f64(physical_count, context)?;
+        if count != 0 {
+            let lhs = self.complex_reduction_values(dtype)?;
+            let rhs = rhs.complex_reduction_values(dtype)?;
+            for (flat, parts) in values.chunks_exact_mut(2).enumerate() {
+                let (a, b) = indices(flat);
+                let product = Self::complex_reduction_multiply(lhs[a], rhs[b], dtype);
+                parts.copy_from_slice(&[product.0, product.1]);
+            }
+        }
+        shape.push(2);
+        Ok(Self {
+            shape,
+            values,
+            dtype,
+            integer_sidecar: None,
+        })
+    }
+
     /// Compute the inner product of two arrays (`np.inner`).
     ///
     /// For 1-D arrays, this is the regular inner product (same as dot).
     /// For ND arrays, sums over the last axis of both inputs.
     /// Result shape is `a.shape[:-1] + b.shape[:-1]`.
     pub fn inner(&self, rhs: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || rhs.dtype.is_complex() {
+            let a_shape = self.complex_logical_shape("inner")?;
+            let b_shape = rhs.complex_logical_shape("inner")?;
+            if a_shape.is_empty() || b_shape.is_empty() {
+                return self.dot(rhs);
+            }
+            return self.tensordot_axes(rhs, &[-1], &[-1]);
+        }
         if self.shape.is_empty() || rhs.shape.is_empty() {
             return self.dot(rhs);
         }
@@ -16446,6 +16531,37 @@ impl UFuncArray {
 
     /// Kronecker product of two arrays (np.kron).
     pub fn kron(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || other.dtype.is_complex() {
+            let lhs_shape = self.complex_logical_shape("kron")?;
+            let rhs_shape = other.complex_logical_shape("kron")?;
+            let ndim = lhs_shape.len().max(rhs_shape.len());
+            let mut a_shape = vec![1; ndim - lhs_shape.len()];
+            let mut b_shape = vec![1; ndim - rhs_shape.len()];
+            a_shape.extend(lhs_shape);
+            b_shape.extend(rhs_shape);
+            let shape = a_shape
+                .iter()
+                .zip(&b_shape)
+                .map(|(&a, &b)| {
+                    a.checked_mul(b)
+                        .ok_or(UFuncError::Shape(ShapeError::Overflow))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let output_shape = shape.clone();
+            return self.complex_products_with_indices(other, shape, "kron", |mut flat| {
+                let (mut a_flat, mut b_flat) = (0, 0);
+                let (mut a_stride, mut b_stride) = (1, 1);
+                for axis in (0..ndim).rev() {
+                    let coordinate = flat % output_shape[axis];
+                    flat /= output_shape[axis];
+                    a_flat += (coordinate / b_shape[axis]) * a_stride;
+                    b_flat += (coordinate % b_shape[axis]) * b_stride;
+                    a_stride *= a_shape[axis];
+                    b_stride *= b_shape[axis];
+                }
+                (a_flat, b_flat)
+            });
+        }
         let ndim = self.shape.len().max(other.shape.len());
         let mut a_shape = vec![1usize; ndim];
         let mut b_shape = vec![1usize; ndim];
@@ -16573,6 +16689,18 @@ impl UFuncArray {
     /// Tensor dot product (np.tensordot with axes=integer).
     /// Contracts the last `axes` dimensions of `self` with the first `axes` dimensions of `other`.
     pub fn tensordot(&self, other: &Self, axes: usize) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || other.dtype.is_complex() {
+            let a_shape = self.complex_logical_shape("tensordot")?;
+            let b_shape = other.complex_logical_shape("tensordot")?;
+            if axes > a_shape.len() || axes > b_shape.len() {
+                return Err(UFuncError::Msg("tensordot: axes exceeds dimensions".into()));
+            }
+            let a_axes = (a_shape.len() - axes..a_shape.len())
+                .map(|axis| axis as isize)
+                .collect::<Vec<_>>();
+            let b_axes = (0..axes).map(|axis| axis as isize).collect::<Vec<_>>();
+            return self.tensordot_axes(other, &a_axes, &b_axes);
+        }
         let a_ndim = self.shape.len();
         let b_ndim = other.shape.len();
         if axes > a_ndim || axes > b_ndim {
@@ -16628,6 +16756,140 @@ impl UFuncArray {
             dtype,
             integer_sidecar: None,
         })
+    }
+
+    /// Tensor contraction over explicit pairs of logical axes, matching
+    /// `np.tensordot(a, b, axes=(axes_a, axes_b))`. Negative axes are accepted;
+    /// each list must be unique and paired dimensions must have equal lengths.
+    /// Remaining dimensions keep their original order, left operand first.
+    pub fn tensordot_axes(
+        &self,
+        other: &Self,
+        axes_a: &[isize],
+        axes_b: &[isize],
+    ) -> Result<Self, UFuncError> {
+        let a_shape = self.complex_logical_shape("tensordot")?;
+        let b_shape = other.complex_logical_shape("tensordot")?;
+        if axes_a.len() != axes_b.len() {
+            return Err(UFuncError::Msg(
+                "tensordot: axis lists must have the same length".into(),
+            ));
+        }
+        let normalize = |axes: &[isize], ndim: usize| -> Result<Vec<usize>, UFuncError> {
+            let mut result = Vec::with_capacity(axes.len());
+            for &axis in axes {
+                let axis = normalize_axis(axis, ndim)?;
+                if result.contains(&axis) {
+                    return Err(UFuncError::Msg("tensordot: repeated axis".into()));
+                }
+                result.push(axis);
+            }
+            Ok(result)
+        };
+        let a_axes = normalize(axes_a, a_shape.len())?;
+        let b_axes = normalize(axes_b, b_shape.len())?;
+        for (&a, &b) in a_axes.iter().zip(&b_axes) {
+            if a_shape[a] != b_shape[b] {
+                return Err(UFuncError::Msg(
+                    "tensordot: shape mismatch on contracted axis".into(),
+                ));
+            }
+        }
+        for input in [self, other] {
+            if !(input.dtype.is_numeric() || input.dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "tensordot: unsupported input dtype {:?}",
+                    input.dtype
+                )));
+            }
+        }
+        let a_remaining = (0..a_shape.len())
+            .filter(|axis| !a_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let b_remaining = (0..b_shape.len())
+            .filter(|axis| !b_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let mut output_shape = a_remaining
+            .iter()
+            .map(|&axis| a_shape[axis])
+            .collect::<Vec<_>>();
+        output_shape.extend(b_remaining.iter().map(|&axis| b_shape[axis]));
+        let count = if output_shape.contains(&0) {
+            0
+        } else {
+            element_count(&output_shape).map_err(UFuncError::Shape)?
+        };
+        let dtype = promote(self.dtype, other.dtype);
+        let width = if dtype.is_complex() { 2 } else { 1 };
+        let physical_count = count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let empty_contraction = a_axes.iter().any(|&axis| a_shape[axis] == 0);
+        if dtype.is_complex() {
+            output_shape.push(2);
+        }
+        if count == 0 || empty_contraction {
+            return Ok(Self {
+                shape: output_shape,
+                values: try_zeroed_f64(physical_count, "tensordot")?,
+                dtype,
+                integer_sidecar: None,
+            });
+        }
+        let contract_shape = a_axes.iter().map(|&axis| a_shape[axis]).collect::<Vec<_>>();
+        let contract_size = element_count(&contract_shape).map_err(UFuncError::Shape)?;
+        let left_shape = a_remaining
+            .iter()
+            .map(|&axis| a_shape[axis])
+            .collect::<Vec<_>>();
+        let right_shape = b_remaining
+            .iter()
+            .map(|&axis| b_shape[axis])
+            .collect::<Vec<_>>();
+        let a_outer = element_count(&left_shape).map_err(UFuncError::Shape)?;
+        let b_outer = element_count(&right_shape).map_err(UFuncError::Shape)?;
+        let mut a_permutation = a_remaining;
+        a_permutation.extend(a_axes);
+        let mut b_permutation = b_axes;
+        b_permutation.extend(b_remaining);
+        // Axis relocation preserves complete complex pairs and exact integer
+        // sidecars. Reuse matmul's typed conversion and accumulation after
+        // collapsing the free and contracted axes into two matrix dimensions.
+        let mut lhs = self
+            .cast_numeric_storage(dtype, false)?
+            .transpose(Some(&a_permutation))?;
+        let mut rhs = other
+            .cast_numeric_storage(dtype, false)?
+            .transpose(Some(&b_permutation))?;
+        lhs.shape = vec![a_outer, contract_size];
+        rhs.shape = vec![contract_size, b_outer];
+        if lhs.dtype.is_complex() {
+            lhs.shape.push(2);
+        }
+        if rhs.dtype.is_complex() {
+            rhs.shape.push(2);
+        }
+        if matches!(dtype, DType::F16 | DType::F32) {
+            // NumPy's half dot loop accumulates in float32; float32 products
+            // also round before accumulation. The real matmul working buffer
+            // is f64, which can hide overflow or retain extra cancellation bits.
+            let mut values = try_zeroed_f64(count, "tensordot")?;
+            for (row, output) in values.chunks_exact_mut(b_outer).enumerate() {
+                for (column, value) in output.iter_mut().enumerate() {
+                    let mut sum = 0.0_f32;
+                    for inner in 0..contract_size {
+                        sum += (lhs.values[row * contract_size + inner] as f32)
+                            * (rhs.values[inner * b_outer + column] as f32);
+                    }
+                    *value = f64::from(sum);
+                }
+            }
+            return Self::from_values_with_dtype(output_shape, values, dtype);
+        }
+        let mut output = lhs.matmul(&rhs)?;
+        output.shape = output_shape;
+        output.cast_numeric_storage(dtype, false)
     }
 
     /// Vector dot product (np.vdot). Flattens both inputs and computes dot product.
