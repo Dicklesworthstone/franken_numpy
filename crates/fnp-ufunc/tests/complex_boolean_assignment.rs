@@ -1,4 +1,4 @@
-//! Scalar Boolean assignment uses logical masks and Python-float packing.
+//! Boolean assignment preserves logical masks and scalar-versus-array casts.
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
@@ -115,6 +115,21 @@ fn bool_mask(shape: &[usize], pattern: &[bool]) -> UFuncArray {
     .unwrap()
 }
 
+fn floating_source(shape: &[usize], dtype: DType, pattern: &[(f64, f64)]) -> UFuncArray {
+    let mut physical_shape = shape.to_vec();
+    let mut values = Vec::new();
+    if dtype.is_complex() {
+        physical_shape.push(2);
+        for index in 0..count(shape) {
+            let (real, imaginary) = pattern[index % pattern.len()];
+            values.extend([real, imaginary]);
+        }
+    } else {
+        values.extend((0..count(shape)).map(|index| pattern[index % pattern.len()].0));
+    }
+    UFuncArray::new(physical_shape, values, dtype).unwrap()
+}
+
 fn oracle_input(array: &UFuncArray) -> Value {
     let mut shape = array.shape().to_vec();
     let values = if array.dtype().is_complex() {
@@ -162,8 +177,12 @@ fn error_category(error: UFuncError) -> String {
         "scalar-infinity"
     } else if message.contains("out of bounds") {
         "scalar-range"
+    } else if message.contains("values must have rank zero or one") {
+        "value-rank"
+    } else if message.contains("cannot broadcast values shape") {
+        "value-shape"
     } else {
-        panic!("unexpected scalar Boolean assignment error: {message}");
+        panic!("unexpected Boolean assignment error: {message}");
     }
     .into()
 }
@@ -181,6 +200,11 @@ struct OracleBatch {
     outcomes: Vec<Outcome>,
 }
 
+enum Assignment<'a> {
+    Scalar(f64),
+    Array(&'a UFuncArray),
+}
+
 impl OracleBatch {
     fn push(&mut self, dst: &UFuncArray, mask: &UFuncArray, value: f64) {
         self.push_policy(dst, mask, value, FloatErrorMode::Ignore);
@@ -193,9 +217,37 @@ impl OracleBatch {
         value: f64,
         mode: FloatErrorMode,
     ) {
+        self.push_assignment(dst, mask, Assignment::Scalar(value), mode);
+    }
+
+    fn push_array(&mut self, dst: &UFuncArray, mask: &UFuncArray, values: &UFuncArray) {
+        self.push_array_policy(dst, mask, values, FloatErrorMode::Ignore);
+    }
+
+    fn push_array_policy(
+        &mut self,
+        dst: &UFuncArray,
+        mask: &UFuncArray,
+        values: &UFuncArray,
+        mode: FloatErrorMode,
+    ) {
+        self.push_assignment(dst, mask, Assignment::Array(values), mode);
+    }
+
+    fn push_assignment(
+        &mut self,
+        dst: &UFuncArray,
+        mask: &UFuncArray,
+        assignment: Assignment<'_>,
+        mode: FloatErrorMode,
+    ) {
+        let value = match assignment {
+            Assignment::Scalar(value) => json!(value.to_string()),
+            Assignment::Array(values) => oracle_input(values),
+        };
         self.cases.push(json!({
             "dst": oracle_input(dst), "mask": oracle_input(mask),
-            "value": value.to_string(), "mode": mode.as_str(),
+            "value": value, "mode": mode.as_str(),
         }));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let callback_calls = Arc::clone(&calls);
@@ -212,7 +264,12 @@ impl OracleBatch {
         let mut array = dst.clone();
         let error = {
             let _errors = errstate(Some(mode), None, None, None, None);
-            array.boolean_set(mask, value).err().map(error_category)
+            match assignment {
+                Assignment::Scalar(value) => array.boolean_set(mask, value),
+                Assignment::Array(values) => array.boolean_set_array(mask, values),
+            }
+            .err()
+            .map(error_category)
         };
         let reports = take_float_error_events()
             .into_iter()
@@ -261,6 +318,8 @@ def category(error):
     if 'float NaN' in message: return 'scalar-nan'
     if 'float infinity' in message: return 'scalar-infinity'
     if 'out of bounds' in message or 'Python int too large' in message: return 'scalar-range'
+    if 'requires a 0 or 1-dimensional input' in message: return 'value-rank'
+    if 'shape mismatch' in message or 'cannot assign' in message: return 'value-shape'
     raise AssertionError((type(error).__name__, message))
 
 class Sink:
@@ -271,9 +330,9 @@ class Sink:
 rows = []
 for case in json.load(sys.stdin):
     dst, mask = load(case['dst']), load(case['mask'])
-    # This API accepts a Python float, not a NumPy scalar or an ndarray.
-    # Those other source types have different underflow/range semantics.
-    value = float(case['value'])
+    # Scalar and ndarray sources have distinct range, underflow, and empty
+    # assignment rules; keep their types intact in the live oracle.
+    value = load(case['value']) if isinstance(case['value'], dict) else float(case['value'])
     sink = Sink()
     previous_callback = np.seterrcall(sink)
     failure, printed = None, ''
@@ -295,8 +354,12 @@ for case in json.load(sys.stdin):
             printed = os.read(readfd, 65536).decode()
             os.close(readfd)
         np.seterrcall(previous_callback)
+    # ComplexWarning is a separate Python warnings channel, outside seterr.
+    # Its remaining Rust parity debt is tracked by franken_numpy-5cf9h;
+    # compare the same floating-status channel as the other mutation suites.
     reports = [float_kind(str(warning.message)) for warning in caught
-               if issubclass(warning.category, RuntimeWarning)]
+               if issubclass(warning.category, RuntimeWarning)
+               and not issubclass(warning.category, np.exceptions.ComplexWarning)]
     reports.extend(sink.logs)
     reports.extend(float_kind(line) for line in printed.splitlines() if line)
     if dst.dtype.kind == 'c':
@@ -318,7 +381,7 @@ print(json.dumps(rows))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("launch live NumPy scalar Boolean assignment oracle");
+            .expect("launch live NumPy Boolean assignment oracle");
         let mut stdin = child.stdin.take().unwrap();
         serde_json::to_writer(&mut stdin, &self.cases).unwrap();
         drop(stdin);
@@ -601,6 +664,297 @@ fn boolean_assignment_handles_huge_empty_logical_shapes_without_products() {
         ] {
             dst.boolean_set(&mask, 7.0).unwrap();
             assert_eq!(oracle_input(&dst), before);
+        }
+    }
+}
+
+#[test]
+fn array_boolean_assignment_preserves_numeric_dtypes_and_exact_integer_sources() {
+    let mut batch = OracleBatch::default();
+    for dst_dtype in NUMERIC {
+        let dst = destination(&[3, 2, 4], dst_dtype);
+        for mask in [
+            bool_mask(&[3, 2, 4], &[true, false, true]),
+            bool_mask(&[3, 2, 4], &[false]),
+            bool_mask(&[3], &[true, false, true]),
+            bool_mask(&[3, 2], &[false, true, true]),
+            bool_mask(&[], &[true]),
+            bool_mask(&[], &[false]),
+        ] {
+            let mut selected_shape =
+                vec![mask.values().iter().filter(|&&value| value != 0.0).count()];
+            selected_shape.extend_from_slice(&[3, 2, 4][mask.shape().len()..]);
+            for source_dtype in NUMERIC {
+                for shape in [&[][..], selected_shape.as_slice()] {
+                    batch.push_array(&dst, &mask, &destination(shape, source_dtype));
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn array_boolean_assignment_broadcasts_indexed_shapes_and_checks_value_rank() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[&[], &[3], &[2, 3], &[3, 2, 4], &[2, 0, 3], &[0, 3]];
+    let value_shapes: &[&[usize]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[3],
+        &[4],
+        &[6],
+        &[1, 1],
+        &[1, 3],
+        &[2, 1],
+        &[2, 3],
+        &[1, 0],
+        &[1, 1, 3],
+        &[1, 2, 3],
+        &[2, 1, 3],
+        &[1, 1, 1, 1],
+    ];
+    for &shape in shapes {
+        let dst = destination(shape, DType::Complex64);
+        let mut masks = Vec::new();
+        for rank in 0..=shape.len() {
+            for pattern in [&[true][..], &[false][..], &[true, false, true][..]] {
+                masks.push(bool_mask(&shape[..rank], pattern));
+            }
+        }
+        for axis in 0..shape.len() {
+            let mut mask_shape = shape.to_vec();
+            mask_shape[axis] = 0;
+            masks.push(bool_mask(&mask_shape, &[false]));
+        }
+        for mask in masks {
+            for &value_shape in value_shapes {
+                batch.push_array(&dst, &mask, &destination(value_shape, DType::Complex128));
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn array_boolean_assignment_reports_casts_after_writes_and_skips_empty_selections() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::I8,
+        DType::I32,
+        DType::I64,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::Complex64,
+    ] {
+        let dst = destination(&[2, 3], dtype);
+        for source_dtype in [DType::F64, DType::Complex128] {
+            for mode in MODES {
+                for value in [f64::NAN, 1.0e100, 1.0e-50] {
+                    for mask in [
+                        bool_mask(&[2, 3], &[false, true, true]),
+                        bool_mask(&[2, 3], &[false]),
+                        bool_mask(&[2], &[false, true]),
+                        bool_mask(&[2], &[false]),
+                        bool_mask(&[], &[true]),
+                        bool_mask(&[], &[false]),
+                        bool_mask(&[0, 3], &[false]),
+                    ] {
+                        for value_shape in [&[][..], &[1][..]] {
+                            let values =
+                                floating_source(value_shape, source_dtype, &[(value, -value)]);
+                            batch.push_array_policy(&dst, &mask, &values, mode);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // More than one floating-point status is aggregated once for the whole
+    // assignment, in NumPy's overflow / underflow / invalid reporting order.
+    for dtype in [DType::F16, DType::F32, DType::Complex64] {
+        for mode in MODES {
+            batch.push_array_policy(
+                &destination(&[2, 3], dtype),
+                &bool_mask(&[2], &[true]),
+                &floating_source(
+                    &[3],
+                    DType::Complex128,
+                    &[(1.0e100, -1.0e100), (1.0e-50, -1.0e-50), (f64::NAN, 0.0)],
+                ),
+                mode,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn array_boolean_assignment_uint32_casts_follow_mask_runs_and_broadcast_subspaces() {
+    let pattern = [
+        (f64::NAN, 2.0),
+        (f64::INFINITY, -3.0),
+        (f64::NEG_INFINITY, 5.0),
+        (-1.0e100, -7.0),
+        (1.0e100, 11.0),
+        (-2_147_483_649.0, 13.0),
+        (4_294_967_295.0, 17.0),
+    ];
+    for source_dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        let mut batch = OracleBatch::default();
+        for length in [1, 3, 4, 5, 6, 7, 8, 15, 16, 17, 8191, 8192, 8193] {
+            let dst = destination(&[2, length], DType::U32);
+            for mask_pattern in [
+                &[true][..],
+                &[true, true, true, false][..],
+                &[true, true, true, true, true, true, true, false][..],
+            ] {
+                let mask = bool_mask(&[2, length], mask_pattern);
+                let selected = mask.values().iter().filter(|&&value| value != 0.0).count();
+                batch.push_array(
+                    &dst,
+                    &mask,
+                    &floating_source(&[selected], source_dtype, &pattern),
+                );
+            }
+            for mask in [bool_mask(&[2], &[true]), bool_mask(&[], &[true])] {
+                for source_shape in [vec![length], vec![2, length], vec![2, 1], vec![1]] {
+                    batch.push_array(
+                        &dst,
+                        &mask,
+                        &floating_source(&source_shape, source_dtype, &pattern),
+                    );
+                }
+            }
+        }
+        let dst = destination(&[3, 2, 6], DType::U32);
+        for mask in [
+            bool_mask(&[3], &[true, false, true]),
+            bool_mask(&[3, 2], &[true, false]),
+            bool_mask(&[], &[true]),
+        ] {
+            for shape in [&[6][..], &[2, 1], &[2, 6], &[1, 2, 6], &[1, 1, 1]] {
+                batch.push_array(&dst, &mask, &floating_source(shape, source_dtype, &pattern));
+            }
+        }
+        batch.assert_matches_numpy();
+    }
+}
+
+#[test]
+fn array_boolean_assignment_rounds_sources_before_conversion_and_preserves_signed_zero() {
+    let mut batch = OracleBatch::default();
+    let pattern = [
+        (-0.0, -0.0),
+        (16_777_217.0, -16_777_217.0),
+        (1.0 + f64::EPSILON, 1.0e-50),
+        (1.000_488_281_25, -1.0e-9),
+        (f64::NAN, -0.0),
+        (0.0, f64::NAN),
+    ];
+    for dtype in NUMERIC {
+        let dst = destination(&[3, 2, 6], dtype);
+        for source_dtype in [DType::F16, DType::F32, DType::Complex64] {
+            for mask in [
+                bool_mask(&[3], &[true, false, true]),
+                bool_mask(&[3, 2, 6], &[false, true]),
+            ] {
+                let source_shape = if mask.shape().len() == 1 {
+                    vec![2, 6]
+                } else {
+                    vec![18]
+                };
+                batch.push_array(
+                    &dst,
+                    &mask,
+                    &floating_source(&source_shape, source_dtype, &pattern),
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn array_boolean_assignment_validates_before_casting_or_mutating() {
+    let mut batch = OracleBatch::default();
+    for dtype in NUMERIC {
+        let dst = destination(&[2, 3], dtype);
+        for mask_shape in [&[1][..], &[3], &[2, 2], &[0, 4], &[2, 0, 1]] {
+            for source_shape in [&[][..], &[1], &[1, 1]] {
+                batch.push_array_policy(
+                    &dst,
+                    &bool_mask(mask_shape, &[true]),
+                    &floating_source(source_shape, DType::F64, &[(1.0e100, 0.0)]),
+                    FloatErrorMode::Raise,
+                );
+            }
+        }
+        for source_shape in [&[2][..], &[1, 1], &[2, 3]] {
+            batch.push_array_policy(
+                &dst,
+                &bool_mask(&[2, 3], &[true, false]),
+                &floating_source(source_shape, DType::F64, &[(1.0e100, 0.0)]),
+                FloatErrorMode::Raise,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn array_boolean_assignment_rejects_malformed_layouts_and_handles_huge_empty_shapes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![1], vec![1, 1]] {
+            let malformed = UFuncArray::new(shape, vec![7.0], dtype).unwrap();
+            let mut dst = destination(&[2, 3], dtype);
+            let before = oracle_input(&dst);
+            assert!(
+                dst.boolean_set_array(&bool_mask(&[2], &[true]), &malformed)
+                    .is_err()
+            );
+            assert_eq!(oracle_input(&dst), before);
+            let mut invalid_dst = malformed.clone();
+            assert!(
+                invalid_dst
+                    .boolean_set_array(&bool_mask(&[], &[true]), &dst)
+                    .is_err()
+            );
+            assert_eq!(invalid_dst.values(), malformed.values());
+        }
+    }
+    for dtype in NUMERIC {
+        let mut dst = destination(&[2, 3], dtype);
+        let before = oracle_input(&dst);
+        assert!(
+            dst.boolean_set_array(
+                &destination(&[2], DType::I32),
+                &destination(&[3], DType::F64),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("mask must be a boolean array")
+        );
+        assert_eq!(oracle_input(&dst), before);
+
+        let mut dst = destination(&[0, usize::MAX, usize::MAX], dtype);
+        let before = oracle_input(&dst);
+        for mask in [
+            bool_mask(&[0], &[false]),
+            bool_mask(&[], &[true]),
+            bool_mask(&[], &[false]),
+        ] {
+            for values in [
+                destination(&[], DType::F64),
+                destination(&[0, usize::MAX, usize::MAX], dtype),
+            ] {
+                dst.boolean_set_array(&mask, &values).unwrap();
+                assert_eq!(oracle_input(&dst), before);
+            }
         }
     }
 }

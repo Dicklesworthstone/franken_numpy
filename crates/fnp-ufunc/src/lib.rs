@@ -20189,6 +20189,228 @@ impl UFuncArray {
         Ok(())
     }
 
+    /// Assign numeric array values through a Boolean mask, equivalent to
+    /// `a[mask] = values`. Masks cover leading logical dimensions without
+    /// broadcasting. A full mask accepts a scalar or one-dimensional source;
+    /// prefix and scalar masks broadcast the source into the indexed shape.
+    ///
+    /// Unlike [`Self::boolean_set`], this uses ndarray casting, including
+    /// wrapping integer conversions and source precision. Cast errors are
+    /// reported after selected writes, and empty selections do not cast values.
+    pub fn boolean_set_array(&mut self, mask: &Self, values: &Self) -> Result<(), UFuncError> {
+        if mask.dtype != DType::Bool {
+            return Err(UFuncError::Msg(
+                "boolean_set_array: mask must be a boolean array".into(),
+            ));
+        }
+        let logical_shape = self.complex_logical_shape("boolean_set_array")?;
+        if mask.shape.len() > logical_shape.len() {
+            return Err(UFuncError::Msg(format!(
+                "boolean_set_array: mask rank {} exceeds array rank {}",
+                mask.shape.len(),
+                logical_shape.len()
+            )));
+        }
+        if mask
+            .shape
+            .iter()
+            .zip(&logical_shape)
+            .any(|(&mask_len, &array_len)| mask_len != 0 && mask_len != array_len)
+        {
+            return Err(UFuncError::Msg(format!(
+                "boolean_set_array: mask size/shape {:?} does not match leading array dimensions {:?}",
+                mask.shape, logical_shape
+            )));
+        }
+        if !(self.dtype.is_numeric() || self.dtype == DType::Bool)
+            || !(values.dtype.is_numeric() || values.dtype == DType::Bool)
+        {
+            return Err(UFuncError::Msg(
+                "boolean_set_array: source and destination must have numeric dtypes".into(),
+            ));
+        }
+        let original_value_shape = values.complex_logical_shape("boolean_set_array")?;
+        let full_mask = mask.shape == logical_shape;
+        if full_mask && original_value_shape.len() > 1 {
+            return Err(UFuncError::Msg(format!(
+                "boolean_set_array: values must have rank zero or one for a full mask, got {}",
+                original_value_shape.len()
+            )));
+        }
+        let selected_count = mask.values.iter().filter(|&&value| value != 0.0).count();
+        let trailing_shape = &logical_shape[mask.shape.len()..];
+        let mut indexed_shape = Vec::with_capacity(trailing_shape.len() + 1);
+        indexed_shape.push(selected_count);
+        indexed_shape.extend_from_slice(trailing_shape);
+        let surplus = original_value_shape
+            .len()
+            .saturating_sub(indexed_shape.len());
+        let value_shape = &original_value_shape[surplus..];
+        if original_value_shape[..surplus].iter().any(|&dim| dim != 1)
+            || value_shape
+                .iter()
+                .rev()
+                .zip(indexed_shape.iter().rev())
+                .any(|(&source, &destination)| source != 1 && source != destination)
+        {
+            return Err(UFuncError::Msg(format!(
+                "boolean_set_array: cannot broadcast values shape {:?} into indexed shape {:?}",
+                original_value_shape, indexed_shape
+            )));
+        }
+        let total = element_count(&indexed_shape).map_err(UFuncError::Shape)?;
+        if total == 0 {
+            // A mismatched zero-length full-rank mask takes NumPy's general
+            // advanced-index path, with no trailing subspace. That path
+            // pre-casts a genuine ndarray scalar even when it selects nothing.
+            if !full_mask && trailing_shape.is_empty() && original_value_shape.is_empty() {
+                let (_, flags) = values.cast_numeric_with_flags(self.dtype)?;
+                dispatch_float_error_flags(flags, "cast")?;
+            }
+            return Ok(());
+        }
+
+        let direct_f64 = self.dtype == DType::F64 && values.dtype == DType::F64;
+        let run_dependent_cast = self.dtype == DType::U32
+            && matches!(
+                values.dtype,
+                DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128
+            );
+        let source = if run_dependent_cast {
+            Some(values.numeric_cast_source()?.1)
+        } else {
+            None
+        };
+        // A nonempty, validated assignment consumes every RHS element.
+        // Convert it once unless uint32's vector/scalar distinction makes
+        // conversion depend on each selected run. Status still reports only
+        // after all writes; sparse masks need no per-element allocations.
+        let (converted_values, mut flags) = if direct_f64 || run_dependent_cast {
+            (None, FloatErrorFlags::default())
+        } else {
+            let (converted, flags) = values.cast_numeric_with_flags(self.dtype)?;
+            (Some(converted), flags)
+        };
+        let mut write_run = |destination: usize,
+                             source_start: usize,
+                             length: usize,
+                             source_step: usize|
+         -> Result<(), UFuncError> {
+            debug_assert!(source_step <= 1);
+            if direct_f64 {
+                let output = &mut self.values[destination..destination + length];
+                if source_step == 0 {
+                    output.fill(values.values[source_start]);
+                } else {
+                    output.copy_from_slice(&values.values[source_start..source_start + length]);
+                }
+                return Ok(());
+            }
+            if let Some(converted) = &converted_values {
+                for index in 0..length {
+                    self.write_numeric_assignment(
+                        destination + index,
+                        converted,
+                        source_start + index * source_step,
+                        "boolean_set_array",
+                    )?;
+                }
+                return Ok(());
+            }
+            let cast_count = if source_step == 0 { 1 } else { length };
+            let selected_source = Self::numeric_storage_run(
+                source
+                    .as_ref()
+                    .expect("run-dependent assignment has typed storage"),
+                source_start,
+                cast_count,
+            );
+            let converted = selected_source.cast_to(self.dtype).map_err(|error| {
+                UFuncError::Msg(format!("boolean_set_array: storage cast failed: {error}"))
+            })?;
+            flags = flags.merged(Self::numeric_cast_flags(&selected_source, &converted));
+            let converted = Self::from_numeric_storage(vec![cast_count], converted)?;
+            for index in 0..length {
+                self.write_numeric_assignment(
+                    destination + index,
+                    &converted,
+                    index * source_step,
+                    "boolean_set_array",
+                )?;
+            }
+            Ok(())
+        };
+
+        if full_mask {
+            // The full-mask loop casts one contiguous selected run at a time.
+            // False mask positions break a uint32 vector body, while the
+            // source is consumed densely in selected-position order.
+            let source_step = usize::from(value_shape == [selected_count] && selected_count != 1);
+            let mut cursor = 0;
+            let mut source_start = 0;
+            while cursor < mask.values.len() {
+                if mask.values[cursor] == 0.0 {
+                    cursor += 1;
+                    continue;
+                }
+                let start = cursor;
+                while cursor < mask.values.len() && mask.values[cursor] != 0.0 {
+                    cursor += 1;
+                }
+                let length = cursor - start;
+                write_run(start, source_start, length, source_step)?;
+                source_start += length * source_step;
+            }
+        } else {
+            let block = element_count(trailing_shape).map_err(UFuncError::Shape)?;
+            let steps = aligned_broadcast_axis_steps(
+                indexed_shape.len(),
+                value_shape,
+                &c_strides_elems(value_shape),
+            );
+            let trailing_strides = c_strides_elems(trailing_shape);
+            // General Boolean indexing has one trailing subspace per selected
+            // mask position. Coalesce only source-compatible axes within that
+            // subspace; a broadcast row/column starts a new conversion run.
+            let mut inner_count = 1;
+            let mut source_step = 0;
+            for axis in (1..indexed_shape.len())
+                .rev()
+                .filter(|&axis| indexed_shape[axis] != 1)
+            {
+                if inner_count == 1 {
+                    source_step = steps[axis];
+                } else if steps[axis] != source_step * inner_count {
+                    break;
+                }
+                inner_count *= indexed_shape[axis];
+            }
+            let mut selected = 0;
+            for (prefix, &mask_value) in mask.values.iter().enumerate() {
+                if mask_value == 0.0 {
+                    continue;
+                }
+                for base in (0..block).step_by(inner_count) {
+                    let source_start = selected * steps[0]
+                        + trailing_shape
+                            .iter()
+                            .zip(&trailing_strides)
+                            .zip(&steps[1..])
+                            .map(|((&dim, &stride), &step)| (base / stride % dim) * step)
+                            .sum::<usize>();
+                    write_run(
+                        prefix * block + base,
+                        source_start,
+                        inner_count,
+                        source_step,
+                    )?;
+                }
+                selected += 1;
+            }
+        }
+        dispatch_float_error_flags(flags, "cast")
+    }
+
     /// Assign a sequence of Python float scalars through flat logical indices.
     /// Equivalent to `a.flat[indices] = values`: short value sequences cycle,
     /// empty sequences do nothing, and a later invalid index preserves earlier
