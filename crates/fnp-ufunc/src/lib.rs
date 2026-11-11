@@ -6314,6 +6314,12 @@ impl UFuncArray {
     pub fn diagflat(&self, k: i64) -> Self {
         match self.flatten().diag(k) {
             Ok(arr) => arr,
+            Err(_) if self.dtype.is_complex() => Self {
+                shape: vec![0, 0, 2],
+                values: Vec::new(),
+                dtype: self.dtype,
+                integer_sidecar: None,
+            },
             Err(_) => Self::from_values_with_dtype_lossy(vec![0], vec![], self.dtype),
         }
     }
@@ -6381,11 +6387,15 @@ impl UFuncArray {
 
     /// Extract a diagonal or construct a diagonal array.
     pub fn diag(&self, k: i64) -> Result<Self, UFuncError> {
-        if self.shape.len() == 1 {
+        let logical_shape = self.complex_logical_shape("diag")?;
+        if logical_shape.len() == 1 {
             // 1-D input: construct diagonal matrix
-            let n = self.shape[0];
-            let abs_k = k.unsigned_abs() as usize;
-            let size = n + abs_k;
+            let n = logical_shape[0];
+            let abs_k = usize::try_from(k.unsigned_abs())
+                .map_err(|_| UFuncError::Shape(ShapeError::Overflow))?;
+            let size = n
+                .checked_add(abs_k)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
             // size*size can overflow usize for very large inputs, and the n×n
             // buffer can exceed memory; compute the area checked and allocate
             // fallibly so a huge diagonal raises (→ Python MemoryError) instead of
@@ -6393,7 +6403,12 @@ impl UFuncArray {
             let total = size
                 .checked_mul(size)
                 .ok_or_else(|| UFuncError::Msg("diag: output size overflow".to_string()))?;
-            let mut values = try_zeroed_f64(total, "diag")?;
+            let width = if self.dtype.is_complex() { 2 } else { 1 };
+            let physical_count = total
+                .checked_mul(width)
+                .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            let mut values = try_zeroed_f64(physical_count, "diag")?;
             let mut sidecar_vals = match &self.integer_sidecar {
                 Some(IntegerSidecar::I64(_)) => {
                     let mut v: Vec<i64> = Vec::new();
@@ -6422,7 +6437,8 @@ impl UFuncArray {
                 let row = if k >= 0 { i } else { i + abs_k };
                 let col = if k >= 0 { i + abs_k } else { i };
                 let flat_idx = row * size + col;
-                values[flat_idx] = self.values[i];
+                values[flat_idx * width..(flat_idx + 1) * width]
+                    .copy_from_slice(&self.values[i * width..(i + 1) * width]);
                 if let Some(ref mut sidecar) = sidecar_vals {
                     match (sidecar, &self.integer_sidecar) {
                         (IntegerSidecar::I64(v_out), Some(IntegerSidecar::I64(v_in))) => {
@@ -6435,34 +6451,20 @@ impl UFuncArray {
                     }
                 }
             }
-            Ok(Self {
-                shape: vec![size, size],
+            let mut shape = vec![size, size];
+            if self.dtype.is_complex() {
+                shape.push(2);
+            }
+            let mut result = Self {
+                shape,
                 values,
                 dtype: self.dtype,
                 integer_sidecar: sidecar_vals,
-            })
-        } else if self.shape.len() == 2 {
-            // 2-D input: extract diagonal
-            let (rows, cols) = (self.shape[0], self.shape[1]);
-            let start_row = if k < 0 { (-k) as usize } else { 0 };
-            let start_col = if k >= 0 { k as usize } else { 0 };
-            let diag_len = rows
-                .saturating_sub(start_row)
-                .min(cols.saturating_sub(start_col));
-
-            let mut values = Vec::with_capacity(diag_len);
-            let mut source_indices = Vec::with_capacity(diag_len);
-            for i in 0..diag_len {
-                let flat = (start_row + i) * cols + start_col + i;
-                values.push(self.values[flat]);
-                source_indices.push(flat);
-            }
-            Ok(Self {
-                shape: vec![diag_len],
-                values,
-                dtype: self.dtype,
-                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-            })
+            };
+            result.round_complex_transform_components();
+            Ok(result)
+        } else if logical_shape.len() == 2 {
+            self.diagonal(k, 0, 1)
         } else {
             Err(UFuncError::Msg(
                 "diag requires 1-D or 2-D input".to_string(),
@@ -6470,63 +6472,96 @@ impl UFuncArray {
         }
     }
 
-    /// Extract upper triangle of a matrix.
+    /// Extract the upper triangle over the last two logical axes.
+    /// A vector is broadcast across the rows of a square matrix.
     pub fn triu(&self, k: i64) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("triu requires 2-D input".to_string()));
-        }
-        let (rows, cols) = (self.shape[0], self.shape[1]);
-        // The smallest `c - r` occurs at the lower-left corner. Once `k` is
-        // at or below that diagonal, every element is retained; cloning avoids
-        // zero-filling the output only to overwrite the entire buffer.
-        if (k as i128) <= 1 - rows as i128 {
-            return Ok(self.clone());
-        }
-        let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ true);
-        let sidecar_vals = match &self.integer_sidecar {
-            Some(IntegerSidecar::I64(v)) => {
-                Some(IntegerSidecar::I64(triangle_build(v, rows, cols, k, true)))
-            }
-            Some(IntegerSidecar::U64(v)) => {
-                Some(IntegerSidecar::U64(triangle_build(v, rows, cols, k, true)))
-            }
-            None => None,
-        };
-        Ok(Self {
-            shape: self.shape.clone(),
-            values,
-            dtype: self.dtype,
-            integer_sidecar: sidecar_vals,
-        })
+        self.triangular_part(k, true)
     }
 
-    /// Extract lower triangle of a matrix.
+    /// Extract the lower triangle over the last two logical axes.
+    /// A vector is broadcast across the rows of a square matrix.
     pub fn tril(&self, k: i64) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("tril requires 2-D input".to_string()));
+        self.triangular_part(k, false)
+    }
+
+    fn triangular_part(&self, k: i64, upper: bool) -> Result<Self, UFuncError> {
+        let operation = if upper { "triu" } else { "tril" };
+        let mut shape = self.complex_logical_shape(operation)?;
+        if shape.is_empty() {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: input must have at least one dimension"
+            )));
         }
-        let (rows, cols) = (self.shape[0], self.shape[1]);
-        // The largest `c - r` occurs at the upper-right corner. At or above
-        // that diagonal the lower-triangle mask retains the complete array.
-        if (k as i128) >= cols as i128 - 1 {
-            return Ok(self.clone());
+        let broadcast_vector = shape.len() == 1;
+        if broadcast_vector {
+            shape.insert(0, shape[0]);
         }
-        let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ false);
+        let rows = shape[shape.len() - 2];
+        let cols = shape[shape.len() - 1];
+        let all_kept = if upper {
+            i128::from(k) <= 1 - rows as i128
+        } else {
+            i128::from(k) >= cols as i128 - 1
+        };
+        if all_kept && !broadcast_vector {
+            return Ok(self.copy_with_logical_shape(shape));
+        }
+        let count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let values = if self.dtype.is_complex() {
+            triangle_build(
+                self.values.as_chunks::<2>().0,
+                rows,
+                cols,
+                count,
+                broadcast_vector,
+                k,
+                upper,
+            )?
+            .into_flattened()
+        } else {
+            triangle_build(&self.values, rows, cols, count, broadcast_vector, k, upper)?
+        };
         let sidecar_vals = match &self.integer_sidecar {
-            Some(IntegerSidecar::I64(v)) => {
-                Some(IntegerSidecar::I64(triangle_build(v, rows, cols, k, false)))
-            }
-            Some(IntegerSidecar::U64(v)) => {
-                Some(IntegerSidecar::U64(triangle_build(v, rows, cols, k, false)))
-            }
+            Some(IntegerSidecar::I64(v)) => Some(IntegerSidecar::I64(triangle_build(
+                v,
+                rows,
+                cols,
+                count,
+                broadcast_vector,
+                k,
+                upper,
+            )?)),
+            Some(IntegerSidecar::U64(v)) => Some(IntegerSidecar::U64(triangle_build(
+                v,
+                rows,
+                cols,
+                count,
+                broadcast_vector,
+                k,
+                upper,
+            )?)),
             None => None,
         };
-        Ok(Self {
-            shape: self.shape.clone(),
+        if self.dtype.is_complex() {
+            shape.push(2);
+        }
+        let mut result = Self {
+            shape,
             values,
             dtype: self.dtype,
             integer_sidecar: sidecar_vals,
-        })
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     #[inline]
@@ -16466,10 +16501,9 @@ impl UFuncArray {
         Self::from_values_with_dtype(out_shape, out_values, dtype)
     }
 
-    /// Compute the trace of a 2-D matrix.
+    /// Compute the trace over the first two logical axes, as in `np.trace`.
     pub fn trace(&self, offset: i64) -> Result<Self, UFuncError> {
-        let d = self.diag(offset)?;
-        Ok(d.sum_extracted_diagonal_to_scalar())
+        self.trace_axis(offset, 0, 1)
     }
 
     /// Sum an already-extracted 1-D diagonal (as produced by `diag`/`diagonal`)
@@ -16482,6 +16516,32 @@ impl UFuncArray {
     /// a fresh sidecar so the scalar bridges back bit-exact; narrower ints have
     /// no sidecar (they fit f64 losslessly) and keep the plain f64 fold.
     pub fn sum_extracted_diagonal_to_scalar(&self) -> Self {
+        if self.dtype.is_complex() {
+            let values = self
+                .values
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|parts| {
+                    if self.dtype == DType::Complex64 {
+                        (f64::from(parts[0] as f32), f64::from(parts[1] as f32))
+                    } else {
+                        (parts[0], parts[1])
+                    }
+                })
+                .collect::<Vec<_>>();
+            let sum = Self::complex_reduction_add(
+                (0.0, 0.0),
+                Self::complex_pairwise_sum(&values, self.dtype),
+                self.dtype,
+            );
+            return Self {
+                shape: vec![2],
+                values: vec![sum.0, sum.1],
+                dtype: self.dtype,
+                integer_sidecar: None,
+            };
+        }
         match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
                 let s = v.iter().copied().fold(0i64, i64::wrapping_add);
@@ -16514,35 +16574,30 @@ impl UFuncArray {
     /// along the diagonal axis. Output shape is the input shape with `axis1`
     /// and `axis2` removed.
     pub fn trace_axis(&self, offset: i64, axis1: isize, axis2: isize) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
-        if ndim < 2 {
-            return Err(UFuncError::Msg(
-                "trace_axis requires at least a 2-D array".to_string(),
-            ));
-        }
-        let a1 = normalize_axis(axis1, ndim)?;
-        let a2 = normalize_axis(axis2, ndim)?;
-        if a1 == a2 {
-            return Err(UFuncError::Msg(
-                "trace_axis: axis1 and axis2 must be different".to_string(),
-            ));
-        }
-
-        // For 2-D arrays, reduce to the simple diagonal trace. The diagonal is
-        // taken over (axis1, axis2): the canonical (0, 1) orientation sums
-        // diag(offset), but the swapped (1, 0) orientation is the transpose, whose
-        // k-th diagonal is the (-k)-th of the original — so negate the offset.
-        if ndim == 2 {
-            return self.trace(if a1 < a2 { offset } else { -offset });
-        }
-
-        // Get the diagonal with axis1/axis2 specification
         let diag = self.diagonal(offset, axis1, axis2)?;
-
-        // The diagonal output has shape: [other_axes..., diag_len]
-        // Sum along the last axis (the diagonal axis)
-        let last_axis = (diag.shape.len() - 1) as isize;
-        diag.reduce_sum(Some(last_axis), false)
+        let component_axis = usize::from(self.dtype.is_complex());
+        let output_shape = &diag.shape[..diag.shape.len() - 1 - component_axis];
+        if output_shape.contains(&0) {
+            let mut shape = output_shape.to_vec();
+            if self.dtype.is_complex() {
+                shape.push(2);
+            }
+            return Ok(Self {
+                shape,
+                values: Vec::new(),
+                dtype: promote_for_sum_reduction(self.dtype),
+                integer_sidecar: None,
+            });
+        }
+        element_count(output_shape)
+            .map_err(UFuncError::Shape)?
+            .checked_mul(1 + component_axis)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        // The diagonal is the last logical axis, ahead of any stored complex
+        // components. The normal reduction also preserves NumPy's accumulator
+        // promotion for bool/narrow integers and exact wide-integer wrapping.
+        diag.reduce_sum(Some(-1), false)
     }
 
     // ── tensor operations ────────
@@ -21266,14 +21321,15 @@ impl UFuncArray {
     ///
     /// The array must be at least 2-D and square (all dims equal).
     pub fn diag_indices_from(arr: &Self) -> Result<(Vec<Self>, DType), UFuncError> {
-        let ndim = arr.shape.len();
+        let shape = arr.complex_logical_shape("diag_indices_from")?;
+        let ndim = shape.len();
         if ndim < 2 {
             return Err(UFuncError::Msg(
                 "diag_indices_from: input must be at least 2-D".into(),
             ));
         }
-        let n = arr.shape[0];
-        for &d in &arr.shape[1..] {
+        let n = shape[0];
+        for &d in &shape[1..] {
             if d != n {
                 return Err(UFuncError::Msg(
                     "diag_indices_from: all dimensions must be equal".into(),
@@ -21287,24 +21343,28 @@ impl UFuncArray {
     ///
     /// The array must be 2-D.
     pub fn tril_indices_from(arr: &Self, k: i64) -> Result<(Self, Self), UFuncError> {
-        if arr.shape.len() != 2 {
+        let shape = arr.complex_logical_shape("tril_indices_from")?;
+        if shape.len() != 2 {
             return Err(UFuncError::Msg(
                 "tril_indices_from: input must be 2-D".into(),
             ));
         }
-        Ok(Self::tril_indices(arr.shape[0], arr.shape[1], k))
+        let rows = if shape[1] == 0 { 0 } else { shape[0] };
+        Ok(Self::tril_indices(rows, shape[1], k))
     }
 
     /// Return indices for the upper triangle of an array (np.triu_indices_from).
     ///
     /// The array must be 2-D.
     pub fn triu_indices_from(arr: &Self, k: i64) -> Result<(Self, Self), UFuncError> {
-        if arr.shape.len() != 2 {
+        let shape = arr.complex_logical_shape("triu_indices_from")?;
+        if shape.len() != 2 {
             return Err(UFuncError::Msg(
                 "triu_indices_from: input must be 2-D".into(),
             ));
         }
-        Ok(Self::triu_indices(arr.shape[0], arr.shape[1], k))
+        let rows = if shape[1] == 0 { 0 } else { shape[0] };
+        Ok(Self::triu_indices(rows, shape[1], k))
     }
 
     // ── Type casting, boolean reductions, searching, comparison ────
@@ -30008,7 +30068,8 @@ impl UFuncArray {
     /// For N-D arrays, the diagonal is extracted from the 2-D slice
     /// defined by `axis1` and `axis2`, and the result is appended as a new axis.
     pub fn diagonal(&self, offset: i64, axis1: isize, axis2: isize) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
+        let logical_shape = self.complex_logical_shape("diagonal")?;
+        let ndim = logical_shape.len();
         if ndim < 2 {
             return Err(UFuncError::Msg(
                 "diagonal requires at least a 2-D array".to_string(),
@@ -30021,64 +30082,89 @@ impl UFuncArray {
                 "diagonal: axis1 and axis2 must be different".to_string(),
             ));
         }
-        if ndim == 2 {
-            // The diagonal is over (axis1, axis2): canonical (0, 1) is diag(offset);
-            // the swapped (1, 0) orientation is the transpose, whose k-th diagonal
-            // is the (-k)-th of the original, so negate the offset.
-            return self.diag(if a1 < a2 { offset } else { -offset });
-        }
-        // N-D case: collect other axes, iterate over their indices,
-        // and extract diagonal from the (axis1, axis2) 2-D slice.
-        let d1 = self.shape[a1];
-        let d2 = self.shape[a2];
-        let start_r = if offset < 0 { (-offset) as usize } else { 0 };
-        let start_c = if offset >= 0 { offset as usize } else { 0 };
+        // Keep axis order explicit instead of negating the offset for swapped
+        // 2-D axes: negation overflows for i64::MIN. An offset wider than usize
+        // is necessarily outside every representable source dimension.
+        let d1 = logical_shape[a1];
+        let d2 = logical_shape[a2];
+        let magnitude = usize::try_from(offset.unsigned_abs()).unwrap_or(usize::MAX);
+        let start_r = if offset < 0 { magnitude } else { 0 };
+        let start_c = if offset >= 0 { magnitude } else { 0 };
         let diag_len = d1.saturating_sub(start_r).min(d2.saturating_sub(start_c));
 
         // Build output shape: remove axis1 and axis2 from shape, append diag_len
         let other_axes: Vec<usize> = (0..ndim).filter(|&a| a != a1 && a != a2).collect();
-        let mut out_shape: Vec<usize> = other_axes.iter().map(|&a| self.shape[a]).collect();
+        let mut out_shape: Vec<usize> = other_axes.iter().map(|&a| logical_shape[a]).collect();
         out_shape.push(diag_len);
-
-        let strides = c_strides_elems(&self.shape);
-        let other_count: usize =
-            other_axes
-                .iter()
-                .map(|&a| self.shape[a])
-                .try_fold(1usize, |acc, dim| {
-                    acc.checked_mul(dim)
-                        .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
-                })?;
-        let other_strides: Vec<usize> = {
-            let other_shape: Vec<usize> = other_axes.iter().map(|&a| self.shape[a]).collect();
-            c_strides_elems(&other_shape)
+        let count = if out_shape.contains(&0) {
+            0
+        } else {
+            element_count(&out_shape).map_err(UFuncError::Shape)?
         };
-
-        let mut result = Vec::with_capacity(other_count * diag_len);
-        let mut source_indices = Vec::with_capacity(other_count * diag_len);
-        for oi in 0..other_count {
-            // Decode oi into indices for other_axes
-            let mut rem = oi;
-            let mut base_offset = 0usize;
-            for (j, &ax) in other_axes.iter().enumerate() {
-                let idx = rem / other_strides[j];
-                rem %= other_strides[j];
-                base_offset += idx * strides[ax];
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let physical_count = count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let allocation_error =
+            |_| UFuncError::Msg("diagonal: unable to allocate output array (out of memory)".into());
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(physical_count)
+            .map_err(allocation_error)?;
+        let mut integer_sidecar = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(_)) => {
+                let mut exact = Vec::new();
+                exact.try_reserve_exact(count).map_err(allocation_error)?;
+                Some(IntegerSidecar::I64(exact))
             }
-            for k in 0..diag_len {
-                let r = start_r + k;
-                let c = start_c + k;
-                let flat = base_offset + r * strides[a1] + c * strides[a2];
-                result.push(self.values[flat]);
-                source_indices.push(flat);
+            Some(IntegerSidecar::U64(_)) => {
+                let mut exact = Vec::new();
+                exact.try_reserve_exact(count).map_err(allocation_error)?;
+                Some(IntegerSidecar::U64(exact))
+            }
+            None => None,
+        };
+        // Empty diagonals never need source strides. This also avoids overflow
+        // in unused products of huge extents separated by a zero dimension.
+        if count != 0 {
+            let strides = c_strides_elems(&logical_shape);
+            let other_strides = c_strides_elems(&out_shape[..out_shape.len() - 1]);
+            for oi in 0..count / diag_len {
+                let mut rem = oi;
+                let mut base_offset = 0usize;
+                for (j, &ax) in other_axes.iter().enumerate() {
+                    let idx = rem / other_strides[j];
+                    rem %= other_strides[j];
+                    base_offset += idx * strides[ax];
+                }
+                for k in 0..diag_len {
+                    let flat =
+                        base_offset + (start_r + k) * strides[a1] + (start_c + k) * strides[a2];
+                    values.extend_from_slice(&self.values[flat * width..(flat + 1) * width]);
+                    match (&mut integer_sidecar, &self.integer_sidecar) {
+                        (Some(IntegerSidecar::I64(output)), Some(IntegerSidecar::I64(input))) => {
+                            output.push(input[flat])
+                        }
+                        (Some(IntegerSidecar::U64(output)), Some(IntegerSidecar::U64(input))) => {
+                            output.push(input[flat])
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
-        Ok(Self {
+        if self.dtype.is_complex() {
+            out_shape.push(2);
+        }
+        let mut result = Self {
             shape: out_shape,
-            values: result,
+            values,
             dtype: self.dtype,
-            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-        })
+            integer_sidecar,
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     /// Peak-to-peak (max - min) along an axis or over all elements.
@@ -42261,8 +42347,9 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// row-major `dst` (`dst[j*r + i] = src[i*c + j]`). Generic over any `Copy`
 /// element so the f64 value plane and the i64/u64 integer sidecar share one
 /// kernel. Output rows are split into `TILE`-wide bands across the rayon pool
-/// Build the upper (`upper=true`) or lower triangle of a `rows × cols` C-order
-/// matrix into a fresh zero-filled buffer. Each output row has a single
+/// Build upper (`upper=true`) or lower triangles in a C-order array, treating
+/// each stored item as one logical element (including complex pairs). Batches
+/// repeat the mask; a vector source broadcasts over every output row. Each row has a single
 /// contiguous "kept" span — for `triu(k)` columns `[r+k, cols)`, for `tril(k)`
 /// columns `[0, r+k]` — so the kept span is one `copy_from_slice` (a vectorized
 /// memcpy) and the masked-out span is left at the free `alloc_zeroed` default.
@@ -42275,32 +42362,40 @@ fn triangle_build<T: Copy + Default + Send + Sync>(
     src: &[T],
     rows: usize,
     cols: usize,
+    count: usize,
+    broadcast_vector: bool,
     k: i64,
     upper: bool,
-) -> Vec<T> {
-    let mut out = vec![T::default(); rows * cols];
-    if cols == 0 || rows == 0 {
-        return out;
+) -> Result<Vec<T>, UFuncError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(count).map_err(|_| {
+        UFuncError::Msg("triangle: unable to allocate output array (out of memory)".into())
+    })?;
+    out.resize(count, T::default());
+    if count == 0 {
+        return Ok(out);
     }
-    let fill = |(r, dst_row): (usize, &mut [T])| {
-        let src_row = &src[r * cols..(r + 1) * cols];
+    let fill = |(flat_row, dst_row): (usize, &mut [T])| {
+        let row = flat_row % rows;
+        let start = if broadcast_vector { 0 } else { flat_row * cols };
+        let src_row = &src[start..start + cols];
         if upper {
             // keep columns c >= r+k
-            let start = (r as i64 + k).clamp(0, cols as i64) as usize;
+            let start = (row as i128 + i128::from(k)).clamp(0, cols as i128) as usize;
             dst_row[start..].copy_from_slice(&src_row[start..]);
         } else {
             // keep columns c <= r+k
-            let end = (r as i64 + k + 1).clamp(0, cols as i64) as usize;
+            let end = (row as i128 + i128::from(k) + 1).clamp(0, cols as i128) as usize;
             dst_row[..end].copy_from_slice(&src_row[..end]);
         }
     };
     const TRI_PARALLEL_MIN_ELEMS: usize = 1 << 23;
-    if rows >= 2 && rows * cols >= TRI_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+    if count / cols >= 2 && count >= TRI_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
         out.par_chunks_mut(cols).enumerate().for_each(fill);
     } else {
         out.chunks_mut(cols).enumerate().for_each(fill);
     }
-    out
+    Ok(out)
 }
 
 /// (each band is a disjoint contiguous `dst` slice → `#![forbid(unsafe_code)]`

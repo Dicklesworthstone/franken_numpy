@@ -99,7 +99,8 @@ impl OracleBatch {
         args: Value,
         actual: Result<UFuncArray, UFuncError>,
     ) {
-        self.cases.push(json!({"input": input, "op": op, "args": args}));
+        self.cases
+            .push(json!({"input": input, "op": op, "args": args}));
         self.actual.push(actual);
     }
 
@@ -158,8 +159,18 @@ for case in data['cases']:
             result = getattr(np, op)(array)
         elif op == 'rot90':
             result = np.rot90(array, k=args['k'], axes=args['axes'])
+        elif op in ('diag', 'diagflat', 'tril', 'triu'):
+            result = getattr(np, op)(array, k=args['k'])
+        elif op in ('diagonal', 'trace'):
+            result = getattr(np, op)(array, offset=args['offset'],
+                                      axis1=args['axis1'], axis2=args['axis2'])
+        elif op == 'diag_indices_from':
+            result = np.asarray(np.diag_indices_from(array))
+        elif op in ('tril_indices_from', 'triu_indices_from'):
+            result = np.asarray(getattr(np, op)(array, k=args['k']))
         else:
             raise AssertionError(op)
+        result = np.asarray(result)
         if result.dtype.kind == 'c':
             parts = np.empty(result.size * 2, dtype=np.float64)
             parts[0::2] = result.real.ravel()
@@ -200,7 +211,10 @@ print(json.dumps(rows))
             .zip(expected)
         {
             if expected.get("error").is_some() {
-                assert!(actual.is_err(), "{case}: expected {expected}, got {actual:?}");
+                assert!(
+                    actual.is_err(),
+                    "{case}: expected {expected}, got {actual:?}"
+                );
                 continue;
             }
             let actual = actual.unwrap_or_else(|error| panic!("{case}: {error}"));
@@ -209,13 +223,21 @@ print(json.dumps(rows))
                 assert_eq!(shape.pop(), Some(2), "{case}: component dimension");
             }
             assert_eq!(json!(shape), expected["shape"], "{case}: logical shape");
-            assert_eq!(dtype_name(actual.dtype()), expected["dtype"], "{case}: dtype");
+            assert_eq!(
+                dtype_name(actual.dtype()),
+                expected["dtype"],
+                "{case}: dtype"
+            );
             if actual.dtype().is_integer() || actual.dtype() == DType::Bool {
                 let storage = actual.to_storage().unwrap();
                 let integers = (0..storage.len())
                     .map(|index| storage.get_i128(index).unwrap().to_string())
                     .collect::<Vec<_>>();
-                assert_eq!(json!(integers), expected["integers"], "{case}: exact integers");
+                assert_eq!(
+                    json!(integers),
+                    expected["integers"],
+                    "{case}: exact integers"
+                );
             }
             let bits = expected["bits"].as_array().unwrap();
             assert_eq!(actual.values().len(), bits.len(), "{case}: component count");
@@ -232,6 +254,281 @@ print(json.dumps(rows))
                 }
             }
         }
+    }
+}
+
+#[test]
+fn complex_diagonal_construction_and_triangles_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[4],
+        &[0, 3],
+        &[3, 0],
+        &[2, 3],
+        &[3, 2],
+        &[3, 3],
+        &[2, 3, 4],
+        &[2, 0, 3],
+        &[1, 2, 3, 4],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let array = complex(shape, dtype);
+            let input = batch.input(&array);
+            for k in [-4, -2, -1, 0, 1, 2, 4] {
+                batch.case(input, "diag", json!({"k": k}), array.diag(k));
+                batch.case(input, "diagflat", json!({"k": k}), Ok(array.diagflat(k)));
+                batch.case(input, "tril", json!({"k": k}), array.tril(k));
+                batch.case(input, "triu", json!({"k": k}), array.triu(k));
+                batch.case(
+                    input,
+                    "trace",
+                    json!({"offset": k, "axis1": 0, "axis2": 1}),
+                    array.trace(k),
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_diagonal_and_trace_axes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[3],
+        &[2, 3],
+        &[2, 3, 4],
+        &[3, 1, 4, 2],
+        &[2, 0, 3],
+        &[0, 3, 4],
+        &[3, 4, 0],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let array = complex(shape, dtype);
+            let input = batch.input(&array);
+            let rank = shape.len() as isize;
+            for (axis1, axis2) in [
+                (0, 1),
+                (1, 0),
+                (0, -1),
+                (-1, 0),
+                (-2, -1),
+                (-1, -2),
+                (1, 1),
+                (-rank - 1, 0),
+                (rank, 0),
+            ] {
+                for offset in [-3, -1, 0, 1, 3] {
+                    let args = json!({"offset": offset, "axis1": axis1, "axis2": axis2});
+                    batch.case(
+                        input,
+                        "diagonal",
+                        args.clone(),
+                        array.diagonal(offset, axis1, axis2),
+                    );
+                    batch.case(input, "trace", args, array.trace_axis(offset, axis1, axis2));
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_diagonal_index_helpers_count_logical_axes() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[3],
+        &[0, 0],
+        &[0, 3],
+        &[3, 0],
+        &[2, 3],
+        &[3, 2],
+        &[3, 3],
+        &[2, 2, 2],
+        &[2, 2, 3],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let array = complex(shape, dtype);
+            let input = batch.input(&array);
+            let diagonal = UFuncArray::diag_indices_from(&array)
+                .and_then(|(axes, _)| UFuncArray::stack(&axes.iter().collect::<Vec<_>>(), 0));
+            batch.case(input, "diag_indices_from", json!({}), diagonal);
+            for k in [-4, -1, 0, 1, 4] {
+                let lower = UFuncArray::tril_indices_from(&array, k)
+                    .and_then(|(rows, cols)| UFuncArray::stack(&[&rows, &cols], 0));
+                let upper = UFuncArray::triu_indices_from(&array, k)
+                    .and_then(|(rows, cols)| UFuncArray::stack(&[&rows, &cols], 0));
+                batch.case(input, "tril_indices_from", json!({"k": k}), lower);
+                batch.case(input, "triu_indices_from", json!({"k": k}), upper);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn diagonal_family_preserves_real_integer_payloads_and_trace_promotion() {
+    let mut batch = OracleBatch::default();
+    let mut storage = vec![
+        ArrayStorage::I64(vec![i64::MAX, (1_i64 << 53) + 1, 3, -4, i64::MIN, 8]),
+        ArrayStorage::U64(vec![u64::MAX, (1_u64 << 53) + 1, 3, 4, 1_u64 << 63, 8]),
+    ];
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+    ] {
+        storage.push(
+            ArrayStorage::F64(vec![127.0, 3.0, 1.0, 4.0, 127.0, 2.0])
+                .cast_to(dtype)
+                .unwrap(),
+        );
+    }
+    for cells in storage {
+        for shape in [vec![6], vec![2, 3], vec![1, 2, 3]] {
+            let array = UFuncArray::from_storage(shape, cells.clone()).unwrap();
+            let input = batch.input(&array);
+            for k in [-2, -1, 0, 1, 2] {
+                batch.case(input, "diag", json!({"k": k}), array.diag(k));
+                batch.case(input, "diagflat", json!({"k": k}), Ok(array.diagflat(k)));
+                batch.case(input, "tril", json!({"k": k}), array.tril(k));
+                batch.case(input, "triu", json!({"k": k}), array.triu(k));
+                for (axis1, axis2) in [(0, 1), (1, 0), (-2, -1), (-1, -2)] {
+                    let args = json!({"offset": k, "axis1": axis1, "axis2": axis2});
+                    batch.case(
+                        input,
+                        "diagonal",
+                        args.clone(),
+                        array.diagonal(k, axis1, axis2),
+                    );
+                    batch.case(input, "trace", args, array.trace_axis(k, axis1, axis2));
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_trace_keeps_both_components_and_source_precision() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 2.0, f64::NAN, f64::INFINITY, 99.0, -99.0, 3.0, 4.0],
+            dtype,
+        )
+        .unwrap();
+        let trace = array.trace(0).unwrap();
+        assert_eq!(trace.shape(), &[2]);
+        assert_eq!(trace.dtype(), dtype);
+        assert_eq!(trace.values(), &[4.0, 6.0]);
+        assert_eq!(
+            array
+                .diag(0)
+                .unwrap()
+                .sum_extracted_diagonal_to_scalar()
+                .values(),
+            &[4.0, 6.0]
+        );
+        let rounded =
+            UFuncArray::new(vec![1, 1, 2], vec![16_777_217.0, -16_777_219.0], dtype).unwrap();
+        let expected = if dtype == DType::Complex64 {
+            [16_777_216.0, -16_777_220.0]
+        } else {
+            [16_777_217.0, -16_777_219.0]
+        };
+        assert_eq!(rounded.trace(0).unwrap().values(), &expected);
+    }
+}
+
+#[test]
+fn diagonal_family_rejects_malformed_layouts_and_handles_extreme_empty_shapes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for malformed in [
+            UFuncArray::new(vec![], vec![1.0], dtype).unwrap(),
+            UFuncArray::new(vec![2, 3], vec![1.0; 6], dtype).unwrap(),
+            UFuncArray::new(vec![0, 1], vec![], dtype).unwrap(),
+        ] {
+            assert!(malformed.diag(0).is_err());
+            assert!(malformed.diagonal(0, 0, 1).is_err());
+            assert!(malformed.trace(0).is_err());
+            assert!(malformed.trace_axis(0, 0, 1).is_err());
+            assert!(malformed.tril(0).is_err());
+            assert!(malformed.triu(0).is_err());
+            assert!(UFuncArray::diag_indices_from(&malformed).is_err());
+            assert!(UFuncArray::tril_indices_from(&malformed, 0).is_err());
+            assert!(UFuncArray::triu_indices_from(&malformed, 0).is_err());
+        }
+        let matrix = complex(&[2, 3], dtype);
+        let vector = complex(&[3], dtype);
+        for offset in [i64::MIN, i64::MAX] {
+            assert_eq!(matrix.diag(offset).unwrap().shape(), &[0, 2]);
+            assert_eq!(matrix.diagonal(offset, 1, 0).unwrap().shape(), &[0, 2]);
+            assert_eq!(
+                matrix.trace_axis(offset, 1, 0).unwrap().values(),
+                &[0.0, 0.0]
+            );
+            assert!(vector.diag(offset).is_err());
+            assert_eq!(vector.diagflat(offset).shape(), &[0, 0, 2]);
+        }
+        assert!(
+            matrix
+                .tril(i64::MIN)
+                .unwrap()
+                .values()
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        assert!(
+            matrix
+                .triu(i64::MAX)
+                .unwrap()
+                .values()
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        let huge = UFuncArray::new(vec![usize::MAX, 0, usize::MAX, 2], vec![], dtype).unwrap();
+        assert_eq!(huge.diagonal(0, 0, 2).unwrap().shape(), &[0, usize::MAX, 2]);
+        assert!(huge.tril(0).unwrap().values().is_empty());
+        assert!(huge.triu(0).unwrap().values().is_empty());
+        assert!(matches!(
+            huge.trace_axis(0, 1, 2),
+            Err(UFuncError::Shape(ShapeError::Overflow))
+        ));
+        let over_capacity = isize::MAX as usize / std::mem::size_of::<[f64; 2]>() + 1;
+        let empty_diagonals = UFuncArray::new(vec![over_capacity, 0, 1, 2], vec![], dtype).unwrap();
+        assert!(matches!(
+            empty_diagonals.trace_axis(0, 1, 2),
+            Err(UFuncError::Shape(ShapeError::Overflow))
+        ));
+        let huge_matrix = UFuncArray::new(vec![usize::MAX, 0, 2], vec![], dtype).unwrap();
+        assert!(
+            UFuncArray::tril_indices_from(&huge_matrix, 0)
+                .unwrap()
+                .0
+                .values()
+                .is_empty()
+        );
+        assert!(
+            UFuncArray::triu_indices_from(&huge_matrix, 0)
+                .unwrap()
+                .0
+                .values()
+                .is_empty()
+        );
     }
 }
 
@@ -471,16 +768,7 @@ fn complex_swap_move_and_roll_axes_match_numpy() {
 
 #[test]
 fn complex_broadcast_to_uses_logical_target_shapes() {
-    let shapes: &[&[usize]] = &[
-        &[],
-        &[1],
-        &[3],
-        &[2, 1],
-        &[1, 3],
-        &[2, 3],
-        &[0, 1],
-        &[1, 0],
-    ];
+    let shapes: &[&[usize]] = &[&[], &[1], &[3], &[2, 1], &[1, 3], &[2, 3], &[0, 1], &[1, 0]];
     let targets: &[&[usize]] = &[
         &[],
         &[1],
@@ -507,12 +795,7 @@ fn complex_broadcast_to_uses_logical_target_shapes() {
             }
         }
         // Exercise the pair-preserving block kernels above their parallel thresholds.
-        let array = UFuncArray::new(
-            vec![2, 1, 2],
-            vec![2.5, -1.25, -3.25, 5.5],
-            dtype,
-        )
-        .unwrap();
+        let array = UFuncArray::new(vec![2, 1, 2], vec![2.5, -1.25, -3.25, 5.5], dtype).unwrap();
         let input = batch.input(&array);
         batch.case(
             input,
@@ -693,7 +976,10 @@ fn complex_shape_transforms_reject_malformed_storage_and_oversized_outputs() {
             malformed.rot90(0),
             malformed.rot90_axes(1, (0, 1)),
         ] {
-            assert!(result.is_err(), "malformed complex storage must be rejected");
+            assert!(
+                result.is_err(),
+                "malformed complex storage must be rejected"
+            );
         }
     }
     let scalar = complex(&[], DType::Complex128);
@@ -712,15 +998,7 @@ fn complex_shape_transforms_reject_malformed_storage_and_oversized_outputs() {
 
 #[test]
 fn complex_flips_and_rotations_match_numpy() {
-    let shapes: &[&[usize]] = &[
-        &[],
-        &[1],
-        &[8],
-        &[2, 3],
-        &[1, 3],
-        &[2, 3, 4],
-        &[2, 0, 3],
-    ];
+    let shapes: &[&[usize]] = &[&[], &[1], &[8], &[2, 3], &[1, 3], &[2, 3, 4], &[2, 0, 3]];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
         for &shape in shapes {
@@ -731,12 +1009,7 @@ fn complex_flips_and_rotations_match_numpy() {
             batch.case(input, "fliplr", json!({}), array.fliplr());
             batch.case(input, "flipud", json!({}), array.flipud());
             for axis in (-rank - 1..=rank).chain([isize::MIN, isize::MAX]) {
-                batch.case(
-                    input,
-                    "flip",
-                    json!({"axis": axis}),
-                    array.flip(Some(axis)),
-                );
+                batch.case(input, "flip", json!({"axis": axis}), array.flip(Some(axis)));
             }
             let tuples: &[&[isize]] = &[
                 &[],
@@ -753,12 +1026,7 @@ fn complex_flips_and_rotations_match_numpy() {
                 &[isize::MAX],
             ];
             for &axes in tuples {
-                batch.case(
-                    input,
-                    "flip",
-                    json!({"axis": axes}),
-                    array.flip_axes(axes),
-                );
+                batch.case(input, "flip", json!({"axis": axes}), array.flip_axes(axes));
             }
             for axes in [
                 (0, 1),
@@ -799,12 +1067,7 @@ fn flips_and_rotations_preserve_exact_integer_sidecars() {
         batch.case(input, "fliplr", json!({}), array.fliplr());
         batch.case(input, "flipud", json!({}), array.flipud());
         for axes in [&[0, 1][..], &[1, 0][..], &[-1][..], &[0, 0][..]] {
-            batch.case(
-                input,
-                "flip",
-                json!({"axis": axes}),
-                array.flip_axes(axes),
-            );
+            batch.case(input, "flip", json!({"axis": axes}), array.flip_axes(axes));
         }
         for k in [-1, 0, 1, 2, 3, 4] {
             batch.case(
@@ -818,21 +1081,14 @@ fn flips_and_rotations_preserve_exact_integer_sidecars() {
     batch.assert_matches_numpy();
 }
 
-
 #[test]
 fn masked_complex_shape_only_operations_keep_physical_masks_aligned() {
     for dtype in [DType::Complex64, DType::Complex128] {
-        let data = UFuncArray::new(
-            vec![2, 3, 2],
-            (0..12).map(f64::from).collect(),
-            dtype,
-        )
-        .unwrap();
+        let data = UFuncArray::new(vec![2, 3, 2], (0..12).map(f64::from).collect(), dtype).unwrap();
         let mask = UFuncArray::from_storage(
             vec![2, 3, 2],
             ArrayStorage::Bool(vec![
-                true, false, false, false, false, true,
-                true, true, false, true, true, false,
+                true, false, false, false, false, true, true, true, false, true, true, false,
             ]),
         )
         .unwrap();
@@ -876,12 +1132,8 @@ fn masked_complex_shape_only_operations_keep_physical_masks_aligned() {
             (vec![2], vec![3.0, -4.0], vec![]),
             (vec![2, 0, 3, 2], vec![], vec![0, 6]),
         ] {
-            let mask = UFuncArray::new(
-                shape.clone(),
-                vec![1.0; values.len()],
-                DType::Bool,
-            )
-            .unwrap();
+            let mask =
+                UFuncArray::new(shape.clone(), vec![1.0; values.len()], DType::Bool).unwrap();
             let array = MaskedArray::new(
                 UFuncArray::new(shape, values, dtype).unwrap(),
                 Some(mask),
@@ -907,24 +1159,15 @@ fn masked_complex_shape_only_operations_keep_physical_masks_aligned() {
 #[test]
 fn masked_complex_transpose_relocates_distinct_component_masks() {
     let source_masks = vec![
-        true, false, false, false, false, true,
-        true, true, false, true, true, false,
+        true, false, false, false, false, true, true, true, false, true, true, false,
     ];
     let expected_cells = [0usize, 1, 6, 7, 2, 3, 8, 9, 4, 5, 10, 11];
     for dtype in [DType::Complex64, DType::Complex128] {
         let array = MaskedArray::new(
-            UFuncArray::new(
-                vec![2, 3, 2],
-                (0..12).map(f64::from).collect(),
-                dtype,
-            )
-            .unwrap(),
+            UFuncArray::new(vec![2, 3, 2], (0..12).map(f64::from).collect(), dtype).unwrap(),
             Some(
-                UFuncArray::from_storage(
-                    vec![2, 3, 2],
-                    ArrayStorage::Bool(source_masks.clone()),
-                )
-                .unwrap(),
+                UFuncArray::from_storage(vec![2, 3, 2], ArrayStorage::Bool(source_masks.clone()))
+                    .unwrap(),
             ),
             Some(-19.5),
         )
@@ -981,12 +1224,8 @@ fn masked_shape_operations_preserve_accepted_mask_dtypes_and_exact_payloads() {
     for data_dtype in [DType::F64, DType::Complex128] {
         for mask in &masks {
             let array = MaskedArray::new(
-                UFuncArray::new(
-                    shape.clone(),
-                    (0..12).map(f64::from).collect(),
-                    data_dtype,
-                )
-                .unwrap(),
+                UFuncArray::new(shape.clone(), (0..12).map(f64::from).collect(), data_dtype)
+                    .unwrap(),
                 Some(mask.clone()),
                 None,
             )
@@ -1029,4 +1268,3 @@ fn masked_shape_operations_preserve_accepted_mask_dtypes_and_exact_payloads() {
         }
     }
 }
-

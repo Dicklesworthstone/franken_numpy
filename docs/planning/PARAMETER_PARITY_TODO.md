@@ -102,6 +102,11 @@
 - [x] Ordinary extrema propagate the first whole-element NaN; NaN-aware extrema retain valid pairs and preserve NumPy's infinity replacement ties for argument reductions. Joint tuple reductions preserve C-order traversal, scalar axis rules, signed zeros, empty-axis errors, and checked output capacity.
 - [x] All 24 tests in `complex_tuple_reductions.rs` pass against NumPy 2.4.3, including six new extrema tests covering source precision, tuple order, NaN/Inf ties, malformed layouts, and huge empty shapes.
 
+## GROUP 15: logical diagonal, trace, and triangular operations
+- [x] Rust-core `diag`, `diagflat`, `diagonal`, `trace`, and `trace_axis` preserve complete complex elements and logical dimensions. Diagonal extraction handles arbitrary axes and offsets; trace uses the declared component precision and NumPy's narrow-integer accumulator promotion while preserving exact wide integers.
+- [x] `tril` and `triu` mask the final two logical dimensions, including batched arrays and NumPy's one-dimensional-to-square broadcasting. The existing contiguous-span and parallel kernels remain available for real matrices. Complex index helpers use logical ranks, and diagonal/triangular construction checks output capacity and extreme offsets.
+- [x] `complex_shape_transforms.rs` covers all 19 tests against NumPy 2.4.3, including six new diagonal/trace/triangle tests and direct malformed-layout, huge-empty-shape, exact-integer, and extreme-offset checks.
+
 ## ALREADY DONE (earlier this session)
 - [x] clip_optional (one-sided clipping with None min/max)
 - [x] reshape_order (F-order reshape)
