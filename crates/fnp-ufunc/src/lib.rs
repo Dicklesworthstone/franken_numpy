@@ -5315,6 +5315,35 @@ impl UFuncArray {
         self.integer_sidecar.clone()
     }
 
+    /// Store one already-cast logical element without separating a complex
+    /// pair or passing an exact wide integer through the working f64 buffer.
+    fn write_numeric_assignment(
+        &mut self,
+        destination: usize,
+        source: &Self,
+        source_index: usize,
+        context: &str,
+    ) -> Result<(), UFuncError> {
+        debug_assert_eq!(self.dtype, source.dtype);
+        if self.dtype.is_complex() {
+            let destination = destination * 2;
+            let source_index = source_index * 2;
+            self.values[destination..destination + 2]
+                .copy_from_slice(&source.values[source_index..source_index + 2]);
+        } else {
+            let value = source.values[source_index];
+            self.write_integer_mutation(
+                destination,
+                value,
+                source.integer_sidecar.as_ref(),
+                source_index,
+                context,
+            )?;
+            self.values[destination] = value;
+        }
+        Ok(())
+    }
+
     fn write_integer_mutation(
         &mut self,
         flat_index: usize,
@@ -19604,17 +19633,49 @@ impl UFuncArray {
     }
 
     /// Change elements of an array based on conditional and input values (np.place).
-    /// Values are repeated cyclically if shorter than the number of True entries.
+    /// Masks and values are flattened over logical elements. Values are safely
+    /// cast to the destination dtype and cycle over selected positions only.
     pub fn place(&mut self, mask: &Self, vals: &Self) -> Result<(), UFuncError> {
-        if mask.values.len() != self.values.len() {
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("place")?;
+        }
+        if mask.dtype.is_complex() {
+            mask.complex_logical_shape("place")?;
+        }
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let count = self.values.len() / components;
+        let mask_count = mask.values.len() / if mask.dtype.is_complex() { 2 } else { 1 };
+        if mask_count != count {
             return Err(UFuncError::Msg(format!(
                 "place: mask size {} != array size {}",
-                mask.values.len(),
-                self.values.len()
+                mask_count, count
             )));
         }
+        if vals.dtype.is_complex() {
+            vals.complex_logical_shape("place")?;
+        }
+        // NumPy checks the mask size before coercing the values, and requires
+        // safe array casts even for empty inputs or an all-false mask.
+        if !Self::can_cast(vals.dtype, self.dtype, "safe") {
+            return Err(UFuncError::Msg(format!(
+                "place: cannot cast from {:?} to {:?} with casting='safe'",
+                vals.dtype, self.dtype
+            )));
+        }
+        let typed_mask = if (mask.dtype.is_numeric() || mask.dtype == DType::Bool)
+            && !matches!(mask.dtype, DType::Bool | DType::F64)
+        {
+            Some(mask.cast_numeric_storage(DType::Bool, false)?)
+        } else {
+            None
+        };
+        let mask = typed_mask.as_ref().unwrap_or(mask);
         if vals.values.is_empty() {
-            return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
+            return if mask.values.iter().any(|&value| value != 0.0) {
+                Err(UFuncError::Msg("place: vals must not be empty".to_string()))
+            } else {
+                Ok(())
+            };
         }
         if self.dtype == DType::F64
             && mask.dtype == DType::Bool
@@ -19694,19 +19755,32 @@ impl UFuncArray {
             }
             return Ok(());
         }
+        let numeric = (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (vals.dtype.is_numeric() || vals.dtype == DType::Bool);
+        let typed_values = if numeric {
+            Some(vals.cast_numeric_storage(self.dtype, false)?)
+        } else {
+            None
+        };
+        let vals = typed_values.as_ref().unwrap_or(vals);
+        let values_count = vals.values.len() / components;
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
-                let source_index = vi % vals.values.len();
-                let value = vals.values[source_index];
-                self.values[i] = value;
-                self.write_integer_mutation(
-                    i,
-                    value,
-                    vals.integer_sidecar.as_ref(),
-                    source_index,
-                    "place",
-                )?;
+                let source_index = vi % values_count;
+                if numeric {
+                    self.write_numeric_assignment(i, vals, source_index, "place")?;
+                } else {
+                    let value = vals.values[source_index];
+                    self.write_integer_mutation(
+                        i,
+                        value,
+                        vals.integer_sidecar.as_ref(),
+                        source_index,
+                        "place",
+                    )?;
+                    self.values[i] = value;
+                }
                 vi += 1;
             }
         }
@@ -19994,20 +20068,13 @@ impl UFuncArray {
         Ok((shape, source))
     }
 
-    /// Convert numeric logical elements through typed storage. The public
-    /// storage bridge remains real-valued; complex arrays add/remove their
-    /// trailing component dimension only at this private casting boundary.
-    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
-        let (mut shape, source) = self.numeric_cast_source()?;
-        if report_invalid
-            && geterr().invalid != FloatErrorMode::Ignore
-            && source.has_invalid_float_to_integer_cast(dtype)
-        {
-            dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
-        }
-        let converted = source
-            .cast_to(dtype)
-            .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+    /// Build a numeric array from typed logical elements. Complex storage adds
+    /// its physical component axis only at this private bridge boundary.
+    fn from_numeric_storage(
+        mut shape: Vec<usize>,
+        converted: ArrayStorage,
+    ) -> Result<Self, UFuncError> {
+        let dtype = converted.dtype();
         if !dtype.is_complex() {
             return Self::from_storage(shape, converted);
         }
@@ -20016,6 +20083,9 @@ impl UFuncArray {
             .len()
             .checked_mul(2)
             .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if physical_count > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
         let mut values = Vec::with_capacity(physical_count);
         match converted {
             ArrayStorage::Complex64(parts) => {
@@ -20032,6 +20102,71 @@ impl UFuncArray {
         }
         shape.push(2);
         Self::new(shape, values, dtype)
+    }
+
+    /// Detect the floating-point status of the same typed conversion that
+    /// supplies the values. Mutation APIs decide when to report these flags:
+    /// some pre-cast values, while others report after destination writes.
+    fn numeric_cast_flags(source: &ArrayStorage, converted: &ArrayStorage) -> FloatErrorFlags {
+        let dtype = converted.dtype();
+        let mut flags = FloatErrorFlags {
+            invalid: source.has_invalid_float_to_integer_cast(dtype),
+            ..FloatErrorFlags::default()
+        };
+        let tiny_boundary = match dtype {
+            DType::F16 => f64::from(f16::MIN_POSITIVE),
+            DType::F32 | DType::Complex64 => {
+                f64::from(f32::MIN_POSITIVE) - f64::from(f32::from_bits(1)) * 0.25
+            }
+            _ => return flags,
+        };
+        for ((real, imaginary), (cast_real, cast_imaginary)) in source
+            .to_complex128_vec()
+            .into_iter()
+            .zip(converted.to_complex128_vec())
+        {
+            let components = [(real, cast_real), (imaginary, cast_imaginary)];
+            for &(before, after) in &components[..if dtype.is_complex() { 2 } else { 1 }] {
+                if before.is_finite() {
+                    flags.over |= after.is_infinite();
+                    flags.under |= before != after && before.abs() < tiny_boundary;
+                }
+            }
+        }
+        flags
+    }
+
+    fn numeric_storage_run(source: &ArrayStorage, start: usize, count: usize) -> ArrayStorage {
+        macro_rules! copy_run {
+            ($($variant:ident),+ $(,)?) => {
+                match source {
+                    $(ArrayStorage::$variant(values) => {
+                        ArrayStorage::$variant(values[start..start + count].to_vec())
+                    },)+
+                    _ => unreachable!("numeric storage run requires numeric elements"),
+                }
+            };
+        }
+        copy_run!(
+            Bool, I8, I16, I32, I64, U8, U16, U32, U64, F16, F32, F64, Complex64, Complex128
+        )
+    }
+
+    /// Convert numeric logical elements through typed storage. The public
+    /// storage bridge remains real-valued; complex arrays add/remove their
+    /// trailing component dimension only at this private casting boundary.
+    fn cast_numeric_storage(&self, dtype: DType, report_invalid: bool) -> Result<Self, UFuncError> {
+        let (shape, source) = self.numeric_cast_source()?;
+        if report_invalid
+            && geterr().invalid != FloatErrorMode::Ignore
+            && source.has_invalid_float_to_integer_cast(dtype)
+        {
+            dispatch_float_error(FloatErrorKind::Invalid, "cast")?;
+        }
+        let converted = source
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+        Self::from_numeric_storage(shape, converted)
     }
 
     /// Cast the array to a different dtype (np.ndarray.astype).
@@ -32600,19 +32735,44 @@ impl UFuncArray {
 
     /// Place values into an array using a boolean mask (np.putmask).
     ///
-    /// For each position where `mask` is nonzero, the corresponding element
-    /// in `self` is replaced with the next value from `values` (cycling if
-    /// `values` is shorter than the number of True entries).
+    /// Masks and values are flattened over logical elements. Selected position
+    /// `i` receives `values[i % values.len()]`, after a safe destination cast.
+    /// Unlike `place`, unselected positions still advance the value cycle.
     pub fn putmask(&mut self, mask: &Self, values: &Self) -> Result<(), UFuncError> {
-        if self.values.len() != mask.values.len() {
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("putmask")?;
+        }
+        if mask.dtype.is_complex() {
+            mask.complex_logical_shape("putmask")?;
+        }
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let n = self.values.len() / components;
+        let mask_count = mask.values.len() / if mask.dtype.is_complex() { 2 } else { 1 };
+        if n != mask_count {
             return Err(UFuncError::Msg(
                 "putmask: mask and data must be the same size".to_string(),
             ));
         }
+        if values.dtype.is_complex() {
+            values.complex_logical_shape("putmask")?;
+        }
+        if !Self::can_cast(values.dtype, self.dtype, "safe") {
+            return Err(UFuncError::Msg(format!(
+                "putmask: cannot cast from {:?} to {:?} with casting='safe'",
+                values.dtype, self.dtype
+            )));
+        }
         if values.values.is_empty() {
             return Ok(());
         }
-        let n = self.values.len();
+        let typed_mask = if (mask.dtype.is_numeric() || mask.dtype == DType::Bool)
+            && !matches!(mask.dtype, DType::Bool | DType::F64)
+        {
+            Some(mask.cast_numeric_storage(DType::Bool, false)?)
+        } else {
+            None
+        };
+        let mask = typed_mask.as_ref().unwrap_or(mask);
         if self.dtype == DType::F64
             && values.dtype == DType::F64
             && self.integer_sidecar.is_none()
@@ -32656,18 +32816,31 @@ impl UFuncArray {
             }
             return Ok(());
         }
+        let numeric = (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (values.dtype.is_numeric() || values.dtype == DType::Bool);
+        let typed_values = if numeric {
+            Some(values.cast_numeric_storage(self.dtype, false)?)
+        } else {
+            None
+        };
+        let values = typed_values.as_ref().unwrap_or(values);
+        let values_count = values.values.len() / components;
         for i in 0..n {
             if mask.values[i] != 0.0 {
-                let src_index = i % values.values.len();
-                let value = values.values[src_index];
-                self.values[i] = value;
-                self.write_integer_mutation(
-                    i,
-                    value,
-                    values.integer_sidecar.as_ref(),
-                    src_index,
-                    "putmask",
-                )?;
+                let src_index = i % values_count;
+                if numeric {
+                    self.write_numeric_assignment(i, values, src_index, "putmask")?;
+                } else {
+                    let value = values.values[src_index];
+                    self.write_integer_mutation(
+                        i,
+                        value,
+                        values.integer_sidecar.as_ref(),
+                        src_index,
+                        "putmask",
+                    )?;
+                    self.values[i] = value;
+                }
             }
         }
         Ok(())
@@ -33636,51 +33809,6 @@ impl UFuncArray {
             )));
         }
 
-        fn cast_flags(source: &ArrayStorage, converted: &ArrayStorage) -> FloatErrorFlags {
-            let dtype = converted.dtype();
-            let mut flags = FloatErrorFlags {
-                invalid: source.has_invalid_float_to_integer_cast(dtype),
-                ..FloatErrorFlags::default()
-            };
-            let tiny_boundary = match dtype {
-                DType::F16 => f64::from(f16::MIN_POSITIVE),
-                DType::F32 | DType::Complex64 => {
-                    f64::from(f32::MIN_POSITIVE) - f64::from(f32::from_bits(1)) * 0.25
-                }
-                _ => return flags,
-            };
-            for ((real, imaginary), (cast_real, cast_imaginary)) in source
-                .to_complex128_vec()
-                .into_iter()
-                .zip(converted.to_complex128_vec())
-            {
-                let components = [(real, cast_real), (imaginary, cast_imaginary)];
-                for &(before, after) in &components[..if dtype.is_complex() { 2 } else { 1 }] {
-                    if before.is_finite() {
-                        flags.over |= after.is_infinite();
-                        flags.under |= before != after && before.abs() < tiny_boundary;
-                    }
-                }
-            }
-            flags
-        }
-
-        fn source_run(source: &ArrayStorage, start: usize, count: usize) -> ArrayStorage {
-            macro_rules! copy_run {
-                ($($variant:ident),+ $(,)?) => {
-                    match source {
-                        $(ArrayStorage::$variant(values) => {
-                            ArrayStorage::$variant(values[start..start + count].to_vec())
-                        },)+
-                        _ => unreachable!("copyto_numeric accepts numeric storage"),
-                    }
-                };
-            }
-            copy_run!(
-                Bool, I8, I16, I32, I64, U8, U16, U32, U64, F16, F32, F64, Complex64, Complex128
-            )
-        }
-
         let components = if self.dtype.is_complex() { 2 } else { 1 };
         let count = self.values.len() / components;
         // NumPy pre-casts a true scalar when it will fill multiple elements.
@@ -33692,7 +33820,7 @@ impl UFuncArray {
             let converted = source
                 .cast_to(self.dtype)
                 .map_err(|err| UFuncError::Msg(format!("copyto: storage cast failed: {err}")))?;
-            dispatch_float_error_flags(cast_flags(&source, &converted), "cast")?;
+            dispatch_float_error_flags(Self::numeric_cast_flags(&source, &converted), "cast")?;
             precast_scalar = Some(converted);
         }
         if let Some(mask) = mask
@@ -33773,12 +33901,15 @@ impl UFuncArray {
                 // A broadcast scalar uses the scalar conversion, regardless of
                 // how many destination elements receive it.
                 let cast_count = if source_step == 0 { 1 } else { run_length };
-                let selected_source =
-                    source_run(&source, source_base + start * source_step, cast_count);
+                let selected_source = Self::numeric_storage_run(
+                    &source,
+                    source_base + start * source_step,
+                    cast_count,
+                );
                 let converted = selected_source.cast_to(self.dtype).map_err(|err| {
                     UFuncError::Msg(format!("copyto: storage cast failed: {err}"))
                 })?;
-                flags = flags.merged(cast_flags(&selected_source, &converted));
+                flags = flags.merged(Self::numeric_cast_flags(&selected_source, &converted));
                 if self.dtype.is_complex() {
                     let values = converted.to_complex128_vec();
                     for index in 0..run_length {
@@ -73452,12 +73583,13 @@ print(json.dumps(results))
             integer_sidecar: None,
         };
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
-        let vals = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
+        let vals = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![3])).unwrap();
 
         let err = arr
             .place(&mask, &vals)
             .expect_err("degraded unsigned integer arrays must fail closed during recovery");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("place")));
+        assert_eq!(arr.values(), &[-1.0, 2.0]);
     }
 
     #[test]
