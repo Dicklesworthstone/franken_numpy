@@ -19430,48 +19430,83 @@ impl UFuncArray {
         values: &Self,
         axis: isize,
     ) -> Result<(), UFuncError> {
-        let (ax, indexed_shape) = self.along_axis_index_shape(indices, axis, "put_along_axis")?;
-        let ndim = self.shape.len();
-        // Assignment converts values to the destination dtype before storing
-        // them. This also normalizes the working buffer of narrow integers and
-        // creates exact sidecars for wide results of signedness conversions.
-        // Complex and temporal representations keep their existing bridge path.
-        let source_is_real = values.dtype.is_integer()
-            || matches!(
-                values.dtype,
-                DType::Bool | DType::F16 | DType::F32 | DType::F64
-            );
-        let destination_is_real = self.dtype.is_integer()
-            || matches!(
-                self.dtype,
-                DType::Bool | DType::F16 | DType::F32 | DType::F64
-            );
-        let mut assignment_values = if source_is_real && destination_is_real {
-            values.astype(self.dtype)
+        let numeric = (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (values.dtype.is_numeric() || values.dtype == DType::Bool);
+        let destination_shape = if numeric {
+            self.complex_logical_shape("put_along_axis")?
         } else {
-            values.clone()
+            self.shape.clone()
         };
-        let surplus = assignment_values.shape.len().saturating_sub(ndim);
-        if surplus > 0
-            && assignment_values.shape[..surplus]
-                .iter()
-                .all(|&dim| dim == 1)
-        {
-            // NumPy assignment permits values such as (1, 1, J) for a (J,)
-            // indexed result. Preserve singleton axes within the result rank:
-            // they determine which dimensions the values broadcast across.
-            assignment_values.shape = assignment_values.shape[surplus..].to_vec();
+        let ndim = destination_shape.len();
+        // NumPy validates the logical axis before index dtype and rank.
+        let ax = normalize_axis(axis, ndim)?;
+        if !indices.dtype.is_integer() {
+            return Err(UFuncError::Msg(
+                "put_along_axis: indices must be an integer array".into(),
+            ));
         }
-        let values_bcast = assignment_values.broadcast_to(&indexed_shape)?;
-
-        let axis_len = self.shape[ax];
-        let strides = c_strides_elems(&self.shape);
-        let idx_strides = c_strides_elems(&indices.shape);
-        let out_strides = c_strides_elems(&indexed_shape);
-        let total: usize = fnp_ndarray::element_count(&indexed_shape).map_err(UFuncError::Shape)?;
+        if indices.shape.len() != ndim {
+            return Err(UFuncError::Msg(format!(
+                "put_along_axis: indices ndim {} != array ndim {ndim}",
+                indices.shape.len()
+            )));
+        }
+        let mut indexed_shape = indices.shape.clone();
+        for (d, dimension) in indexed_shape.iter_mut().enumerate() {
+            if d == ax || destination_shape[d] == 1 {
+                continue;
+            }
+            if *dimension != 1 && *dimension != destination_shape[d] {
+                return Err(UFuncError::Msg(format!(
+                    "put_along_axis: non-axis dimension {d} mismatch: {} vs {}",
+                    destination_shape[d], indices.shape[d]
+                )));
+            }
+            *dimension = destination_shape[d];
+        }
+        let original_value_shape = if numeric {
+            values.complex_logical_shape("put_along_axis")?
+        } else {
+            values.shape.clone()
+        };
+        // A true scalar is converted even for an empty indexed result, and
+        // its floating-point error takes precedence over invalid indices.
+        let precast_scalar = if numeric && original_value_shape.is_empty() {
+            let (converted, flags) = values.cast_numeric_with_flags(self.dtype)?;
+            dispatch_float_error_flags(flags, "cast")?;
+            Some(converted)
+        } else {
+            None
+        };
+        let surplus = original_value_shape.len().saturating_sub(ndim);
+        let value_shape = &original_value_shape[surplus..];
+        if original_value_shape[..surplus]
+            .iter()
+            .any(|&dimension| dimension != 1)
+            || value_shape
+                .iter()
+                .rev()
+                .zip(indexed_shape.iter().rev())
+                .any(|(&source, &destination)| source != 1 && source != destination)
+        {
+            return Err(UFuncError::Msg(format!(
+                "put_along_axis: cannot broadcast values shape {:?} into indexed shape {:?}",
+                original_value_shape, indexed_shape
+            )));
+        }
+        let total = element_count(&indexed_shape).map_err(UFuncError::Shape)?;
+        if total > isize::MAX as usize / std::mem::size_of::<(usize, usize)>() {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
         if total == 0 {
             return Ok(());
         }
+        let axis_len = destination_shape[ax];
+        let strides = c_strides_elems(&destination_shape);
+        let idx_strides = c_strides_elems(&indices.shape);
+        let out_strides = c_strides_elems(&indexed_shape);
+        let value_steps =
+            aligned_broadcast_axis_steps(ndim, value_shape, &c_strides_elems(value_shape));
 
         // Validate every destination before mutating anything. NumPy rejects an
         // out-of-bounds index without applying the preceding valid writes.
@@ -19480,30 +19515,179 @@ impl UFuncArray {
             let mut rem = flat;
             let mut dst_flat = 0usize;
             let mut idx_flat = 0usize;
+            let mut value_flat = 0usize;
             for d in 0..ndim {
                 let coord = rem / out_strides[d];
                 rem %= out_strides[d];
                 if indices.shape[d] != 1 {
                     idx_flat += coord * idx_strides[d];
                 }
-                if d != ax && self.shape[d] != 1 {
+                if d != ax && destination_shape[d] != 1 {
                     dst_flat += coord * strides[d];
                 }
+                value_flat += coord * value_steps[d];
             }
             let resolved =
                 indices.resolve_along_axis_index(idx_flat, ax, axis_len, "put_along_axis")?;
-            destinations.push(dst_flat + resolved * strides[ax]);
+            destinations.push((dst_flat + resolved * strides[ax], value_flat));
         }
+
+        let (assignment_values, flags) = if let Some(converted) = precast_scalar {
+            (converted, FloatErrorFlags::default())
+        } else if numeric {
+            let (_, source) = values.numeric_cast_source()?;
+            let buffered_uint32_cast = self.dtype == DType::U32
+                && matches!(
+                    values.dtype,
+                    DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128
+                );
+            if !buffered_uint32_cast {
+                let converted = source.cast_to(self.dtype).map_err(|error| {
+                    UFuncError::Msg(format!("put_along_axis: storage cast failed: {error}"))
+                })?;
+                let flags = Self::numeric_cast_flags(&source, &converted);
+                (
+                    Self::from_numeric_storage(original_value_shape, converted)?,
+                    flags,
+                )
+            } else {
+                // NumPy's uint32 cast has different invalid values in vector
+                // bodies and scalar tails. Advanced assignment chooses its
+                // cast runs using the buffered iterator, not values.astype's
+                // contiguous loop. Model the default 8192-element buffer:
+                // coalesce axes shared by every index/value operand, then
+                // select the region with the lowest buffering cost per item.
+                // Non-axis dimensions contribute separate arange operands.
+                const BUFFER_SIZE: usize = 8192;
+                let mut axes: Vec<(usize, Vec<usize>)> = Vec::new();
+                for dimension in (0..ndim).rev().filter(|&d| indexed_shape[d] != 1) {
+                    let mut steps = vec![0; ndim + 1];
+                    for (operand, step) in steps[..ndim].iter_mut().enumerate() {
+                        *step = if operand == ax {
+                            if indices.shape[dimension] == 1 {
+                                0
+                            } else {
+                                idx_strides[dimension]
+                            }
+                        } else {
+                            usize::from(operand == dimension && destination_shape[operand] != 1)
+                        };
+                    }
+                    steps[ndim] = value_steps[dimension];
+                    if let Some((length, inner_steps)) = axes.last_mut()
+                        && inner_steps
+                            .iter()
+                            .zip(&steps)
+                            .all(|(&inner, &outer)| inner * *length == outer)
+                    {
+                        *length *= indexed_shape[dimension];
+                    } else {
+                        axes.push((indexed_shape[dimension], steps));
+                    }
+                }
+                if axes.is_empty() {
+                    axes.push((1, vec![0; ndim + 1]));
+                }
+                let mut single_stride_dimensions = vec![1; ndim + 1];
+                let index_needs_cast = indices.dtype != DType::I64;
+                let mut cost = 2 + usize::from(index_needs_cast);
+                let mut best_cost = cost;
+                let mut size = axes[0].0;
+                let mut best_size = size;
+                let mut best_dimension = 0;
+                let mut core_size = 1;
+                for dimension in 1..axes.len() {
+                    if size >= BUFFER_SIZE {
+                        break;
+                    }
+                    for (operand, dimensions) in single_stride_dimensions.iter_mut().enumerate() {
+                        if *dimensions == dimension {
+                            if axes[dimension - 1].1[operand] * axes[dimension - 1].0
+                                == axes[dimension].1[operand]
+                            {
+                                *dimensions += 1;
+                            } else if operand != ndim && !(operand == ax && index_needs_cast) {
+                                // A non-casting operand now also needs a buffer.
+                                cost += 1;
+                            }
+                        }
+                    }
+                    let expanded_size = size * axes[dimension].0;
+                    if cost as f64 * best_size as f64
+                        <= best_cost as f64 * expanded_size.min(BUFFER_SIZE) as f64
+                    {
+                        best_cost = cost;
+                        best_size = expanded_size;
+                        best_dimension = dimension;
+                        core_size = size;
+                    }
+                    size = expanded_size;
+                }
+                let buffer_size = best_size.min(core_size * (BUFFER_SIZE / core_size));
+                let region_size = core_size * axes[best_dimension].0;
+                let single_stride = single_stride_dimensions[ndim] > best_dimension;
+                let source_step = axes[0].1[ndim];
+                debug_assert!(source_step <= 1);
+
+                // A broadcast source may be cast in different-sized buffers
+                // on different repetitions. Keep the converted assignment
+                // sequence, rather than overwriting a single source copy.
+                let mut converted = Vec::with_capacity(total);
+                let mut flags = FloatErrorFlags::default();
+                let mut offset = 0;
+                while offset < total {
+                    let end = offset
+                        + buffer_size
+                            .min(region_size - offset % region_size)
+                            .min(total - offset);
+                    while offset < end {
+                        let count = if single_stride {
+                            end - offset
+                        } else {
+                            (end - offset).min(axes[0].0 - offset % axes[0].0)
+                        };
+                        let source_count = if source_step == 0 { 1 } else { count };
+                        let source_run = Self::numeric_storage_run(
+                            &source,
+                            destinations[offset].1,
+                            source_count,
+                        );
+                        let output = source_run.cast_to(self.dtype).map_err(|error| {
+                            UFuncError::Msg(format!("put_along_axis: storage cast failed: {error}"))
+                        })?;
+                        flags = flags.merged(Self::numeric_cast_flags(&source_run, &output));
+                        let ArrayStorage::U32(output) = output else {
+                            unreachable!("uint32 cast must return uint32 storage");
+                        };
+                        if source_step == 0 {
+                            converted.resize(offset + count, output[0]);
+                        } else {
+                            converted.extend(output);
+                        }
+                        offset += count;
+                    }
+                }
+                for (index, (_, source_index)) in destinations.iter_mut().enumerate() {
+                    *source_index = index;
+                }
+                (
+                    Self::from_numeric_storage(vec![total], ArrayStorage::U32(converted))?,
+                    flags,
+                )
+            }
+        } else {
+            (values.clone(), FloatErrorFlags::default())
+        };
 
         // Prepare exact integer writes separately as well: a conversion failure
         // must not leave the working buffer and its sidecar out of sync.
         let mut sidecar = self.exact_integer_sidecar("put_along_axis")?;
         let exact_value = |flat: usize| -> Result<i128, UFuncError> {
-            match &values_bcast.integer_sidecar {
+            match &assignment_values.integer_sidecar {
                 Some(IntegerSidecar::I64(values)) => Ok(i128::from(values[flat])),
                 Some(IntegerSidecar::U64(values)) => Ok(i128::from(values[flat])),
                 None => {
-                    let value = values_bcast.values[flat];
+                    let value = assignment_values.values[flat];
                     ensure_exact_integer_bridge_value_supported(
                         value,
                         self.dtype,
@@ -19516,7 +19700,7 @@ impl UFuncArray {
         };
         match &mut sidecar {
             Some(IntegerSidecar::I64(destination)) => {
-                for (flat, &dst) in destinations.iter().enumerate() {
+                for &(dst, flat) in &destinations {
                     let value = exact_value(flat)?;
                     destination[dst] = i64::try_from(value).map_err(|_| {
                         UFuncError::Msg(format!(
@@ -19526,7 +19710,7 @@ impl UFuncArray {
                 }
             }
             Some(IntegerSidecar::U64(destination)) => {
-                for (flat, &dst) in destinations.iter().enumerate() {
+                for &(dst, flat) in &destinations {
                     let value = exact_value(flat)?;
                     destination[dst] = u64::try_from(value).map_err(|_| {
                         UFuncError::Msg(format!(
@@ -19537,15 +19721,21 @@ impl UFuncArray {
             }
             None => {}
         }
-        for (flat, &dst) in destinations.iter().enumerate() {
-            self.values[dst] = match &sidecar {
-                Some(IntegerSidecar::I64(values)) => values[dst] as f64,
-                Some(IntegerSidecar::U64(values)) => values[dst] as f64,
-                None => values_bcast.values[flat],
-            };
+        for &(dst, flat) in &destinations {
+            if numeric && self.dtype.is_complex() {
+                self.values[2 * dst..2 * dst + 2]
+                    .copy_from_slice(&assignment_values.values[2 * flat..2 * flat + 2]);
+            } else {
+                self.values[dst] = match &sidecar {
+                    Some(IntegerSidecar::I64(values)) => values[dst] as f64,
+                    Some(IntegerSidecar::U64(values)) => values[dst] as f64,
+                    None => assignment_values.values[flat],
+                };
+            }
         }
         self.integer_sidecar = sidecar;
-        Ok(())
+        // Array sources report once after all writes, even in Raise mode.
+        dispatch_float_error_flags(flags, "cast")
     }
 
     /// Return elements chosen from a flattened array based on condition (np.extract).
@@ -19788,12 +19978,46 @@ impl UFuncArray {
     }
 
     /// Replaces specified flat elements of an array with given values (np.put).
-    /// Indices are taken into the flattened array.
+    /// Indices address logical elements of the flattened array. Values are
+    /// converted before writes, and repeated cyclically when necessary.
     pub fn put(&mut self, indices: &[i64], vals: &Self) -> Result<(), UFuncError> {
-        if vals.values.is_empty() && !indices.is_empty() {
-            return Err(UFuncError::Msg("put: vals must not be empty".to_string()));
+        if self.dtype.is_complex() {
+            self.complex_logical_shape("put")?;
         }
-        let n = self.values.len() as i64;
+        if vals.dtype.is_complex() {
+            vals.complex_logical_shape("put")?;
+        }
+        let numeric = (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (vals.dtype.is_numeric() || vals.dtype == DType::Bool);
+        let components = if numeric && self.dtype.is_complex() {
+            2
+        } else {
+            1
+        };
+        let n = self.values.len() / components;
+        // NumPy rejects writes to an empty destination before converting the
+        // values. For nonempty destinations an empty value array is a no-op,
+        // including when the indices themselves would be out of bounds.
+        if n == 0 && !indices.is_empty() {
+            return Err(UFuncError::Msg(
+                "put: cannot replace elements of an empty array".into(),
+            ));
+        }
+        let converted;
+        let vals = if numeric && !(self.dtype == DType::F64 && vals.dtype == DType::F64) {
+            let (values, flags) = vals.cast_numeric_with_flags(self.dtype)?;
+            // This conversion precedes bounds checks even with no indices.
+            // Raising therefore leaves the destination entirely unchanged.
+            dispatch_float_error_flags(flags, "cast")?;
+            converted = values;
+            &converted
+        } else {
+            vals
+        };
+        if vals.values.is_empty() {
+            return Ok(());
+        }
+        let value_count = vals.values.len() / components;
         // Consecutive duplicate indices are last-write-wins. On the exact F64
         // path there is no integer-sidecar validation or other observable work
         // between stores, so apply only the final value from each run. Resolve
@@ -19813,8 +20037,12 @@ impl UFuncArray {
                     run_end += 1;
                 }
 
-                let resolved = if idx < 0 { idx + n } else { idx };
-                if resolved < 0 || resolved >= n {
+                let resolved = if idx < 0 {
+                    i128::from(idx) + n as i128
+                } else {
+                    i128::from(idx)
+                };
+                if resolved < 0 || resolved >= n as i128 {
                     return Err(UFuncError::Msg(format!(
                         "put: index {idx} out of bounds for size {n}"
                     )));
@@ -19825,23 +20053,31 @@ impl UFuncArray {
             return Ok(());
         }
         for (i, &idx) in indices.iter().enumerate() {
-            let resolved = if idx < 0 { idx + n } else { idx };
-            if resolved < 0 || resolved >= n {
+            let resolved = if idx < 0 {
+                i128::from(idx) + n as i128
+            } else {
+                i128::from(idx)
+            };
+            if resolved < 0 || resolved >= n as i128 {
                 return Err(UFuncError::Msg(format!(
                     "put: index {idx} out of bounds for size {n}"
                 )));
             }
-            let source_index = i % vals.values.len();
-            let value = vals.values[source_index];
+            let source_index = i % value_count;
             let flat = resolved as usize;
-            self.values[flat] = value;
-            self.write_integer_mutation(
-                flat,
-                value,
-                vals.integer_sidecar.as_ref(),
-                source_index,
-                "put",
-            )?;
+            if numeric {
+                self.write_numeric_assignment(flat, vals, source_index, "put")?;
+            } else {
+                let value = vals.values[source_index];
+                self.write_integer_mutation(
+                    flat,
+                    value,
+                    vals.integer_sidecar.as_ref(),
+                    source_index,
+                    "put",
+                )?;
+                self.values[flat] = value;
+            }
         }
         Ok(())
     }
@@ -20134,6 +20370,15 @@ impl UFuncArray {
             }
         }
         flags
+    }
+
+    fn cast_numeric_with_flags(&self, dtype: DType) -> Result<(Self, FloatErrorFlags), UFuncError> {
+        let (shape, source) = self.numeric_cast_source()?;
+        let converted = source
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
+        let flags = Self::numeric_cast_flags(&source, &converted);
+        Ok((Self::from_numeric_storage(shape, converted)?, flags))
     }
 
     fn numeric_storage_run(source: &ArrayStorage, start: usize, count: usize) -> ArrayStorage {
@@ -73548,14 +73793,15 @@ print(json.dumps(results))
     }
 
     #[test]
-    fn put_rejects_inexact_integer_bridge_values() {
+    fn put_casts_fractional_values_to_the_destination_integer_dtype() {
         let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
-        let vals = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
+        let vals = UFuncArray::new(vec![2], vec![1.5, -3.75], DType::F64).unwrap();
 
-        let err = arr
-            .put(&[0], &vals)
-            .expect_err("fractional integer write must fail");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("put")));
+        // np.put applies an unsafe dtype conversion before indexed writes;
+        // complex_scatter.rs checks the full cast matrix against live NumPy.
+        arr.put(&[0, 1], &vals).unwrap();
+        assert_eq!(arr.values(), &[1.0, -3.0]);
+        assert_eq!(arr.to_storage().unwrap(), ArrayStorage::I64(vec![1, -3]));
     }
 
     #[test]
