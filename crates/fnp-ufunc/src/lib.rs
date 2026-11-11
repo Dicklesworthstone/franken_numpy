@@ -13394,6 +13394,197 @@ impl UFuncArray {
         })
     }
 
+    /// NumPy's ordering puts ordinary complex values first, then values with
+    /// an imaginary NaN, a real NaN, and finally two NaNs. Within each class,
+    /// the non-NaN components are ordered lexicographically; signed zeros tie.
+    fn complex_order_cmp(lhs: (f64, f64), rhs: (f64, f64)) -> std::cmp::Ordering {
+        let class = |(re, im): (f64, f64)| (u8::from(re.is_nan()) << 1) | u8::from(im.is_nan());
+        let lhs_class = class(lhs);
+        match lhs_class.cmp(&class(rhs)) {
+            std::cmp::Ordering::Equal => match lhs_class {
+                0 => Self::float_membership_cmp(lhs.0, rhs.0)
+                    .then_with(|| Self::float_membership_cmp(lhs.1, rhs.1)),
+                1 => Self::float_membership_cmp(lhs.0, rhs.0),
+                2 => Self::float_membership_cmp(lhs.1, rhs.1),
+                _ => std::cmp::Ordering::Equal,
+            },
+            ordering => ordering,
+        }
+    }
+
+    /// Sort complete logical elements, sharing the permutation between value
+    /// and index sorting. The physical component dimension is never an axis.
+    fn order_complex_elements(
+        &self,
+        axis: Option<isize>,
+        kind: &str,
+        return_indices: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if return_indices { "argsort" } else { "sort" };
+        let shape = self.complex_logical_shape(operation)?;
+        let count = self.values.len() / 2;
+        let (mut output_shape, axis_len, axis) = match axis {
+            None => (vec![count], count, None),
+            Some(0 | -1) if return_indices && shape.is_empty() => (vec![1], 1, None),
+            Some(axis) => {
+                let axis = normalize_axis(axis, shape.len())?;
+                (shape.clone(), shape[axis], Some(axis))
+            }
+        };
+        let mut values = try_zeroed_f64(
+            if return_indices { count } else { self.values.len() },
+            operation,
+        )?;
+
+        // An empty array may have huge unselected dimensions. There are no
+        // lanes to visit, so their stride products need not be representable.
+        if count != 0 {
+            let inner = match axis {
+                Some(axis) => element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                None => 1,
+            };
+            let outer = count / (axis_len * inner);
+            let mut indices = Vec::new();
+            indices.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg(format!("{operation}: unable to allocate sorting indices"))
+            })?;
+            indices.extend(0..axis_len);
+
+            for outer_index in 0..outer {
+                for inner_index in 0..inner {
+                    let base = outer_index * axis_len * inner + inner_index;
+                    for (index, slot) in indices.iter_mut().enumerate() {
+                        *slot = index;
+                    }
+                    let compare = |lhs: &usize, rhs: &usize| {
+                        Self::complex_order_cmp(
+                            self.complex_extrema_value(base + *lhs * inner),
+                            self.complex_extrema_value(base + *rhs * inner),
+                        )
+                    };
+                    match kind {
+                        "stable" => indices.sort_by(compare),
+                        "heapsort" => {
+                            for root in (0..indices.len() / 2).rev() {
+                                let end = indices.len();
+                                sift_down_idx(&mut indices, root, end, &compare);
+                            }
+                            for end in (1..indices.len()).rev() {
+                                indices.swap(0, end);
+                                sift_down_idx(&mut indices, 0, end, &compare);
+                            }
+                        }
+                        _ => indices.sort_unstable_by(compare),
+                    }
+                    for (position, &source_index) in indices.iter().enumerate() {
+                        let output = base + position * inner;
+                        if return_indices {
+                            values[output] = source_index as f64;
+                        } else {
+                            let (re, im) = self.complex_extrema_value(base + source_index * inner);
+                            values[output * 2] = re;
+                            values[output * 2 + 1] = im;
+                        }
+                    }
+                }
+            }
+        }
+        let dtype = if return_indices {
+            DType::I64
+        } else {
+            output_shape.push(2);
+            self.dtype
+        };
+        Self::new(output_shape, values, dtype)
+    }
+
+    fn searchsorted_complex(
+        &self,
+        values: &Self,
+        side: Option<&str>,
+        sorter: Option<&[usize]>,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("searchsorted")?;
+        if shape.len() != 1 {
+            return Err(UFuncError::Shape(ShapeError::RankMismatch {
+                expected: 1,
+                actual: shape.len(),
+            }));
+        }
+        let output_shape = values.complex_logical_shape("searchsorted")?;
+        let right = match side.unwrap_or("left") {
+            "left" => false,
+            "right" => true,
+            side => {
+                return Err(UFuncError::Msg(format!(
+                    "searchsorted: side must be 'left' or 'right', got '{side}'"
+                )));
+            }
+        };
+        let dtype = promote(self.dtype, values.dtype);
+        let data = self.complex_reduction_values(dtype)?;
+        let needles = values.complex_reduction_values(dtype)?;
+        let output = if let Some(sorter) = sorter {
+            if sorter.len() != data.len() {
+                return Err(UFuncError::Msg(format!(
+                    "searchsorted: sorter length {} != array length {}",
+                    sorter.len(),
+                    data.len()
+                )));
+            }
+
+            // Match the existing carried-bounds search, but validate sorter
+            // indices when visited. NumPy accepts an unvisited invalid index,
+            // including every sorter entry when the query array is empty.
+            let mut output = Vec::new();
+            output.try_reserve_exact(needles.len()).map_err(|_| {
+                UFuncError::Msg("searchsorted: unable to allocate output indices".into())
+            })?;
+            let compare = |lhs, rhs| {
+                let order = Self::complex_order_cmp(lhs, rhs);
+                if right { !order.is_gt() } else { order.is_lt() }
+            };
+            let (mut low, mut high) = (0usize, data.len());
+            let mut previous = needles.first().copied().unwrap_or((0.0, 0.0));
+            for needle in needles {
+                if compare(previous, needle) {
+                    high = data.len();
+                } else {
+                    low = 0;
+                    high = high.saturating_add(1).min(data.len());
+                }
+                previous = needle;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let source = sorter[middle];
+                    let value = *data.get(source).ok_or_else(|| {
+                        UFuncError::Msg(format!(
+                            "searchsorted: sorter index {source} out of bounds for length {}",
+                            data.len()
+                        ))
+                    })?;
+                    if compare(value, needle) {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                output.push(low as f64);
+            }
+            output
+        } else {
+            searchsorted_indices(
+                data.len(),
+                |index| data[index],
+                &needles,
+                right,
+                |lhs, rhs| Self::complex_order_cmp(lhs, rhs).is_lt(),
+                false,
+            )
+        };
+        Self::new(output_shape, output, DType::I64)
+    }
+
     /// Sort along `axis`. When `axis` is `None`, flatten and sort.
     /// Returns a new sorted array (non-mutating, like `numpy.sort`).
     ///
@@ -13401,6 +13592,9 @@ impl UFuncArray {
     /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
     pub fn sort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
         let kind = validate_sort_kind(kind)?;
+        if self.dtype.is_complex() {
+            return self.order_complex_elements(axis, kind, false);
+        }
         if let Some(sidecar) = self.synthesized_integer_sidecar("sort")? {
             return match sidecar {
                 IntegerSidecar::I64(values) => match axis {
@@ -13757,6 +13951,9 @@ impl UFuncArray {
     /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
     pub fn argsort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
         let kind = validate_sort_kind(kind)?;
+        if self.dtype.is_complex() {
+            return self.order_complex_elements(axis, kind, true);
+        }
         if let Some(sidecar) = self.synthesized_integer_sidecar("argsort")? {
             return match sidecar {
                 IntegerSidecar::I64(values) => match axis {
@@ -14032,6 +14229,9 @@ impl UFuncArray {
         side: Option<&str>,
         sorter: Option<&[usize]>,
     ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() || values.dtype.is_complex() {
+            return self.searchsorted_complex(values, side, sorter);
+        }
         if self.shape.len() != 1 {
             return Err(UFuncError::Shape(ShapeError::RankMismatch {
                 expected: 1,
