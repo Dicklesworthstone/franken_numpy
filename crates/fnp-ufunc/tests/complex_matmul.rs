@@ -126,6 +126,14 @@ impl OracleBatch {
         self.actual.push(lhs.tensordot_axes(rhs, a, b));
     }
 
+    fn chain_case(&mut self, arrays: &[&UFuncArray]) {
+        self.cases.push(json!({
+            "op": "multi_dot",
+            "arrays": arrays.iter().map(|array| oracle_input(array)).collect::<Vec<_>>()
+        }));
+        self.actual.push(UFuncArray::multi_dot(arrays));
+    }
+
     fn finish(self) {
         let script = r#"
 import json, sys, warnings
@@ -157,6 +165,33 @@ def operate(op, left, right, axis, axes=None):
 rows = []
 for case in json.load(sys.stdin):
     try:
+        if case['op'] == 'multi_dot':
+            arrays = [load(item) for item in case['arrays']]
+            result = np.asarray(np.linalg.multi_dot(arrays))
+            # The product of nonnegative |real| + |imag| matrices bounds
+            # either component across every contraction parenthesization.
+            scales = [
+                np.abs(a.real.astype(np.float64)) + np.abs(a.imag.astype(np.float64))
+                for a in arrays
+            ]
+            scale = np.asarray(np.linalg.multi_dot(scales))
+            parts = np.empty(result.size * 2, dtype=np.float64)
+            parts[0::2] = result.real.ravel()
+            parts[1::2] = result.imag.ravel()
+            rounding = [
+                np.finfo(a.dtype) for a in arrays + [result]
+                if a.dtype.kind in 'fc'
+            ]
+            rows.append(dict(
+                shape=list(result.shape), dtype=str(result.dtype),
+                bits=parts.view(np.uint64).tolist(),
+                bounds=np.repeat(scale.ravel(), 2).tolist(),
+                contracted=sum(sum(a.shape) for a in arrays) + len(arrays),
+                epsilon=max(float(info.eps) for info in rounding),
+                smallest=max(float(info.smallest_subnormal) for info in rounding),
+                integers=[str(int(x)) for x in result.ravel()] if result.dtype.kind in 'biu' else None,
+            ))
+            continue
         left, right = load(case['lhs']), load(case['rhs'])
         op, axis, axes = case['op'], case['axis'], case.get('axes')
         result = np.asarray(operate(op, left, right, axis, axes))
@@ -261,6 +296,17 @@ print(json.dumps(rows))
             } else {
                 (f64::EPSILON, f64::from_bits(1))
             };
+            // A matrix chain can have lower-precision intermediates than its
+            // final dtype. Its oracle row supplies the conservative precision
+            // bound for those intermediates; two-input cases use the result.
+            let epsilon = expected
+                .get("epsilon")
+                .and_then(Value::as_f64)
+                .unwrap_or(epsilon);
+            let smallest = expected
+                .get("smallest")
+                .and_then(Value::as_f64)
+                .unwrap_or(smallest);
             for (index, ((&actual, expected), bound)) in
                 components.iter().zip(bits).zip(bounds).enumerate()
             {
@@ -1038,6 +1084,151 @@ fn complex_vector_dots_preserve_exact_integer_inputs_before_promotion() {
         }
     }
     batch.finish();
+}
+
+#[test]
+fn complex_multi_dot_chains_and_vector_endpoints_match_numpy() {
+    let layouts: &[&[&[usize]]] = &[
+        &[&[2, 3], &[3, 4], &[4, 2]],
+        &[&[2, 2], &[2, 2], &[2, 2]],
+        &[&[2, 3], &[3, 1], &[1, 4], &[4, 2]],
+        &[&[3, 1], &[1, 4], &[4, 2], &[2, 5], &[5, 1]],
+        &[&[3], &[3, 4], &[4, 2]],
+        &[&[2, 3], &[3, 4], &[4]],
+        &[&[3], &[3, 4], &[4]],
+        &[&[3], &[3, 2], &[2, 4], &[4]],
+        &[&[2, 0], &[0, 3], &[3, 4]],
+        &[&[0, 2], &[2, 3], &[3, 4]],
+        &[&[2, 3], &[3, 0], &[0, 4]],
+        &[&[2, 3], &[3, 4], &[4, 0]],
+        &[&[2, 0], &[0, 3], &[3, 0], &[0, 4]],
+        &[&[0], &[0, 3], &[3, 0], &[0]],
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shapes in layouts {
+            let arrays: Vec<_> = shapes
+                .iter()
+                .enumerate()
+                .map(|(index, shape)| source(shape, dtype, index + 1))
+                .collect();
+            batch.chain_case(&arrays.iter().collect::<Vec<_>>());
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_multi_dot_preserves_pairwise_promotion_and_exact_integer_sources() {
+    let mut batch = OracleBatch::default();
+    for dtypes in [
+        [DType::Complex64, DType::F32, DType::Complex64],
+        [DType::F64, DType::Complex64, DType::Complex64],
+        [DType::Complex64, DType::Complex128, DType::F32],
+        [DType::F32, DType::Complex64, DType::Complex128],
+        [DType::Complex64, DType::I16, DType::Complex128],
+        [DType::Bool, DType::Complex64, DType::Complex64],
+    ] {
+        for shapes in [
+            [vec![2, 3], vec![3, 4], vec![4, 2]],
+            [vec![3], vec![3, 4], vec![4]],
+        ] {
+            let arrays: Vec<_> = shapes
+                .iter()
+                .zip(dtypes)
+                .enumerate()
+                .map(|(index, (shape, dtype))| source(shape, dtype, index + 2))
+                .collect();
+            batch.chain_case(&arrays.iter().collect::<Vec<_>>());
+        }
+    }
+    for storage in [
+        ArrayStorage::I64(vec![i64::MAX, i64::MIN, (1_i64 << 53) + 1, -1, 0, 1]),
+        ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1, (1_u64 << 63) + 1, 0, 1, 2]),
+    ] {
+        let integers = UFuncArray::from_storage(vec![2, 3], storage).unwrap();
+        for dtype in [DType::Complex64, DType::Complex128] {
+            let left = source(&[2, 2], dtype, 1);
+            let right = source(&[3, 2], dtype, 3);
+            batch.chain_case(&[&left, &integers, &right]);
+            batch.chain_case(&[&integers, &right, &left]);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_multi_dot_does_not_conjugate_vector_endpoints() {
+    let left =
+        UFuncArray::new(vec![1, 2, 2], vec![1.0, 2.0, 3.0, -1.0], DType::Complex128)
+            .unwrap();
+    let middle = UFuncArray::new(
+        vec![2, 2, 2],
+        vec![2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        DType::Complex128,
+    )
+    .unwrap();
+    let right =
+        UFuncArray::new(vec![2, 1, 2], vec![1.0, -1.0, 2.0, 1.0], DType::Complex128)
+            .unwrap();
+    let matrix = UFuncArray::multi_dot(&[&left, &middle, &right]).unwrap();
+    assert_eq!(matrix.shape(), &[1, 1, 2]);
+    assert_eq!(matrix.values(), &[5.0, 9.0]);
+    let row = left.reshape(&[2]).unwrap();
+    let column = right.reshape(&[2]).unwrap();
+    let scalar = UFuncArray::multi_dot(&[&row, &middle, &column]).unwrap();
+    assert_eq!(scalar.shape(), &[2]);
+    assert_eq!(scalar.values(), &[5.0, 9.0]);
+}
+
+#[test]
+fn complex_multi_dot_rejects_invalid_chains_like_numpy() {
+    let layouts: &[&[&[usize]]] = &[
+        &[],
+        &[&[2, 2]],
+        &[&[], &[2, 2], &[2, 2]],
+        &[&[2, 2], &[2, 2], &[]],
+        &[&[2, 2], &[2], &[2, 2]],
+        &[&[2, 2], &[1, 2, 2], &[2, 2]],
+        &[&[2, 3], &[4, 2], &[2, 2]],
+        &[&[2, 3], &[3, 2], &[3, 2]],
+        &[&[2, 3], &[4, 0], &[0, 2]],
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shapes in layouts {
+            let arrays: Vec<_> = shapes
+                .iter()
+                .enumerate()
+                .map(|(index, shape)| source(shape, dtype, index))
+                .collect();
+            batch.chain_case(&arrays.iter().collect::<Vec<_>>());
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_multi_dot_validates_layouts_and_checked_empty_output_capacity() {
+    let valid = source(&[2, 2], DType::Complex128, 0);
+    for malformed in [
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
+    ] {
+        assert!(UFuncArray::multi_dot(&[&malformed, &valid, &valid]).is_err());
+        assert!(UFuncArray::multi_dot(&[&valid, &malformed, &valid]).is_err());
+        assert!(UFuncArray::multi_dot(&[&valid, &valid, &malformed]).is_err());
+    }
+    let tall = UFuncArray::new(vec![usize::MAX, 0, 2], vec![], DType::Complex128).unwrap();
+    let wide = UFuncArray::new(vec![0, usize::MAX, 2], vec![], DType::Complex128).unwrap();
+    let empty = UFuncArray::multi_dot(&[&tall, &wide, &tall]).unwrap();
+    assert_eq!(empty.shape(), &[usize::MAX, 0, 2]);
+    assert!(empty.values().is_empty());
+    assert!(matches!(
+        UFuncArray::multi_dot(&[&tall, &wide, &tall, &wide]),
+        Err(UFuncError::Shape(ShapeError::Overflow))
+    ));
 }
 
 #[test]

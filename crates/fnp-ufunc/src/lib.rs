@@ -17733,45 +17733,34 @@ impl UFuncArray {
             return arrays[0].dot(arrays[1]);
         }
 
-        // Extract the dimension chain for the DP cost model.
-        // For a chain A0 × A1 × ... × A_{n-1} where Ai is (dims[i] × dims[i+1]),
-        // we need n+1 dimensions.
+        // Plan using logical matrix dimensions, never the physical component
+        // axis of complex arrays. Validate the entire chain before evaluating
+        // an intermediate product, including the original adjacent dimensions.
         let mut dims = Vec::with_capacity(n + 1);
-
-        // First array: handle 1-D (treat as row vector 1×k).
-        let first = arrays[0];
-        if first.shape().len() == 1 {
-            dims.push(1usize);
-            dims.push(first.shape()[0]);
-        } else if first.shape().len() == 2 {
-            dims.push(first.shape()[0]);
-            dims.push(first.shape()[1]);
-        } else {
-            return Err(UFuncError::Msg(
-                "multi_dot: arrays must be 1-D or 2-D".to_string(),
-            ));
-        }
-
-        // Middle arrays: must be 2-D.
-        for &arr in &arrays[1..n - 1] {
-            if arr.shape().len() != 2 {
-                return Err(UFuncError::Msg(
-                    "multi_dot: inner arrays must be 2-D".to_string(),
-                ));
+        for (index, array) in arrays.iter().enumerate() {
+            let shape = array.complex_logical_shape("multi_dot")?;
+            let (rows, columns) = match shape.as_slice() {
+                [length] if index == 0 => (1, *length),
+                [length] if index == n - 1 => (*length, 1),
+                [rows, columns] => (*rows, *columns),
+                _ => {
+                    return Err(UFuncError::Msg(if index == 0 || index == n - 1 {
+                        "multi_dot: arrays must be 1-D or 2-D".to_string()
+                    } else {
+                        "multi_dot: inner arrays must be 2-D".to_string()
+                    }));
+                }
+            };
+            if index == 0 {
+                dims.push(rows);
+            } else if dims[index] != rows {
+                return Err(UFuncError::Msg(format!(
+                    "multi_dot: operands {} and {index} have incompatible contraction dimensions {} and {rows}",
+                    index - 1,
+                    dims[index]
+                )));
             }
-            dims.push(arr.shape()[1]);
-        }
-
-        // Last array: handle 1-D (treat as column vector k×1).
-        let last = arrays[n - 1];
-        if last.shape().len() == 1 {
-            dims.push(1);
-        } else if last.shape().len() == 2 {
-            dims.push(last.shape()[1]);
-        } else {
-            return Err(UFuncError::Msg(
-                "multi_dot: arrays must be 1-D or 2-D".to_string(),
-            ));
+            dims.push(columns);
         }
 
         // DP: cost[i][j] = min cost to multiply arrays i..=j
@@ -17790,7 +17779,9 @@ impl UFuncArray {
                             .saturating_mul(dims[k + 1] as u64)
                             .saturating_mul(dims[j + 1] as u64),
                     );
-                    if c < cost[i][j] {
+                    // Even a saturated cost must choose a split inside this
+                    // subchain; leaving zero for i > 0 would recurse outside it.
+                    if k == i || c < cost[i][j] {
                         cost[i][j] = c;
                         split[i][j] = k;
                     }
