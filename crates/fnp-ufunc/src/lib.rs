@@ -34045,22 +34045,45 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_argextrema(axis, false, true);
         }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmin(axis);
         }
+        if self.dtype.is_integer()
+            || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32)
+        {
+            // Compare declared source values, not an unrounded f64 working
+            // buffer. Narrow floats can tie or overflow to infinity on storage.
+            return Self::new(
+                self.shape.clone(),
+                self.to_storage()?.to_f64_vec(),
+                DType::F64,
+            )?
+            .nanargmin(axis);
+        }
         match axis {
             None => {
-                let mut min_idx = None;
+                // NumPy substitutes +inf for NaNs before argmin. Index zero
+                // therefore wins an all-+inf tie, including a replaced NaN.
+                // Only an independently all-NaN input is an error.
+                let mut min_idx = 0;
                 let mut min_val = f64::INFINITY;
+                let mut any_valid = false;
                 for (i, &v) in self.values.iter().enumerate() {
-                    if !v.is_nan() && v < min_val {
+                    any_valid |= !v.is_nan();
+                    if v < min_val {
                         min_val = v;
-                        min_idx = Some(i);
+                        min_idx = i;
                     }
                 }
-                match min_idx {
-                    Some(idx) => Ok(Self::scalar(idx as f64, DType::I64)),
-                    None => Err(UFuncError::EmptyReduction { op: "nanargmin" }),
+                if any_valid {
+                    Ok(Self::scalar(min_idx as f64, DType::I64))
+                } else {
+                    Err(UFuncError::EmptyReduction { op: "nanargmin" })
                 }
             }
             Some(ax) => {
@@ -34115,20 +34138,21 @@ impl UFuncArray {
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
-                    let mut best_k = None;
+                    let mut best_k = 0;
                     let mut best_v = f64::INFINITY;
+                    let mut any_valid = false;
                     for k in 0..axis_len {
                         let v = self.values[base_flat + k * strides[ax]];
-                        if !v.is_nan() && v < best_v {
+                        any_valid |= !v.is_nan();
+                        if v < best_v {
                             best_v = v;
-                            best_k = Some(k);
+                            best_k = k;
                         }
                     }
-                    match best_k {
-                        Some(k) => out_values.push(k as f64),
-                        None => {
-                            return Err(UFuncError::EmptyReduction { op: "nanargmin" });
-                        }
+                    if any_valid {
+                        out_values.push(best_k as f64);
+                    } else {
+                        return Err(UFuncError::EmptyReduction { op: "nanargmin" });
                     }
                 }
                 Ok(Self {
@@ -34146,22 +34170,40 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_argextrema(axis, true, true);
         }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmax(axis);
         }
+        if self.dtype.is_integer()
+            || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32)
+        {
+            return Self::new(
+                self.shape.clone(),
+                self.to_storage()?.to_f64_vec(),
+                DType::F64,
+            )?
+            .nanargmax(axis);
+        }
         match axis {
             None => {
-                let mut max_idx = None;
+                let mut max_idx = 0;
                 let mut max_val = f64::NEG_INFINITY;
+                let mut any_valid = false;
                 for (i, &v) in self.values.iter().enumerate() {
-                    if !v.is_nan() && v > max_val {
+                    any_valid |= !v.is_nan();
+                    if v > max_val {
                         max_val = v;
-                        max_idx = Some(i);
+                        max_idx = i;
                     }
                 }
-                match max_idx {
-                    Some(idx) => Ok(Self::scalar(idx as f64, DType::I64)),
-                    None => Err(UFuncError::EmptyReduction { op: "nanargmax" }),
+                if any_valid {
+                    Ok(Self::scalar(max_idx as f64, DType::I64))
+                } else {
+                    Err(UFuncError::EmptyReduction { op: "nanargmax" })
                 }
             }
             Some(ax) => {
@@ -34214,20 +34256,21 @@ impl UFuncArray {
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
-                    let mut best_k = None;
+                    let mut best_k = 0;
                     let mut best_v = f64::NEG_INFINITY;
+                    let mut any_valid = false;
                     for k in 0..axis_len {
                         let v = self.values[base_flat + k * strides[ax]];
-                        if !v.is_nan() && v > best_v {
+                        any_valid |= !v.is_nan();
+                        if v > best_v {
                             best_v = v;
-                            best_k = Some(k);
+                            best_k = k;
                         }
                     }
-                    match best_k {
-                        Some(k) => out_values.push(k as f64),
-                        None => {
-                            return Err(UFuncError::EmptyReduction { op: "nanargmax" });
-                        }
+                    if any_valid {
+                        out_values.push(best_k as f64);
+                    } else {
+                        return Err(UFuncError::EmptyReduction { op: "nanargmax" });
                     }
                 }
                 Ok(Self {
@@ -43039,15 +43082,11 @@ fn reduce_argminmax_axis_simd<const MAX: bool>(
     }
 }
 
-/// NaN-IGNORING register-blocked SIMD argmin/argmax along a non-last axis
-/// (`inner > 1`). Unlike `reduce_argminmax_axis_simd` (where NaN wins, matching
-/// `np.argmin`), this drops NaN lanes entirely (matching `np.nanargmin`): the best
-/// value starts at +/-inf with a sentinel index `-1`, and only a finite-or-real
-/// strictly-better element updates it. A lane that never sees a real element keeps
-/// index `-1`, which the caller maps to `EmptyReduction`. This reproduces the scalar
-/// `for k` reference (init `best=+/-inf`, `best_k=None`, `!v.is_nan() && strict better`)
-/// bit-for-bit — including the all-`inf` quirk (a `[+inf]` lane keeps `-1` because
-/// `+inf < +inf` is false), so it is a pure perf change with identical behavior.
+/// NaN-aware register-blocked SIMD argmin/argmax along a non-last axis.
+/// NumPy replaces NaNs with +/-inf before the ordinary arg reduction. Index
+/// zero wins a tie consisting only of the replacement infinity, even when that
+/// position originally held NaN. Track valid input separately so only all-NaN
+/// lanes receive the `-1` error sentinel.
 fn reduce_nanargminmax_axis_simd<const MAX: bool>(
     values: &[f64],
     axis_len: usize,
@@ -43057,7 +43096,7 @@ fn reduce_nanargminmax_axis_simd<const MAX: bool>(
 ) {
     use std::simd::cmp::SimdPartialOrd;
     use std::simd::num::SimdFloat;
-    use std::simd::{Select, Simd};
+    use std::simd::{Mask, Select, Simd};
     const LANES: usize = 8;
     type V = Simd<f64, LANES>;
     type I = Simd<i64, LANES>;
@@ -43074,7 +43113,8 @@ fn reduce_nanargminmax_axis_simd<const MAX: bool>(
         let mut c = 0;
         while c + LANES <= len {
             let mut best_val = V::splat(init_best);
-            let mut best_idx = I::splat(-1);
+            let mut best_idx = I::splat(0);
+            let mut any_valid = Mask::<i64, LANES>::splat(false);
             for r in 0..axis_len {
                 let v = V::from_slice(&values[base + r * inner + c..]);
                 let cmp = if MAX {
@@ -43082,14 +43122,13 @@ fn reduce_nanargminmax_axis_simd<const MAX: bool>(
                 } else {
                     v.simd_lt(best_val)
                 };
-                // NaN compares false in both directions, so `cmp` already excludes
-                // NaN elements; an explicit `!v.is_nan()` keeps parity if a platform
-                // ever returns a non-false comparison for NaN.
-                let update = !v.is_nan() & cmp;
+                let valid = !v.is_nan();
+                any_valid |= valid;
+                let update = valid & cmp;
                 best_val = update.select(v, best_val);
                 best_idx = update.select(I::splat(r as i64), best_idx);
             }
-            let idx_arr = best_idx.to_array();
+            let idx_arr = any_valid.select(best_idx, I::splat(-1)).to_array();
             for (lane, &idx) in idx_arr.iter().enumerate() {
                 out_slice[c + lane] = idx as f64;
             }
@@ -43097,15 +43136,18 @@ fn reduce_nanargminmax_axis_simd<const MAX: bool>(
         }
         while c < len {
             let mut best_val = init_best;
-            let mut best_idx: i64 = -1;
+            let mut best_idx: i64 = 0;
+            let mut any_valid = false;
             for r in 0..axis_len {
                 let cur = values[base + r * inner + c];
-                if !cur.is_nan() && (if MAX { cur > best_val } else { cur < best_val }) {
+                any_valid |= !cur.is_nan();
+                let better = if MAX { cur > best_val } else { cur < best_val };
+                if better {
                     best_val = cur;
                     best_idx = r as i64;
                 }
             }
-            out_slice[c] = best_idx as f64;
+            out_slice[c] = if any_valid { best_idx as f64 } else { -1.0 };
             c += 1;
         }
     };
@@ -63064,11 +63106,9 @@ print(json.dumps(payload))
     #[test]
     fn nanargminmax_non_last_axis_simd_matches_scalar_reference() {
         // The non-last-axis (inner>1) nanargmin/nanargmax route through the
-        // register-blocked SIMD kernel reduce_nanargminmax_axis_simd. It must be
-        // bit-identical to the scalar per-lane reference (init best=+/-inf,
-        // best_k=None, `!v.is_nan() && strict-better`), including the all-`inf`
-        // quirk (a `[+inf]` min lane keeps the `-1` sentinel because `+inf<+inf`
-        // is false) and all-NaN lanes which must raise EmptyReduction.
+        // register-blocked SIMD kernel reduce_nanargminmax_axis_simd. Compare
+        // its indices with a scalar reduction after NumPy's NaN-to-infinity
+        // replacement. An all-NaN lane is checked separately and must error.
         let (d0, d1, d2) = (29usize, 37usize, 19usize);
         let mut data: Vec<f64> = (0..d0 * d1 * d2)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
@@ -63110,7 +63150,7 @@ print(json.dumps(payload))
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
-                    let mut best_k: Option<usize> = None;
+                    let mut best_k = 0;
                     let mut best_v = if is_max {
                         f64::NEG_INFINITY
                     } else {
@@ -63119,13 +63159,13 @@ print(json.dumps(payload))
                     for k in 0..axis_len {
                         let v = data[base_flat + k * strides[axu]];
                         let better = if is_max { v > best_v } else { v < best_v };
-                        if !v.is_nan() && better {
+                        if better {
                             best_v = v;
-                            best_k = Some(k);
+                            best_k = k;
                         }
                     }
                     // Lanes are seeded so none are fully NaN here; assert the index.
-                    let exp = best_k.expect("lane has a real element") as f64;
+                    let exp = best_k as f64;
                     let got = out.values()[outer];
                     assert_eq!(
                         got.to_bits(),
@@ -63137,8 +63177,8 @@ print(json.dumps(payload))
             }
         }
 
-        // All-NaN lane along a non-last axis must raise EmptyReduction (matching the
-        // scalar `best_k == None` -> Err), via the `-1` sentinel scan.
+        // An all-NaN lane along a non-last axis must raise EmptyReduction,
+        // independently of the best-index accumulator, via the sentinel scan.
         let (e0, e1, e2) = (3usize, 5usize, 4usize);
         let mut nan_data = vec![1.0f64; e0 * e1 * e2];
         // Make every lane along ax=1 (inner = e2 > 1) at outer (0,*,0) fully NaN.

@@ -182,6 +182,23 @@ impl OracleBatch {
         });
     }
 
+    fn push_nanarg(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        op: &str,
+        axis: Option<isize>,
+    ) {
+        self.cases.push(json!({
+            "input": input, "op": op, "axis": axis, "keepdims": false,
+        }));
+        self.actual.push(match op {
+            "nanargmin" => array.nanargmin(axis),
+            "nanargmax" => array.nanargmax(axis),
+            _ => unreachable!("NaN-aware argument reduction"),
+        });
+    }
+
     fn push_with_dtype(
         &mut self,
         input: usize,
@@ -427,6 +444,153 @@ fn default_integer_variance_preserves_source_casts_and_conversion_buffers() {
                     batch.push_single_statistic(input, &array, (op, 0), axis, keepdims);
                     batch.push(input, &array, op, &axes, keepdims, 0);
                 }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nanarg_extrema_infinities_nan_ties_and_scalar_axes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        for values in [
+            vec![],
+            vec![f64::INFINITY],
+            vec![f64::NEG_INFINITY],
+            vec![f64::NAN],
+            vec![f64::NAN, f64::INFINITY],
+            vec![f64::INFINITY, f64::NAN],
+            vec![f64::NAN, f64::NEG_INFINITY],
+            vec![f64::NEG_INFINITY, f64::NAN],
+            vec![f64::NAN, f64::NAN],
+            vec![f64::INFINITY, f64::INFINITY, f64::NAN],
+            vec![f64::NEG_INFINITY, f64::NAN, f64::NEG_INFINITY],
+            vec![f64::NAN, -0.0, 0.0, -0.0],
+        ] {
+            let n = values.len();
+            for shape in [vec![n], vec![1, n], vec![n, 1]] {
+                let array = UFuncArray::new(shape, values.clone(), dtype).unwrap();
+                let input = batch.add_input(&array);
+                for axis in [None, Some(0), Some(1), Some(-1), Some(-2)] {
+                    for op in ["nanargmin", "nanargmax"] {
+                        batch.push_nanarg(input, &array, op, axis);
+                    }
+                }
+            }
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -0.0, 0.0] {
+            let array = UFuncArray::scalar(value, dtype);
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(-1), Some(1), Some(-2)] {
+                for op in ["nanargmin", "nanargmax"] {
+                    batch.push_nanarg(input, &array, op, axis);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nanarg_extrema_observe_declared_source_precision() {
+    let mut batch = OracleBatch::default();
+    for (dtype, values) in [
+        (DType::F16, vec![1.0001, 1.0, f64::NAN, -0.0]),
+        (DType::F16, vec![70000.0, 80000.0, f64::NAN, f64::INFINITY]),
+        (DType::F32, vec![1.0 + 2.0_f64.powi(-25), 1.0, f64::NAN, -0.0]),
+        (DType::F32, vec![1.0e100, 1.0e90, f64::NAN, f64::INFINITY]),
+        (DType::Bool, vec![1.9, 1.1, 0.0, -0.0]),
+        (DType::I8, vec![1.9, 1.1, 3.1, 3.9]),
+        (DType::U8, vec![1.9, 1.1, 3.1, 3.9]),
+        (DType::I16, vec![1.9, 1.1, 3.1, 3.9]),
+        (DType::U16, vec![1.9, 1.1, 3.1, 3.9]),
+        (DType::I32, vec![1.9, 1.1, 3.1, 3.9]),
+        (DType::U32, vec![1.9, 1.1, 3.1, 3.9]),
+    ] {
+        for shape in [vec![4], vec![2, 2]] {
+            let array = UFuncArray::new(shape, values.clone(), dtype).unwrap();
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(-1)] {
+                for op in ["nanargmin", "nanargmax"] {
+                    batch.push_nanarg(input, &array, op, axis);
+                }
+            }
+        }
+    }
+    for storage in [
+        ArrayStorage::I64(vec![
+            (1_i64 << 53) + 1,
+            (1_i64 << 53) + 2,
+            i64::MIN,
+            i64::MIN + 1,
+        ]),
+        ArrayStorage::U64(vec![
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 2,
+            u64::MAX,
+            u64::MAX - 1,
+        ]),
+    ] {
+        let array = UFuncArray::from_storage(vec![2, 2], storage).unwrap();
+        let input = batch.add_input(&array);
+        for axis in [None, Some(0), Some(1)] {
+            for op in ["nanargmin", "nanargmax"] {
+                batch.push_nanarg(input, &array, op, axis);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nanarg_extrema_simd_tails_and_parallel_lanes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    // Width nine exercises an eight-lane SIMD block and its scalar tail.
+    // The two large shapes cross the parallel threshold with outer == 1
+    // and outer > 1 respectively, using the same infinity/NaN contracts.
+    for (outer, rows, columns) in [(1, 3, 9), (2, 3, 9), (1, 5, 4097), (5, 5, 1025)] {
+        let shape = if outer == 1 {
+            vec![rows, columns]
+        } else {
+            vec![outer, rows, columns]
+        };
+        let axis = if outer == 1 { 0 } else { 1 };
+        let values: Vec<f64> = (0..outer * rows * columns)
+            .map(|index| {
+                let row = index / columns % rows;
+                match index % columns % 6 {
+                    0 => f64::INFINITY,
+                    1 => f64::NEG_INFINITY,
+                    2 if row == 0 => f64::NAN,
+                    2 => f64::INFINITY,
+                    3 if row == 0 => f64::NAN,
+                    3 => f64::NEG_INFINITY,
+                    4 if row == 0 => f64::NAN,
+                    4 => (row % 2) as f64,
+                    _ if row % 2 == 0 => -0.0,
+                    _ => 0.0,
+                }
+            })
+            .collect();
+        let array = UFuncArray::new(shape.clone(), values.clone(), DType::F64).unwrap();
+        let input = batch.add_input(&array);
+        for selected_axis in [None, Some(axis), Some(-2)] {
+            for op in ["nanargmin", "nanargmax"] {
+                batch.push_nanarg(input, &array, op, selected_axis);
+            }
+        }
+        // All-NaN lanes in both the first vector block and the final scalar
+        // tail must still fail, even when every other lane has valid data.
+        for column in [0, columns - 1] {
+            let mut all_nan = values.clone();
+            for row in 0..rows {
+                all_nan[row * columns + column] = f64::NAN;
+            }
+            let array = UFuncArray::new(shape.clone(), all_nan, DType::F64).unwrap();
+            let input = batch.add_input(&array);
+            for op in ["nanargmin", "nanargmax"] {
+                batch.push_nanarg(input, &array, op, Some(axis));
             }
         }
     }
