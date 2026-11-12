@@ -14345,12 +14345,93 @@ impl UFuncArray {
         })
     }
 
+    /// Select a logical complex order statistic without separating components
+    /// or sorting the remaining elements. Each lane reuses one index buffer.
+    fn partition_complex_elements(
+        &self,
+        kth: usize,
+        axis: Option<isize>,
+        return_indices: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if return_indices {
+            "argpartition"
+        } else {
+            "partition"
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        let count = self.values.len() / 2;
+        let (mut output_shape, axis_len, axis) = match axis {
+            None => (vec![count], count, None),
+            Some(0 | -1) if return_indices && shape.is_empty() => (vec![1], 1, None),
+            Some(axis) => {
+                let axis = normalize_axis(axis, shape.len())?;
+                (shape.clone(), shape[axis], Some(axis))
+            }
+        };
+        // NumPy validates the axis even for empty arrays, but there is no
+        // order statistic to validate when no lane contains any elements.
+        if count != 0 && kth >= axis_len {
+            return Err(UFuncError::Msg(format!("{operation}: kth out of bounds")));
+        }
+        let mut values = try_zeroed_f64(
+            if return_indices { count } else { self.values.len() },
+            operation,
+        )?;
+        if count != 0 {
+            let inner = match axis {
+                Some(axis) => element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                None => 1,
+            };
+            let outer = count / (axis_len * inner);
+            let mut indices = Vec::new();
+            indices.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg(format!("{operation}: unable to allocate selection indices"))
+            })?;
+            indices.extend(0..axis_len);
+            for outer_index in 0..outer {
+                for inner_index in 0..inner {
+                    let base = outer_index * axis_len * inner + inner_index;
+                    for (index, slot) in indices.iter_mut().enumerate() {
+                        *slot = index;
+                    }
+                    indices.select_nth_unstable_by(kth, |lhs, rhs| {
+                        Self::complex_order_cmp(
+                            self.complex_extrema_value(base + *lhs * inner),
+                            self.complex_extrema_value(base + *rhs * inner),
+                        )
+                    });
+                    for (position, &source_index) in indices.iter().enumerate() {
+                        let output = base + position * inner;
+                        if return_indices {
+                            values[output] = source_index as f64;
+                        } else {
+                            let (re, im) = self.complex_extrema_value(base + source_index * inner);
+                            values[output * 2] = re;
+                            values[output * 2 + 1] = im;
+                        }
+                    }
+                }
+            }
+        }
+        let dtype = if return_indices {
+            DType::I64
+        } else {
+            output_shape.push(2);
+            self.dtype
+        };
+        Self::new(output_shape, values, dtype)
+    }
+
     /// Partial sort: rearranges elements so that the element at `kth` position
-    /// is in its final sorted position. Elements before kth are all smaller,
-    /// elements after are all larger (but not necessarily sorted).
+    /// is in its final sorted position. Elements before kth are no larger,
+    /// and elements after are no smaller (neither section is necessarily sorted).
     ///
-    /// Mimics `np.partition(a, kth)`. Only 1-D supported.
+    /// Mimics `np.partition(a, kth, axis)`. When `axis` is `None`, operates
+    /// on the flattened array. Complex axes refer to complete logical elements.
     pub fn partition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.uses_complex_interleaved_storage() {
+            return self.partition_complex_elements(kth, axis, false);
+        }
         if let Some(sidecar) = self.synthesized_integer_sidecar("partition")? {
             return match sidecar {
                 IntegerSidecar::I64(values) => match axis {
@@ -14641,6 +14722,9 @@ impl UFuncArray {
     /// Mimics `np.argpartition(a, kth, axis)`. When `axis` is `None`, operates
     /// on the flattened array.
     pub fn argpartition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.uses_complex_interleaved_storage() {
+            return self.partition_complex_elements(kth, axis, true);
+        }
         if let Some(sidecar) = self.synthesized_integer_sidecar("argpartition")? {
             return match sidecar {
                 IntegerSidecar::I64(values) => match axis {
