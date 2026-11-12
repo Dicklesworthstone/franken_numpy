@@ -31656,9 +31656,279 @@ impl UFuncArray {
     }
 
     /// Return sorted unique elements.
+    ///
+    /// Like the legacy infallible metadata API, malformed complex input is
+    /// returned unchanged. Use `unique_with_options` for explicit error reporting.
     pub fn unique(&self) -> Self {
         let (u, _, _, _) = self.unique_with_info(false, false, false);
         u
+    }
+
+    /// Find unique logical values or axis slices with explicit NaN handling.
+    ///
+    /// Mirrors `np.unique` with `axis`, the three optional metadata arrays,
+    /// and `equal_nan`. Flattened inverse indices have the input's logical
+    /// shape. An axis inverse is one-dimensional and indexes that axis.
+    ///
+    /// Complex storage must have a trailing component dimension of length two;
+    /// unlike the legacy infallible methods, this API reports malformed layouts.
+    /// For a one-dimensional input, an explicit axis has the same NaN semantics
+    /// as flattening (NumPy 2.4). For higher-dimensional axis slices, NaNs never
+    /// compare equal, including when `equal_nan` is true.
+    pub fn unique_with_options(
+        &self,
+        axis: Option<isize>,
+        return_index: bool,
+        return_inverse: bool,
+        return_counts: bool,
+        equal_nan: bool,
+    ) -> Result<UniqueInfo, UFuncError> {
+        let shape = self.complex_logical_shape("unique")?;
+        let axis = axis
+            .map(|axis| normalize_axis(axis, shape.len()))
+            .transpose()?;
+        if self.dtype.is_complex() {
+            return self.unique_logical_with_info(
+                &shape,
+                axis.filter(|_| shape.len() > 1),
+                return_index,
+                return_inverse,
+                return_counts,
+                equal_nan,
+            );
+        }
+
+        if let Some(axis) = axis
+            && shape.len() > 1
+        {
+            return self.unique_axis_with_info(
+                axis as isize,
+                return_index,
+                return_inverse,
+                return_counts,
+            );
+        }
+
+        // Preserve the exact integer-sidecar path. The new NaN policy only
+        // needs a different grouping pass when NaNs are present.
+        let _ = self.synthesized_integer_sidecar("unique")?;
+        if !equal_nan && self.values.iter().any(|value| value.is_nan()) {
+            return self.unique_logical_with_info(
+                &shape,
+                None,
+                return_index,
+                return_inverse,
+                return_counts,
+                false,
+            );
+        }
+        let (values, indices, mut inverse, counts) =
+            self.unique_with_info(return_index, return_inverse, return_counts);
+        if let Some(inverse) = inverse.as_mut() {
+            inverse.shape = shape;
+        }
+        Ok((values, indices, inverse, counts))
+    }
+
+    fn unique_checked_metadata(
+        shape: Vec<usize>,
+        source: &[usize],
+    ) -> Result<Self, UFuncError> {
+        let mut values = Vec::new();
+        values.try_reserve_exact(source.len()).map_err(|_| {
+            UFuncError::Msg("unique: unable to allocate integer metadata".into())
+        })?;
+        for &value in source {
+            values.push(i64::try_from(value).map_err(|_| {
+                UFuncError::Msg("unique: integer metadata exceeds int64 range".into())
+            })?);
+        }
+        Self::from_storage(shape, ArrayStorage::I64(values))
+    }
+
+    /// Group complete elements, or complete logical slices, using a stable
+    /// permutation. Comparing rounded components also makes direct Complex64
+    /// working buffers obey their declared storage precision.
+    fn unique_logical_with_info(
+        &self,
+        shape: &[usize],
+        axis: Option<usize>,
+        return_index: bool,
+        return_inverse: bool,
+        return_counts: bool,
+        equal_nan: bool,
+    ) -> Result<UniqueInfo, UFuncError> {
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let count = self.values.len() / components;
+        let axis_len = axis.map_or(count, |axis| shape[axis]);
+        let mut first_indices: Vec<usize> = Vec::new();
+        let mut counts: Vec<usize> = Vec::new();
+        let mut inverse: Vec<usize> = Vec::new();
+        if return_inverse {
+            inverse.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg("unique: unable to allocate inverse indices".into())
+            })?;
+            inverse.resize(axis_len, 0);
+        }
+
+        // Empty slices all compare equal. Avoid computing strides or allocating
+        // a sorting permutation for potentially enormous, zero-sized shapes.
+        let (outer, inner) = if count == 0 {
+            if axis_len != 0 {
+                first_indices.push(0);
+                counts.push(axis_len);
+            }
+            (0, 0)
+        } else {
+            let (outer, inner) = match axis {
+                Some(axis) => (
+                    element_count(&shape[..axis]).map_err(UFuncError::Shape)?,
+                    element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                ),
+                None => (1, 1),
+            };
+            let mut order: Vec<usize> = Vec::new();
+            order.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg("unique: unable to allocate sorting indices".into())
+            })?;
+            order.extend(0..axis_len);
+            first_indices.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg("unique: unable to allocate group indices".into())
+            })?;
+            counts.try_reserve_exact(axis_len).map_err(|_| {
+                UFuncError::Msg("unique: unable to allocate group counts".into())
+            })?;
+
+            order.sort_by(|&lhs, &rhs| {
+                for outer_index in 0..outer {
+                    let base = outer_index * axis_len * inner;
+                    for inner_index in 0..inner {
+                        let ordering = Self::complex_order_cmp(
+                            self.complex_extrema_value(base + lhs * inner + inner_index),
+                            self.complex_extrema_value(base + rhs * inner + inner_index),
+                        );
+                        if !ordering.is_eq() {
+                            return ordering;
+                        }
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+
+            for original_index in order {
+                let same_group = first_indices.last().is_some_and(|&representative| {
+                    for outer_index in 0..outer {
+                        let base = outer_index * axis_len * inner;
+                        for inner_index in 0..inner {
+                            let lhs = self.complex_extrema_value(
+                                base + representative * inner + inner_index,
+                            );
+                            let rhs = self.complex_extrema_value(
+                                base + original_index * inner + inner_index,
+                            );
+                            let both_nan = (lhs.0.is_nan() || lhs.1.is_nan())
+                                && (rhs.0.is_nan() || rhs.1.is_nan());
+                            if lhs != rhs && !(axis.is_none() && equal_nan && both_nan) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                });
+                if same_group {
+                    if let Some(last) = counts.last_mut() {
+                        *last += 1;
+                    }
+                } else {
+                    first_indices.push(original_index);
+                    counts.push(1);
+                }
+                if return_inverse {
+                    inverse[original_index] = first_indices.len() - 1;
+                }
+            }
+            (outer, inner)
+        };
+
+        // NumPy 2.4's value-only hash path retains the first input NaN before
+        // sorting the unique values. Requesting any metadata uses the sorted
+        // path instead, whose representative is the minimum complex NaN class.
+        if axis.is_none() && equal_nan && !return_index && !return_inverse && !return_counts
+            && let Some(first_nan) = (0..count).find(|&index| {
+                let (re, im) = self.complex_extrema_value(index);
+                re.is_nan() || im.is_nan()
+            })
+            && let Some(representative) = first_indices.last_mut()
+        {
+            *representative = first_nan;
+        }
+
+        let unique_count = first_indices.len();
+        let mut output_shape = match axis {
+            Some(axis) => {
+                let mut output_shape = shape.to_vec();
+                output_shape[axis] = unique_count;
+                output_shape
+            }
+            None => vec![unique_count],
+        };
+        if self.dtype.is_complex() {
+            output_shape.push(2);
+        }
+        // The selected output cannot contain more components than the input.
+        let output_count = if axis_len == 0 {
+            0
+        } else {
+            self.values.len() / axis_len * unique_count
+        };
+        let mut values = try_zeroed_f64(output_count, "unique")?;
+        for outer_index in 0..outer {
+            for (new_index, &original_index) in first_indices.iter().enumerate() {
+                for inner_index in 0..inner {
+                    let source = outer_index * axis_len * inner
+                        + original_index * inner
+                        + inner_index;
+                    let target = outer_index * unique_count * inner
+                        + new_index * inner
+                        + inner_index;
+                    let (re, im) = self.complex_extrema_value(source);
+                    values[target * components] = re;
+                    if components == 2 {
+                        values[target * components + 1] = im;
+                    }
+                }
+            }
+        }
+
+        let indices = return_index
+            .then(|| Self::unique_checked_metadata(vec![unique_count], &first_indices))
+            .transpose()?;
+        let inverse = return_inverse
+            .then(|| {
+                Self::unique_checked_metadata(
+                    if axis.is_some() {
+                        vec![axis_len]
+                    } else {
+                        shape.to_vec()
+                    },
+                    &inverse,
+                )
+            })
+            .transpose()?;
+        let counts = return_counts
+            .then(|| Self::unique_checked_metadata(vec![unique_count], &counts))
+            .transpose()?;
+        Ok((
+            Self {
+                shape: output_shape,
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            },
+            indices,
+            inverse,
+            counts,
+        ))
     }
 
     fn float_membership_cmp(lhs: f64, rhs: f64) -> std::cmp::Ordering {
@@ -31724,12 +31994,22 @@ impl UFuncArray {
     ///
     /// Mimics `np.unique(return_index, return_inverse, return_counts)`.
     /// Returns `(unique, Option<indices>, Option<inverse>, Option<counts>)`.
+    ///
+    /// Complex inputs are grouped as logical elements with `equal_nan=true`.
+    /// If their layout is malformed, this legacy infallible method preserves
+    /// the original input and returns no metadata; that is an error fallback,
+    /// not a valid unique result. Use `unique_with_options` to receive the error.
     pub fn unique_with_info(
         &self,
         return_index: bool,
         return_inverse: bool,
         return_counts: bool,
     ) -> (Self, Option<Self>, Option<Self>, Option<Self>) {
+        if self.dtype.is_complex() {
+            return self
+                .unique_with_options(None, return_index, return_inverse, return_counts, true)
+                .unwrap_or_else(|_| (self.clone(), None, None, None));
+        }
         if let Ok(Some(sidecar)) = self.synthesized_integer_sidecar("unique_with_info") {
             match sidecar {
                 IntegerSidecar::I64(values) => {
@@ -32135,6 +32415,15 @@ impl UFuncArray {
         return_inverse: bool,
         return_counts: bool,
     ) -> Result<UniqueInfo, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.unique_with_options(
+                Some(axis),
+                return_index,
+                return_inverse,
+                return_counts,
+                true,
+            );
+        }
         if self.shape.len() < 2 {
             return Ok(self.unique_with_info(return_index, return_inverse, return_counts));
         }
@@ -47604,14 +47893,31 @@ pub fn where_nonzero(condition: &UFuncArray) -> Result<Vec<UFuncArray>, UFuncErr
     Ok(result)
 }
 
-/// `numpy.unique_values(x)` — sorted unique values only.
+/// `numpy.unique_values(x)` — unique values only; ordering is unspecified.
+///
+/// Complex NaNs remain distinct, as required by the Array API variants.
+/// Malformed complex input is preserved; use `unique_with_options` for errors.
 pub fn unique_values(x: &UFuncArray) -> UFuncArray {
+    if x.dtype.is_complex() {
+        return x
+            .unique_with_options(None, false, false, false, false)
+            .map(|(values, _, _, _)| values)
+            .unwrap_or_else(|_| x.clone());
+    }
     x.unique()
 }
 
 /// `numpy.unique_counts(x)` — sorted unique values and their counts.
+///
+/// Complex NaNs remain distinct. Malformed complex input is preserved with
+/// empty metadata; use `unique_with_options` for explicit error reporting.
 pub fn unique_counts(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
-    let (values, _, _, counts) = x.unique_with_info(false, false, true);
+    let (values, _, _, counts) = if x.dtype.is_complex() {
+        x.unique_with_options(None, false, false, true, false)
+            .unwrap_or_else(|_| (x.clone(), None, None, None))
+    } else {
+        x.unique_with_info(false, false, true)
+    };
     (
         values,
         counts.unwrap_or_else(|| UFuncArray {
@@ -47624,8 +47930,17 @@ pub fn unique_counts(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
 }
 
 /// `numpy.unique_inverse(x)` — sorted unique values and indices to reconstruct.
+///
+/// Complex NaNs remain distinct and inverse indices have the logical input
+/// shape. Malformed complex input is preserved with empty metadata; use
+/// `unique_with_options` for explicit error reporting.
 pub fn unique_inverse(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
-    let (values, _, inverse, _) = x.unique_with_info(false, true, false);
+    let (values, _, inverse, _) = if x.dtype.is_complex() {
+        x.unique_with_options(None, false, true, false, false)
+            .unwrap_or_else(|_| (x.clone(), None, None, None))
+    } else {
+        x.unique_with_info(false, true, false)
+    };
     (
         values,
         inverse.unwrap_or_else(|| UFuncArray {
@@ -47638,8 +47953,17 @@ pub fn unique_inverse(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
 }
 
 /// `numpy.unique_all(x)` — sorted unique values, first indices, inverse indices, and counts.
+///
+/// Complex NaNs remain distinct and inverse indices have the logical input
+/// shape. Malformed complex input is preserved with empty metadata; use
+/// `unique_with_options` for explicit error reporting.
 pub fn unique_all(x: &UFuncArray) -> (UFuncArray, UFuncArray, UFuncArray, UFuncArray) {
-    let (values, indices, inverse, counts) = x.unique_with_info(true, true, true);
+    let (values, indices, inverse, counts) = if x.dtype.is_complex() {
+        x.unique_with_options(None, true, true, true, false)
+            .unwrap_or_else(|_| (x.clone(), None, None, None))
+    } else {
+        x.unique_with_info(true, true, true)
+    };
     (
         values,
         indices.unwrap_or_else(|| UFuncArray {
