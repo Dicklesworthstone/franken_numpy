@@ -162,6 +162,26 @@ impl OracleBatch {
         self.actual.push(array.reduce_mean(axis, keepdims));
     }
 
+    fn push_single_statistic(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        operation: (&str, usize),
+        axis: Option<isize>,
+        keepdims: bool,
+    ) {
+        let (op, ddof) = operation;
+        self.cases.push(json!({
+            "input": input, "op": op, "axis": axis,
+            "keepdims": keepdims, "ddof": ddof,
+        }));
+        self.actual.push(match op {
+            "var" => array.reduce_var(axis, keepdims, ddof),
+            "std" => array.reduce_std(axis, keepdims, ddof),
+            _ => unreachable!("single-axis statistic"),
+        });
+    }
+
     fn push_with_dtype(
         &mut self,
         input: usize,
@@ -307,6 +327,110 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn default_variance_and_std_preserve_numpy_reduction_order() {
+    // Sequentially summing the mean used to invent a standard deviation of
+    // 262144 for this constant array; NumPy's pairwise mean is exactly 1e20.
+    let constant = UFuncArray::new(vec![129], vec![1.0e20; 129], DType::F64).unwrap();
+    assert_eq!(
+        constant.reduce_var(None, false, 0).unwrap().values(),
+        &[0.0]
+    );
+    assert_eq!(
+        constant.reduce_std(None, false, 0).unwrap().values(),
+        &[0.0]
+    );
+
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        for n in [7, 8, 127, 128, 129, 257] {
+            let offset = if dtype == DType::F16 { 16.0 } else { 1.0e5 };
+            let values: Vec<f64> = (0..2 * n)
+                .map(|index| offset + ((index * 17 % 31) as f64 - 15.0) * 0.03125)
+                .collect();
+            for shape in [vec![2, n], vec![n, 2], vec![2, n, 1]] {
+                let array = UFuncArray::new(shape.clone(), values.clone(), dtype).unwrap();
+                let input = batch.add_input(&array);
+                let all_axes: Vec<isize> = (0..shape.len()).map(|axis| axis as isize).collect();
+                for axis in [None, Some(0), Some(1), Some(-1)] {
+                    let axes = axis.map_or_else(|| all_axes.clone(), |axis| vec![axis]);
+                    for keepdims in [false, true] {
+                        for ddof in [0, 1, 2, 2 * n] {
+                            for op in ["var", "std"] {
+                                batch.push_single_statistic(
+                                    input,
+                                    &array,
+                                    (op, ddof),
+                                    axis,
+                                    keepdims,
+                                );
+                                batch.push(input, &array, op, &axes, keepdims, ddof);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let input = batch.add_input(&constant);
+    for axis in [None, Some(0), Some(-1)] {
+        for keepdims in [false, true] {
+            for op in ["var", "std"] {
+                batch.push_single_statistic(input, &constant, (op, 0), axis, keepdims);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn default_integer_variance_preserves_source_casts_and_conversion_buffers() {
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::I64(
+            (0..16_386)
+                .map(|index| (1_i64 << 53) + (index * 17 % 31) - 15)
+                .collect(),
+        ),
+        ArrayStorage::U64(
+            (0..16_386)
+                .map(|index| u64::MAX - (index * 17 % 31))
+                .collect(),
+        ),
+    ] {
+        for shape in [vec![2, 8193], vec![8193, 2]] {
+            let array = UFuncArray::from_storage(shape, storage.clone()).unwrap();
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1)] {
+                for keepdims in [false, true] {
+                    for ddof in [0, 1] {
+                        for op in ["var", "std"] {
+                            batch.push_single_statistic(input, &array, (op, ddof), axis, keepdims);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Numeric construction can retain an unnormalized working buffer. Both
+    // the mean and deviations must observe the declared storage, even for
+    // narrow integers and Boolean values without a wide-integer sidecar.
+    for dtype in [DType::Bool, DType::I8, DType::U8, DType::I16, DType::U16] {
+        let array = UFuncArray::new(vec![2, 3], vec![0.0, 1.2, 2.7, 0.0, 3.9, 4.1], dtype).unwrap();
+        let input = batch.add_input(&array);
+        for axis in [None, Some(0), Some(1)] {
+            let axes = axis.map_or_else(|| vec![0, 1], |axis| vec![axis]);
+            for keepdims in [false, true] {
+                for op in ["var", "std"] {
+                    batch.push_single_statistic(input, &array, (op, 0), axis, keepdims);
+                    batch.push(input, &array, op, &axes, keepdims, 0);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]

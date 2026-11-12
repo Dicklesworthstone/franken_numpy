@@ -10631,6 +10631,12 @@ impl UFuncArray {
         if matches!(self.dtype, DType::F32 | DType::F64) {
             return self.reduce_real_var_axes(axes, keepdims, ddof);
         }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            // Both the mean and deviations must read the declared source
+            // storage. A constructor's f64 working buffer can still contain
+            // fractional narrow integers or unnormalized Boolean values.
+            return self.reduce_var_axes_with_dtype(axes, keepdims, ddof, DType::F64);
+        }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         if out_dtype == DType::F16 {
             // Reuse the typed path so source values are rounded directly to
@@ -11477,86 +11483,16 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_var(axis, keepdims, ddof, None);
         }
-        if self.dtype == DType::F16 {
-            return self.reduce_var_with_dtype(axis, keepdims, ddof, DType::F16);
-        }
-        let out_dtype = promote_for_mean_reduction(self.dtype);
+        // A flattened reduction and the equivalent axis tuple must use the
+        // same mean and squared-deviation trees. The former sequential mean
+        // could invent a large variance even for a constant float64 array.
+        // The joint kernel also preserves typed integer conversion buffers and
+        // division by an integer count for float16/32 inputs.
         match axis {
+            Some(axis) => self.reduce_var_axes(&[axis], keepdims, ddof),
             None => {
-                let n = self.values.len();
-                let var = match out_dtype {
-                    DType::F32 => {
-                        let mean = (reduce_sum_values_f32(&self.values) as f32) / (n as f32);
-                        let sq: Vec<f64> = self
-                            .values
-                            .iter()
-                            .map(|&v| {
-                                let d = (v as f32) - mean;
-                                f64::from(d * d)
-                            })
-                            .collect();
-                        let sum_sq = reduce_sum_values_f32(&sq) as f32;
-                        let denom = n.saturating_sub(ddof) as f32;
-                        f64::from(sum_sq / denom)
-                    }
-                    _ => {
-                        let mean = self.values.iter().copied().sum::<f64>() / n as f64;
-                        let denom = n.saturating_sub(ddof) as f64;
-                        self.values
-                            .iter()
-                            .map(|&v| (v - mean) * (v - mean))
-                            .sum::<f64>()
-                            / denom
-                    }
-                };
-                let shape = if keepdims {
-                    vec![1; self.shape.len()]
-                } else {
-                    Vec::new()
-                };
-                Ok(Self {
-                    shape,
-                    values: vec![var],
-                    dtype: out_dtype,
-                    integer_sidecar: None,
-                })
-            }
-            Some(axis) => {
-                if out_dtype == DType::F32 {
-                    return self.reduce_var_axes(&[axis], keepdims, ddof);
-                }
-                let axis = normalize_axis(axis, self.shape.len())?;
-                let axis_len = self.shape[axis];
-                let out_shape = reduced_shape(&self.shape, axis, keepdims);
-                let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-
-                // First compute means along axis
-                let mut means = vec![0.0f64; out_count];
-                reduce_sum_axis_contiguous(&self.values, &self.shape, axis, &mut means);
-                for m in &mut means {
-                    *m /= axis_len as f64;
-                }
-
-                // Then compute sum of squared deviations
-                let mut var_values = vec![0.0f64; out_count];
-                reduce_var_axis_contiguous(
-                    &self.values,
-                    &self.shape,
-                    axis,
-                    &means,
-                    &mut var_values,
-                );
-                let divisor = axis_len.saturating_sub(ddof) as f64;
-                for v in &mut var_values {
-                    *v /= divisor;
-                }
-
-                Ok(Self {
-                    shape: out_shape,
-                    values: var_values,
-                    dtype: out_dtype,
-                    integer_sidecar: None,
-                })
+                let axes: Vec<isize> = (0..self.shape.len()).map(|axis| axis as isize).collect();
+                self.reduce_var_axes(&axes, keepdims, ddof)
             }
         }
     }
@@ -18824,6 +18760,33 @@ impl UFuncArray {
                 *mean = f64::from(*mean as f32);
             }
         }
+        if self.dtype == DType::F64
+            && axes.len() == 1
+            && plan.contiguous_run_len == 1
+            && !self.values.is_empty()
+        {
+            // Keep the allocation-free squared-deviation pass for a strided
+            // single axis. Independent output lanes accumulate in their
+            // original order, which is NumPy's order for this layout.
+            let axis = normalize_axis(axes[0], self.shape.len())?;
+            let axis_len = self.shape[axis];
+            let inner = element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+            let outer = self.values.len() / (axis_len * inner);
+            let mut values = vec![0.0; plan.output_count];
+            reduce_var_axis_simd(
+                &self.values,
+                &means,
+                axis_len,
+                inner,
+                outer,
+                &mut values,
+            );
+            let denominator = plan.reduction_count.saturating_sub(ddof) as f64;
+            for value in &mut values {
+                *value /= denominator;
+            }
+            return Self::new(plan.output_shape, values, self.dtype);
+        }
         let squared: Vec<f64> = self
             .values
             .iter()
@@ -22543,7 +22506,10 @@ impl UFuncArray {
         }
 
         if matches!(self.dtype, DType::F16 | DType::F32 | DType::F64)
-            && (dtype.is_integer() || dtype == DType::F16)
+            && (dtype.is_integer()
+                || dtype == DType::F16
+                || (self.dtype != DType::F64
+                    && matches!(dtype, DType::Bool | DType::F32 | DType::F64)))
         {
             // Materialize the destination's actual values before they
             // become the working buffer. Merely truncating to i64/u64 and
@@ -22552,11 +22518,14 @@ impl UFuncArray {
             // The typed bridge also quantizes F16/F32 inputs before conversion,
             // rounds directly to half after honoring the source precision,
             // and creates an exact sidecar when the destination needs one.
+            // Widening and truth conversion must observe that same source
+            // precision: a nonzero f64 working cell may already be zero in
+            // float16/32, or may have rounded to a different finite value.
             let converted = self
                 .to_storage()
                 .expect("real floating arrays have typed storage")
                 .cast_to(dtype)
-                .expect("real floating storage supports integer and half casts");
+                .expect("real floating storage supports real numeric casts");
             return Self::from_storage(self.shape.clone(), converted)
                 .expect("numeric casts preserve shape and element count");
         }
@@ -42851,49 +42820,6 @@ fn reduce_var_axis_simd(
         out.chunks_mut(inner)
             .enumerate()
             .for_each(|(o, ob)| reduce(o, 0, ob));
-    }
-}
-
-fn reduce_var_axis_contiguous(
-    values: &[f64],
-    shape: &[usize],
-    axis: usize,
-    means: &[f64],
-    out_values: &mut [f64],
-) {
-    debug_assert!(axis < shape.len());
-    if out_values.is_empty() {
-        return;
-    }
-
-    let axis_len = shape[axis];
-    if axis_len == 0 {
-        return;
-    }
-
-    let inner = shape[axis + 1..].iter().copied().product::<usize>();
-    let outer = shape[..axis].iter().copied().product::<usize>();
-
-    if inner > 1 {
-        reduce_var_axis_simd(values, means, axis_len, inner, outer, out_values);
-        return;
-    }
-
-    let mut out_flat = 0usize;
-    for outer_idx in 0..outer {
-        let base = outer_idx * axis_len * inner;
-        for inner_idx in 0..inner {
-            let mean = means[out_flat];
-            let mut sum_sq = 0.0f64;
-            let mut offset = base + inner_idx;
-            for _ in 0..axis_len {
-                let diff = values[offset] - mean;
-                sum_sq += diff * diff;
-                offset += inner;
-            }
-            out_values[out_flat] = sum_sq;
-            out_flat += 1;
-        }
     }
 }
 

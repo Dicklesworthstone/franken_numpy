@@ -1641,6 +1641,104 @@ fn complex_casts_reject_malformed_interleaved_layouts() {
 }
 
 #[test]
+fn infallible_float_casts_quantize_before_widening_and_testing_truth() {
+    take_float_error_events();
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for (dtype, original, rounded) in [
+        (DType::F16, 2047.75, 2048.0),
+        (DType::F32, 16_777_219.0, 16_777_220.0),
+    ] {
+        let source = UFuncArray::new(
+            vec![2, 3],
+            vec![original, 1.0e-100, -1.0e-100, 1.0e300, -0.0, f64::NAN],
+            dtype,
+        )
+        .unwrap();
+        let widened = source.astype(DType::F64);
+        assert_eq!(widened.shape(), &[2, 3]);
+        assert_eq!(widened.dtype(), DType::F64);
+        assert_eq!(
+            &widened.values()[..5],
+            &[rounded, 0.0, -0.0, f64::INFINITY, -0.0]
+        );
+        assert!(widened.values()[2].is_sign_negative());
+        assert!(widened.values()[4].is_sign_negative());
+        assert!(widened.values()[5].is_nan());
+        assert_eq!(
+            source.astype(DType::Bool).values(),
+            &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
+        );
+        // A same-dtype conversion remains a no-op on raw working values.
+        assert_eq!(
+            source
+                .astype(dtype)
+                .values()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            source
+                .values()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
+fn infallible_float_casts_and_array_requirements_match_numpy() {
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    let mut batch = OracleBatch::default();
+    let values = vec![
+        2047.75,
+        16_777_219.0,
+        1.0 + 2.0_f64.powi(-11),
+        2.0_f64.powi(-25),
+        2.0_f64.powi(-150),
+        1.0e-100,
+        -1.0e-100,
+        1.0e300,
+        -1.0e300,
+        0.0,
+        -0.0,
+        f64::NAN,
+    ];
+    for source_dtype in [DType::F16, DType::F32, DType::F64] {
+        for (shape, raw) in [
+            (vec![3, 4], values.clone()),
+            (vec![], vec![1.0e-100]),
+            (vec![2, 0, 3], vec![]),
+        ] {
+            let source = UFuncArray::new(shape, raw, source_dtype).unwrap();
+            let input = batch.add_input(&source);
+            for target in [DType::Bool, DType::F16, DType::F32, DType::F64] {
+                if target == source_dtype {
+                    continue;
+                }
+                for output in [
+                    source.astype(target),
+                    source.ascontiguousarray(Some(target)),
+                    source.asfortranarray(Some(target)),
+                    source.require(Some(target)),
+                ] {
+                    batch.cases.push(json!({
+                        "input": input,
+                        "op": "astype",
+                        "dtype": numpy_dtype(target),
+                        "axis": null,
+                        "keepdims": false,
+                        "ddof": 0,
+                    }));
+                    batch.actual.push(Ok(output));
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
 fn complex_same_dtype_casts_preserve_values_after_policy_and_layout_validation() {
     take_float_error_events();
     let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
