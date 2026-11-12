@@ -2,7 +2,8 @@
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
-    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, errstate, seterrcall,
+    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, UnaryOp, errstate, invert,
+    scimath_log, scimath_log2, scimath_log10, scimath_sqrt, seterrcall,
     take_float_error_events,
 };
 use serde_json::{Value, json};
@@ -1736,6 +1737,187 @@ fn infallible_float_casts_and_array_requirements_match_numpy() {
         }
     }
     batch.assert_matches_numpy();
+}
+
+#[test]
+fn scimath_complex_wrappers_preserve_pairs_precision_and_branch_cuts() {
+    type UnaryFunction = fn(&UFuncArray) -> Result<UFuncArray, UFuncError>;
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    let operations: [(UnaryFunction, [f64; 4]); 4] = [
+        (
+            scimath_sqrt,
+            [
+                std::f64::consts::FRAC_1_SQRT_2,
+                -std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                -1.0,
+            ],
+        ),
+        (scimath_log, [0.0, -half_pi, 0.0, -2.0 * half_pi]),
+        (
+            scimath_log2,
+            [
+                0.0,
+                -half_pi / std::f64::consts::LN_2,
+                0.0,
+                -2.0 * half_pi / std::f64::consts::LN_2,
+            ],
+        ),
+        (
+            scimath_log10,
+            [
+                0.0,
+                -half_pi / std::f64::consts::LN_10,
+                0.0,
+                -2.0 * half_pi / std::f64::consts::LN_10,
+            ],
+        ),
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = complex_array(&[1, 2], &[(0.0, -1.0), (-1.0, -0.0)], dtype);
+        let epsilon = if dtype == DType::Complex64 {
+            f64::from(f32::EPSILON)
+        } else {
+            f64::EPSILON
+        };
+        for (operation, expected) in operations {
+            let output = operation(&input).unwrap();
+            assert_eq!(output.shape(), &[1, 2, 2]);
+            assert_eq!(output.dtype(), dtype);
+            for (&actual, expected) in output.values().iter().zip(expected) {
+                if expected == 0.0 {
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                } else {
+                    assert!((actual - expected).abs() <= 8.0 * epsilon * expected.abs());
+                }
+            }
+        }
+    }
+    let rounded = complex_array(
+        &[],
+        &[(1.0 + 2.0_f64.powi(-24), 1.0e-100)],
+        DType::Complex64,
+    );
+    for (operation, expected) in [
+        (scimath_sqrt as UnaryFunction, 1.0),
+        (scimath_log, 0.0),
+        (scimath_log2, 0.0),
+        (scimath_log10, 0.0),
+    ] {
+        let output = operation(&rounded).unwrap();
+        assert_eq!(output.shape(), &[2]);
+        assert_eq!(output.dtype(), DType::Complex64);
+        assert_eq!(output.values(), &[expected, 0.0]);
+    }
+}
+
+#[test]
+fn scimath_complex_wrappers_validate_layout_and_propagate_error_policy() {
+    type UnaryFunction = fn(&UFuncArray) -> Result<UFuncArray, UFuncError>;
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let empty = complex_array(&[2, 0, 3], &[], dtype);
+        let malformed = UFuncArray::new(vec![3], vec![1.0; 3], dtype).unwrap();
+        for operation in [
+            scimath_sqrt as UnaryFunction,
+            scimath_log,
+            scimath_log2,
+            scimath_log10,
+        ] {
+            let output = operation(&empty).unwrap();
+            assert_eq!(output.shape(), &[2, 0, 3, 2]);
+            assert_eq!(output.dtype(), dtype);
+            assert!(output.values().is_empty());
+            assert!(operation(&malformed).is_err());
+        }
+        let zero = complex_array(&[], &[(0.0, -0.0)], dtype);
+        for operation in [scimath_log as UnaryFunction, scimath_log2, scimath_log10] {
+            assert!(matches!(
+                operation(&zero),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Divide,
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn fallible_invert_rejects_unsupported_types_and_preserves_exact_integers() {
+    for dtype in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let input = if dtype.is_complex() {
+            complex_array(&[1], &[(1.0, 2.0)], dtype)
+        } else {
+            UFuncArray::new(vec![1], vec![1.0], dtype).unwrap()
+        };
+        assert!(invert(&input).is_err(), "{dtype:?}");
+        let empty = if dtype.is_complex() {
+            complex_array(&[0], &[], dtype)
+        } else {
+            UFuncArray::new(vec![0], vec![], dtype).unwrap()
+        };
+        assert!(invert(&empty).is_err(), "empty {dtype:?}");
+    }
+    let values = vec![i64::MIN, -1, 0, (1_i64 << 53) + 1, i64::MAX];
+    let expected = values.iter().map(|&value| !value).collect();
+    let input = UFuncArray::from_storage(vec![5], ArrayStorage::I64(values)).unwrap();
+    let output = invert(&input).unwrap();
+    assert_eq!(output.shape(), &[5]);
+    assert_eq!(output.dtype(), DType::I64);
+    assert_eq!(output.to_storage().unwrap(), ArrayStorage::I64(expected));
+
+    let input = UFuncArray::from_storage(vec![2], ArrayStorage::Bool(vec![false, true])).unwrap();
+    for output in [
+        invert(&input).unwrap(),
+        input.try_elementwise_unary(UnaryOp::Invert).unwrap(),
+    ] {
+        assert_eq!(output.shape(), &[2]);
+        assert_eq!(output.dtype(), DType::Bool);
+        assert_eq!(output.values(), &[1.0, 0.0]);
+    }
+}
+
+#[test]
+fn complex_unary_rejects_real_only_operations_but_retains_rint() {
+    let operations = [
+        UnaryOp::Floor,
+        UnaryOp::Ceil,
+        UnaryOp::Trunc,
+        UnaryOp::Cbrt,
+        UnaryOp::Signbit,
+        UnaryOp::Fabs,
+        UnaryOp::Degrees,
+        UnaryOp::Radians,
+        UnaryOp::Invert,
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for input in [
+            complex_array(&[], &[(1.25, -2.5)], dtype),
+            complex_array(&[2], &[(1.25, -2.5), (0.0, 0.0)], dtype),
+            complex_array(&[0], &[], dtype),
+        ] {
+            for operation in operations {
+                assert!(
+                    input.try_elementwise_unary(operation).is_err(),
+                    "{dtype:?} {operation:?} {:?}",
+                    input.shape()
+                );
+            }
+        }
+        let input = complex_array(&[2], &[(2.5, -3.5), (-0.0, 0.0)], dtype);
+        let output = input.try_elementwise_unary(UnaryOp::Rint).unwrap();
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.values(), &[2.0, -4.0, -0.0, 0.0]);
+        assert!(output.values()[2].is_sign_negative());
+    }
 }
 
 #[test]

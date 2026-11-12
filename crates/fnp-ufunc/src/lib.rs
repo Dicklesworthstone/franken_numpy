@@ -8638,6 +8638,9 @@ impl UFuncArray {
     }
 
     pub fn try_elementwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+        if self.dtype == DType::Bool && op == UnaryOp::Invert {
+            return self.try_elementwise_unary(UnaryOp::LogicalNot);
+        }
         if let Some(result) = self.try_complex_logical_unary(op) {
             return result;
         }
@@ -8775,6 +8778,9 @@ impl UFuncArray {
                         | UnaryOp::Sqrt
                         | UnaryOp::Exp
                         | UnaryOp::Log
+                        | UnaryOp::Reciprocal
+                        | UnaryOp::Log2
+                        | UnaryOp::Log10
                 )
                 && let Ok((result, _)) = self.complex_unary_values(op)
             {
@@ -19239,21 +19245,39 @@ impl UFuncArray {
             UnaryOp::Isnan | UnaryOp::Isinf | UnaryOp::Isfinite | UnaryOp::LogicalNot => {
                 Some(self.complex_logical_predicate(op))
             }
-            UnaryOp::Positive | UnaryOp::Negative => Some(self.complex_signed_unary(op)),
+            UnaryOp::Positive | UnaryOp::Negative | UnaryOp::Round | UnaryOp::Rint => {
+                Some(self.complex_componentwise_unary(op))
+            }
             UnaryOp::Square
             | UnaryOp::Sign
             | UnaryOp::Sqrt
             | UnaryOp::Exp
-            | UnaryOp::Log => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
+            | UnaryOp::Log
+            | UnaryOp::Reciprocal
+            | UnaryOp::Log2
+            | UnaryOp::Log10 => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
                 dispatch_float_error_flags(flags, op.name())?;
                 Ok(array)
+            })),
+            UnaryOp::Floor
+            | UnaryOp::Ceil
+            | UnaryOp::Trunc
+            | UnaryOp::Cbrt
+            | UnaryOp::Signbit
+            | UnaryOp::Fabs
+            | UnaryOp::Degrees
+            | UnaryOp::Radians
+            | UnaryOp::Spacing
+            | UnaryOp::Invert
+            | UnaryOp::I0 => Some(Err(UFuncError::TypeResolutionInvalid {
+                detail: format!("ufunc '{}' not supported for complex input", op.name()),
             })),
             _ => None,
         }
     }
 
-    /// Preserve complete source-typed complex elements for unary signs.
-    fn complex_signed_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+    /// Preserve complete source-typed complex elements for signs and rounding.
+    fn complex_componentwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
         let _ = self.complex_logical_shape(op.name())?;
         let mut values = try_zeroed_f64(self.values.len(), op.name())?;
         for (index, output) in values.chunks_exact_mut(2).enumerate() {
@@ -19261,7 +19285,8 @@ impl UFuncArray {
             let result = match op {
                 UnaryOp::Positive => (real, imag),
                 UnaryOp::Negative => (-real, -imag),
-                _ => unreachable!("complex unary sign operation"),
+                UnaryOp::Round | UnaryOp::Rint => (real.round_ties_even(), imag.round_ties_even()),
+                _ => unreachable!("componentwise complex unary operation"),
             };
             output.copy_from_slice(&[result.0, result.1]);
         }
@@ -19533,6 +19558,130 @@ impl UFuncArray {
         }
     }
 
+    fn complex_unary_divide(
+        numerator: f64,
+        denominator: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> f64 {
+        let result = if dtype == DType::Complex64 {
+            f64::from((numerator as f32) / (denominator as f32))
+        } else {
+            numerator / denominator
+        };
+        if numerator.is_nan() || denominator.is_nan() {
+            return result;
+        }
+        if result.is_nan() {
+            flags.note(FloatErrorKind::Invalid);
+        } else if numerator.is_finite() && denominator == 0.0 {
+            flags.note(FloatErrorKind::Divide);
+        } else if numerator.is_finite() && denominator.is_finite() {
+            if result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            } else if numerator != 0.0
+                && result.abs() < Self::complex_unary_min_normal(dtype)
+            {
+                // A floating residual can itself underflow. Compare the exact
+                // binary significands of result * denominator and numerator;
+                // a product of two f64 significands fits in u128.
+                let split = |value: f64| {
+                    let bits = value.to_bits() & !(1_u64 << 63);
+                    let exponent = (bits >> 52) as i32;
+                    let fraction = bits & ((1_u64 << 52) - 1);
+                    if exponent == 0 {
+                        (u128::from(fraction), -1074)
+                    } else {
+                        (u128::from(fraction | (1_u64 << 52)), exponent - 1075)
+                    }
+                };
+                let (n, ne) = split(numerator);
+                let (q, qe) = split(result);
+                let (d, de) = split(denominator);
+                let product = q * d;
+                let inexact = if product == 0 {
+                    true
+                } else {
+                    let nt = n.trailing_zeros();
+                    let pt = product.trailing_zeros();
+                    (n >> nt) != (product >> pt) || ne + nt as i32 != qe + de + pt as i32
+                };
+                if inexact {
+                    flags.note(FloatErrorKind::Under);
+                }
+            }
+        }
+        result
+    }
+
+    fn complex_unary_reciprocal(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        // Normalize by the larger component instead of squaring magnitudes.
+        // Preserve NumPy's source-precision intermediate values, including
+        // denominator overflow and its invalid event for unordered NaNs.
+        if re.is_nan() || im.is_nan() {
+            flags.note(FloatErrorKind::Invalid);
+            return (f64::NAN, f64::NAN);
+        }
+        let real_dominant = im.abs() <= re.abs();
+        let (large, small) = if real_dominant { (re, im) } else { (im, re) };
+        let ratio = Self::complex_unary_divide(small, large, dtype, flags);
+        let product = Self::complex_unary_round(small * ratio, dtype);
+        Self::complex_unary_product_flags(flags, small, ratio, product, dtype);
+        let denominator = Self::complex_unary_round(large + product, dtype);
+        if large.is_finite() && product.is_finite() && denominator.is_infinite() {
+            flags.note(FloatErrorKind::Over);
+        }
+        if real_dominant {
+            (
+                Self::complex_unary_divide(1.0, denominator, dtype, flags),
+                Self::complex_unary_divide(-ratio, denominator, dtype, flags),
+            )
+        } else {
+            (
+                Self::complex_unary_divide(ratio, denominator, dtype, flags),
+                Self::complex_unary_divide(-1.0, denominator, dtype, flags),
+            )
+        }
+    }
+
+    fn complex_unary_log_base(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        scale: f64,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        let (real, imag) = Self::complex_unary_log(re, im, flags);
+        let real = Self::complex_unary_round(real, dtype);
+        let imag = Self::complex_unary_round(imag, dtype);
+        let scale = Self::complex_unary_round(scale, dtype);
+        // The natural logarithm is a separate source-precision stage. Its
+        // underflow survives even if base conversion scales the result back
+        // into the normal range.
+        if re.is_finite() && im.is_finite() {
+            let minimum = Self::complex_unary_min_normal(dtype);
+            if (re > 0.0 && im != 0.0 && imag.abs() < minimum)
+                || (re.abs().max(im.abs()) == 1.0
+                    && re.abs().min(im.abs()) != 0.0
+                    && real.abs() < minimum)
+            {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        let result = (
+            Self::complex_unary_round(real * scale, dtype),
+            Self::complex_unary_round(imag * scale, dtype),
+        );
+        Self::complex_unary_product_flags(flags, real, scale, result.0, dtype);
+        Self::complex_unary_product_flags(flags, imag, scale, result.1, dtype);
+        result
+    }
+
     fn complex_unary_log(re: f64, im: f64, flags: &mut FloatErrorFlags) -> (f64, f64) {
         let phase = im.atan2(re);
         if re.is_infinite() || im.is_infinite() {
@@ -19568,7 +19717,7 @@ impl UFuncArray {
     }
 
     fn complex_unary_values(&self, op: UnaryOp) -> Result<(Self, FloatErrorFlags), UFuncError> {
-        if !matches!(op, UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Square | UnaryOp::Sign | UnaryOp::LogicalNot | UnaryOp::Sqrt | UnaryOp::Exp | UnaryOp::Log) {
+        if !matches!(op, UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Square | UnaryOp::Sign | UnaryOp::LogicalNot | UnaryOp::Sqrt | UnaryOp::Exp | UnaryOp::Log | UnaryOp::Reciprocal | UnaryOp::Log2 | UnaryOp::Log10) {
             return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name())));
         }
         let logical_shape = self.complex_logical_shape(op.name())?;
@@ -19591,6 +19740,13 @@ impl UFuncArray {
                 UnaryOp::Sqrt => Self::complex_unary_sqrt(re, im, self.dtype),
                 UnaryOp::Exp => Self::complex_unary_exp(re, im, &mut flags),
                 UnaryOp::Log => Self::complex_unary_log(re, im, &mut flags),
+                UnaryOp::Reciprocal => Self::complex_unary_reciprocal(re, im, self.dtype, &mut flags),
+                UnaryOp::Log2 => Self::complex_unary_log_base(
+                    re, im, self.dtype, std::f64::consts::LOG2_E, &mut flags,
+                ),
+                UnaryOp::Log10 => Self::complex_unary_log_base(
+                    re, im, self.dtype, std::f64::consts::LOG10_E, &mut flags,
+                ),
                 _ => return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name()))),
             };
             let result = (
@@ -49996,6 +50152,9 @@ fn scimath_unary(x: &UFuncArray, f: impl Fn(f64) -> (f64, f64)) -> Result<UFuncA
 
 /// Complex-aware sqrt: returns complex result for negative inputs.
 pub fn scimath_sqrt(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Sqrt);
+    }
     scimath_unary(x, |v| {
         if v >= 0.0 {
             (v.sqrt(), 0.0)
@@ -50007,6 +50166,9 @@ pub fn scimath_sqrt(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware log: returns complex result for negative inputs.
 pub fn scimath_log(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Log);
+    }
     scimath_unary(x, |v| {
         if v > 0.0 {
             (v.ln(), 0.0)
@@ -50020,6 +50182,9 @@ pub fn scimath_log(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware log2: returns complex result for negative inputs.
 pub fn scimath_log2(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Log2);
+    }
     scimath_unary(x, |v| {
         if v > 0.0 {
             (v.log2(), 0.0)
@@ -50034,6 +50199,9 @@ pub fn scimath_log2(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware log10: returns complex result for negative inputs.
 pub fn scimath_log10(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Log10);
+    }
     scimath_unary(x, |v| {
         if v > 0.0 {
             (v.log10(), 0.0)
@@ -51564,7 +51732,7 @@ pub fn right_shift(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFunc
 /// Element-wise bitwise NOT (invert).
 /// NumPy equivalent: `np.invert(x)` or `np.bitwise_not(x)`.
 pub fn invert(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
-    Ok(x.elementwise_unary(UnaryOp::Invert))
+    x.try_elementwise_unary(UnaryOp::Invert)
 }
 
 /// Element-wise power (x1 ** x2).

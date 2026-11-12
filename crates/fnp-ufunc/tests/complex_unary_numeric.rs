@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-const OPS: [UnaryOp; 8] = [
+const OPS: [UnaryOp; 13] = [
     UnaryOp::Negative,
     UnaryOp::Positive,
     UnaryOp::Square,
@@ -18,6 +18,11 @@ const OPS: [UnaryOp; 8] = [
     UnaryOp::Sqrt,
     UnaryOp::Exp,
     UnaryOp::Log,
+    UnaryOp::Reciprocal,
+    UnaryOp::Log2,
+    UnaryOp::Log10,
+    UnaryOp::Round,
+    UnaryOp::Rint,
 ];
 
 fn complex(shape: &[usize], parts: &[(f64, f64)], dtype: DType) -> UFuncArray {
@@ -359,4 +364,66 @@ fn complex_unary_rejects_malformed_layouts_and_retains_real_logical_not() {
     assert_eq!(result.shape(), &[3]);
     assert_eq!(result.dtype(), DType::Bool);
     assert_eq!(result.values(), &[1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn complex_reciprocal_distinguishes_exact_subnormal_results_from_underflow() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (power, largest, smallest) = if dtype == DType::Complex64 {
+            (f64::from(2.0_f32.powi(127)), f64::from(f32::MAX), f64::from(f32::from_bits(1)))
+        } else {
+            (2.0_f64.powi(1023), f64::MAX, f64::from_bits(1))
+        };
+        for (real, imag) in [
+            (power, 0.0), (-power, -0.0), (0.0, power), (-0.0, -power),
+            (largest, 0.0), (0.0, largest), (largest, largest),
+            (largest, smallest), (smallest, largest), (smallest, smallest),
+        ] {
+            batch.push(&complex(&[], &[(real, imag)], dtype), UnaryOp::Reciprocal);
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_base_logarithms_retain_status_from_the_natural_logarithm() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let minimum = if dtype == DType::Complex64 {
+            f64::from(f32::MIN_POSITIVE)
+        } else {
+            f64::MIN_POSITIVE
+        };
+        for pair in [(1.0, 0.8 * minimum), (1.0, -0.8 * minimum),
+            (-1.0, 0.8 * minimum), (0.0, -0.0)] {
+            for op in [UnaryOp::Log2, UnaryOp::Log10] {
+                batch.push(&complex(&[], &[pair], dtype), op);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_reciprocal_reports_invalid_zero_and_retains_infallible_pairs() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = complex(&[2], &[(0.0, -0.0), (3.0, 4.0)], dtype);
+        let _errors = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+        assert!(matches!(input.try_elementwise_unary(UnaryOp::Reciprocal),
+            Err(UFuncError::FloatingPoint { kind: FloatErrorKind::Invalid, .. })));
+        let output = input.elementwise_unary(UnaryOp::Reciprocal);
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.shape(), input.shape());
+        assert!(output.values()[0].is_nan() && output.values()[1].is_nan());
+        let expected = if dtype == DType::Complex64 {
+            [f64::from(0.12_f32), f64::from(-0.16_f32)]
+        } else {
+            [0.12, -0.16]
+        };
+        assert_eq!(&output.values()[2..], &expected);
+        let events = take_float_error_events();
+        assert!(events.iter().any(|event| event.op == "reciprocal"
+            && event.kind == FloatErrorKind::Invalid && event.mode == FloatErrorMode::Raise));
+    }
 }
