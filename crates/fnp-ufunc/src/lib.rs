@@ -2720,11 +2720,23 @@ fn resolve_binary_output_dtype(
     validate_fixed_binary_signature(lhs, rhs, fixed_signature)?;
 
     let Some(signature) = fixed_signature else {
-        return Ok((
-            BinaryDispatchMethod::BuiltinPromoted,
-            promote(lhs.dtype(), rhs.dtype()),
-            None,
-        ));
+        let out_dtype = if lhs.dtype() == DType::Bool && rhs.dtype() == DType::Bool {
+            match ufunc_name.trim() {
+                "subtract" => {
+                    return Err(UFuncError::TypeResolutionInvalid {
+                        detail: "numpy boolean subtract is not supported; use bitwise_xor or logical_xor instead"
+                            .into(),
+                    });
+                }
+                "power" | "floor_divide" | "remainder" | "fmod" | "left_shift" | "right_shift" => {
+                    DType::I8
+                }
+                _ => DType::Bool,
+            }
+        } else {
+            promote(lhs.dtype(), rhs.dtype())
+        };
+        return Ok((BinaryDispatchMethod::BuiltinPromoted, out_dtype, None));
     };
 
     Ok((
@@ -6960,7 +6972,14 @@ impl UFuncArray {
                 *slot = op.apply(lhs.values[idx], rhs.values[idx]);
             }
         }
-        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+        lhs.finalize_binary_with_sidecar(
+            rhs,
+            op,
+            contract.out_shape.clone(),
+            values,
+            contract.out_dtype,
+            FloatErrorFlags::default(),
+        )
     }
 
     fn validate_elementwise_binary_partition_contract(
@@ -7068,7 +7087,14 @@ impl UFuncArray {
             Ok(())
         })?;
 
-        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+        lhs.finalize_binary_with_sidecar(
+            rhs,
+            op,
+            contract.out_shape.clone(),
+            values,
+            contract.out_dtype,
+            FloatErrorFlags::default(),
+        )
     }
 
     pub fn elementwise_binary_parallel(
@@ -7178,6 +7204,10 @@ impl UFuncArray {
                 || matches!(rhs.dtype, DType::DateTime64 | DType::TimeDelta64))
         {
             return self.elementwise_datetime_comparison(rhs, op);
+        }
+
+        if let Some(result) = self.try_integer_elementwise_binary(rhs, op, &out_shape, out_dtype)? {
+            return Ok(result);
         }
 
         if self.shape == rhs.shape {
@@ -8432,6 +8462,94 @@ impl UFuncArray {
         )
     }
 
+    /// Preserve exact integer sources and normalize narrow source dtypes before
+    /// converting to the resolved integer loop. No floating intermediate is used.
+    fn integer_binary_input(&self, dtype: DType) -> Result<IntegerSidecar, UFuncError> {
+        let source = self.to_storage()?;
+        let source = if source.dtype() == dtype {
+            source
+        } else {
+            source
+                .cast_to(dtype)
+                .map_err(|error| UFuncError::Msg(format!("integer loop cast failed: {error}")))?
+        };
+        Ok(match source {
+            ArrayStorage::Bool(v) => IntegerSidecar::I64(v.into_iter().map(i64::from).collect()),
+            ArrayStorage::I8(v) => IntegerSidecar::I64(v.into_iter().map(i64::from).collect()),
+            ArrayStorage::I16(v) => IntegerSidecar::I64(v.into_iter().map(i64::from).collect()),
+            ArrayStorage::I32(v) => IntegerSidecar::I64(v.into_iter().map(i64::from).collect()),
+            ArrayStorage::I64(v) => IntegerSidecar::I64(v),
+            ArrayStorage::U8(v) => IntegerSidecar::U64(v.into_iter().map(u64::from).collect()),
+            ArrayStorage::U16(v) => IntegerSidecar::U64(v.into_iter().map(u64::from).collect()),
+            ArrayStorage::U32(v) => IntegerSidecar::U64(v.into_iter().map(u64::from).collect()),
+            ArrayStorage::U64(v) => IntegerSidecar::U64(v),
+            _ => unreachable!("integer loop requires integral operands and output"),
+        })
+    }
+
+    fn try_integer_elementwise_binary(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        out_shape: &[usize],
+        out_dtype: DType,
+    ) -> Result<Option<Self>, UFuncError> {
+        if !(self.dtype.is_integer() || self.dtype == DType::Bool)
+            || !(rhs.dtype.is_integer() || rhs.dtype == DType::Bool)
+            || !(out_dtype.is_integer() || out_dtype == DType::Bool)
+            || !matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Power
+                    | BinaryOp::FloorDivide
+                    | BinaryOp::Remainder
+                    | BinaryOp::Fmod
+                    | BinaryOp::Minimum
+                    | BinaryOp::Maximum
+                    | BinaryOp::Fmin
+                    | BinaryOp::Fmax
+                    | BinaryOp::BitwiseAnd
+                    | BinaryOp::BitwiseOr
+                    | BinaryOp::BitwiseXor
+                    | BinaryOp::LeftShift
+                    | BinaryOp::RightShift
+            )
+        {
+            return Ok(None);
+        }
+        let lhs = self.integer_binary_input(out_dtype)?;
+        let rhs_values = rhs.integer_binary_input(out_dtype)?;
+        if op == BinaryOp::Power
+            && !out_shape.contains(&0)
+            && let IntegerSidecar::I64(values) = &rhs_values
+            && values.iter().any(|&value| value < 0)
+        {
+            return Err(UFuncError::Msg(
+                "Integers to negative integer powers are not allowed.".into(),
+            ));
+        }
+        // Wrapping integer loops have their own status semantics: division
+        // by zero and signed MIN / -1, never float-cast overflow/invalid.
+        let mut flags = FloatErrorFlags::default();
+        let output = binary_op_sidecar(
+            &lhs,
+            &rhs_values,
+            op,
+            out_dtype,
+            (out_shape, &self.shape, &rhs.shape),
+            &mut flags,
+        )
+        .ok_or_else(|| UFuncError::Msg("integer loop could not resolve its operands".into()))?;
+        dispatch_float_error_flags(flags, op.name())?;
+        let storage = match output {
+            IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+            IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+        };
+        Self::from_storage_with_dtype(out_shape.to_vec(), storage, out_dtype).map(Some)
+    }
+
     fn finalize_binary_with_sidecar(
         &self,
         rhs: &Self,
@@ -8439,54 +8557,23 @@ impl UFuncArray {
         out_shape: Vec<usize>,
         values: Vec<f64>,
         out_dtype: DType,
-        mut float_error_flags: FloatErrorFlags,
+        float_error_flags: FloatErrorFlags,
     ) -> Result<Self, UFuncError> {
-        let has_sidecar = self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some();
-        let needs_exact_int64 = has_sidecar
-            || (matches!(out_dtype, DType::I64 | DType::U64)
-                && (matches!(
-                    op,
-                    BinaryOp::BitwiseAnd
-                        | BinaryOp::BitwiseOr
-                        | BinaryOp::BitwiseXor
-                        | BinaryOp::LeftShift
-                        | BinaryOp::RightShift
-                ) || values.iter().any(|&v| {
-                    !v.is_finite()
-                        || v.abs() > (MAX_EXACT_F64_U64 as f64)
-                        || (out_dtype == DType::U64 && v < 0.0)
-                })));
-        if needs_exact_int64 && out_dtype.is_integer() {
-            // Exact 64-bit integer arithmetic wraps in two's-complement rather than
-            // overflowing/underflowing f64 (e.g. integer power/multiply above 2^53).
-            float_error_flags.over = false;
-            float_error_flags.under = false;
+        if let Some(result) = self.try_integer_elementwise_binary(rhs, op, &out_shape, out_dtype)? {
+            return Ok(result);
         }
+        let has_sidecar = self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some();
         dispatch_float_error_flags(float_error_flags, op.name())?;
-        if needs_exact_int64
+        if has_sidecar
+            && op.is_bool_output()
             && let (Some(l), Some(r)) = (
                 self.synthesized_integer_sidecar(op.name())?,
                 rhs.synthesized_integer_sidecar(op.name())?,
             )
+            && let Some(bool_vals) =
+                binary_bool_op_from_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
         {
-            if op.is_bool_output()
-                && let Some(bool_vals) =
-                    binary_bool_op_from_sidecar(&l, &r, op, &out_shape, &self.shape, &rhs.shape)
-            {
-                return Self::from_values_with_dtype(out_shape, bool_vals, DType::Bool);
-            }
-            if matches!(out_dtype, DType::I64 | DType::U64)
-                && let Some(sidecar) =
-                    binary_op_sidecar(&l, &r, op, out_dtype, &out_shape, &self.shape, &rhs.shape)
-            {
-                let exact_values = sidecar.as_f64_vec();
-                return Ok(Self {
-                    shape: out_shape,
-                    values: exact_values,
-                    dtype: out_dtype,
-                    integer_sidecar: Some(sidecar),
-                });
-            }
+            return Self::from_values_with_dtype(out_shape, bool_vals, DType::Bool);
         }
         Self::from_values_with_dtype(out_shape, values, out_dtype)
     }
@@ -42409,10 +42496,12 @@ fn eval_broadcast_pair<L: Copy, R: Copy, O: Copy>(
     lhs_orig_shape: &[usize],
     rhs_orig_shape: &[usize],
     default_out: O,
-    f: impl Fn(L, R) -> O,
+    mut f: impl FnMut(L, R) -> O,
 ) -> Option<Vec<O>> {
     let out_count = element_count(out_shape).ok()?;
-    let mut out_v = vec![default_out; out_count];
+    let mut out_v = Vec::new();
+    out_v.try_reserve_exact(out_count).ok()?;
+    out_v.resize(out_count, default_out);
     if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
         for ((slot, &a), &b) in out_v.iter_mut().zip(lhs_v).zip(rhs_v) {
             *slot = f(a, b);
@@ -42456,10 +42545,10 @@ fn binary_op_sidecar(
     rhs: &IntegerSidecar,
     op: BinaryOp,
     out_dtype: DType,
-    out_shape: &[usize],
-    lhs_orig_shape: &[usize],
-    rhs_orig_shape: &[usize],
+    shapes: (&[usize], &[usize], &[usize]),
+    flags: &mut FloatErrorFlags,
 ) -> Option<IntegerSidecar> {
+    let (out_shape, lhs_orig_shape, rhs_orig_shape) = shapes;
     if !matches!(
         op,
         BinaryOp::Add
@@ -42490,7 +42579,7 @@ fn binary_op_sidecar(
             lhs_orig_shape,
             rhs_orig_shape,
             0i64,
-            |a, b| apply_binary_op_i64(op, a, b),
+            |a, b| apply_integer_binary_i64(op, a, b, out_dtype, flags),
         )
         .map(IntegerSidecar::I64),
         (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => eval_broadcast_pair(
@@ -42500,7 +42589,7 @@ fn binary_op_sidecar(
             lhs_orig_shape,
             rhs_orig_shape,
             0u64,
-            |a, b| apply_binary_op_u64(op, a, b),
+            |a, b| apply_integer_binary_u64(op, a, b, flags),
         )
         .map(IntegerSidecar::U64),
         // Boolean operands synthesize signed sidecars, but promotion with a
@@ -42514,7 +42603,7 @@ fn binary_op_sidecar(
                 lhs_orig_shape,
                 rhs_orig_shape,
                 0u64,
-                |a, b| apply_binary_op_u64(op, a as u64, b),
+                |a, b| apply_integer_binary_u64(op, a as u64, b, flags),
             )
             .map(IntegerSidecar::U64)
         }
@@ -42526,7 +42615,7 @@ fn binary_op_sidecar(
                 lhs_orig_shape,
                 rhs_orig_shape,
                 0u64,
-                |a, b| apply_binary_op_u64(op, a, b as u64),
+                |a, b| apply_integer_binary_u64(op, a, b as u64, flags),
             )
             .map(IntegerSidecar::U64)
         }
@@ -42540,7 +42629,7 @@ fn binary_op_sidecar(
                 lhs_orig_shape,
                 rhs_orig_shape,
                 0i64,
-                |a, b| apply_binary_op_i64(op, a, b as i64),
+                |a, b| apply_integer_binary_i64(op, a, b as i64, out_dtype, flags),
             )
             .map(IntegerSidecar::I64)
         }
@@ -42554,7 +42643,7 @@ fn binary_op_sidecar(
                 lhs_orig_shape,
                 rhs_orig_shape,
                 0i64,
-                |a, b| apply_binary_op_i64(op, a as i64, b),
+                |a, b| apply_integer_binary_i64(op, a as i64, b, out_dtype, flags),
             )
             .map(IntegerSidecar::I64)
         }
@@ -42796,6 +42885,35 @@ fn i64_floor_remainder(a: i64, b: i64) -> i64 {
     }
 }
 
+fn apply_integer_binary_i64(
+    op: BinaryOp,
+    a: i64,
+    b: i64,
+    dtype: DType,
+    flags: &mut FloatErrorFlags,
+) -> i64 {
+    if matches!(
+        op,
+        BinaryOp::FloorDivide | BinaryOp::Remainder | BinaryOp::Fmod
+    ) {
+        if b == 0 {
+            flags.divide = true;
+        } else if op == BinaryOp::FloorDivide && b == -1 {
+            let minimum = match dtype {
+                DType::I8 => Some(i64::from(i8::MIN)),
+                DType::I16 => Some(i64::from(i16::MIN)),
+                DType::I32 => Some(i64::from(i32::MIN)),
+                DType::I64 => Some(i64::MIN),
+                _ => None,
+            };
+            if minimum == Some(a) {
+                flags.over = true;
+            }
+        }
+    }
+    apply_binary_op_i64(op, a, b)
+}
+
 fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
     match op {
         BinaryOp::Add => a.wrapping_add(b),
@@ -42832,6 +42950,17 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         }
         _ => 0,
     }
+}
+
+fn apply_integer_binary_u64(op: BinaryOp, a: u64, b: u64, flags: &mut FloatErrorFlags) -> u64 {
+    if matches!(
+        op,
+        BinaryOp::FloorDivide | BinaryOp::Remainder | BinaryOp::Fmod
+    ) && b == 0
+    {
+        flags.divide = true;
+    }
+    apply_binary_op_u64(op, a, b)
 }
 
 fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
@@ -96624,6 +96753,222 @@ print(json.dumps(rows))
 
         assert_eq!(writes_completed.load(Ordering::Relaxed), 100);
         assert_eq!(conversions_completed.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn integer_elementwise_broadcast_allocation_failure_is_recoverable() {
+        let result = super::eval_broadcast_pair(
+            &[1i64],
+            &[1i64],
+            &[usize::MAX],
+            &[1],
+            &[1],
+            0i64,
+            |_, _| panic!("impossible output capacity must fail before evaluation"),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn integer_elementwise_arithmetic_wraps_in_resolved_dtype() {
+        let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+        for (lhs, rhs, op, expected) in [
+            (
+                ArrayStorage::I32(vec![i32::MAX]),
+                ArrayStorage::I32(vec![i32::MAX]),
+                BinaryOp::Add,
+                ArrayStorage::I32(vec![-2]),
+            ),
+            (
+                ArrayStorage::I32(vec![i32::MAX]),
+                ArrayStorage::I32(vec![i32::MAX]),
+                BinaryOp::Mul,
+                ArrayStorage::I32(vec![1]),
+            ),
+            (
+                ArrayStorage::U16(vec![u16::MAX]),
+                ArrayStorage::U16(vec![u16::MAX]),
+                BinaryOp::Mul,
+                ArrayStorage::U16(vec![1]),
+            ),
+            (
+                ArrayStorage::U32(vec![u32::MAX]),
+                ArrayStorage::U32(vec![u32::MAX]),
+                BinaryOp::Mul,
+                ArrayStorage::U32(vec![1]),
+            ),
+            (
+                ArrayStorage::I32(vec![i32::MAX]),
+                ArrayStorage::I32(vec![1024]),
+                BinaryOp::Power,
+                ArrayStorage::I32(vec![1]),
+            ),
+            (
+                ArrayStorage::I64(vec![3_002_399_751_580_331]),
+                ArrayStorage::I64(vec![3]),
+                BinaryOp::Mul,
+                ArrayStorage::I64(vec![9_007_199_254_740_993]),
+            ),
+            (
+                ArrayStorage::Bool(vec![true]),
+                ArrayStorage::U64(vec![u64::MAX]),
+                BinaryOp::Add,
+                ArrayStorage::U64(vec![0]),
+            ),
+        ] {
+            let lhs = UFuncArray::from_storage(vec![1], lhs).unwrap();
+            let rhs = UFuncArray::from_storage(vec![1], rhs).unwrap();
+            let actual = lhs.elementwise_binary(&rhs, op).unwrap();
+            assert_eq!(actual.dtype(), expected.dtype(), "{op:?}");
+            assert_eq!(actual.to_storage().unwrap(), expected, "{op:?}");
+            assert_eq!(actual.values(), expected.to_f64_vec(), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn integer_elementwise_arithmetic_matches_live_numpy() {
+        let script = r#"
+import json
+import numpy as np
+dtypes = ['bool', 'int8', 'int16', 'int32', 'int64',
+          'uint8', 'uint16', 'uint32', 'uint64']
+ops = ['add', 'subtract', 'multiply', 'power', 'floor_divide',
+       'remainder', 'fmod', 'minimum', 'maximum', 'fmin', 'fmax',
+       'bitwise_and', 'bitwise_or', 'bitwise_xor', 'left_shift', 'right_shift']
+def values(dtype):
+    if dtype == 'bool':
+        return [False, True, True, False]
+    info = np.iinfo(dtype)
+    return [int(info.min), int(info.max), 3, -1 if info.min < 0 else int(info.max)-1]
+rows = []
+with np.errstate(all='ignore'):
+    for ld in dtypes:
+        for rd in dtypes:
+            for op in ops:
+                left = np.array(values(ld), dtype=ld)
+                right = np.array(values(rd), dtype=rd)
+                if op == 'power':
+                    right = np.array([0, 1, 2, 63], dtype=rd)
+                elif op in ('left_shift', 'right_shift'):
+                    right = np.array([0, 1, 32, 64], dtype=rd)
+                for broadcast in (False, True):
+                    a = left.reshape(4, 1) if broadcast else left
+                    b = right
+                    row = {'op': op, 'lhs_dtype': ld, 'rhs_dtype': rd,
+                           'lhs_shape': list(a.shape), 'rhs_shape': list(b.shape),
+                           'lhs': [str(int(v)) for v in a.flat],
+                           'rhs': [str(int(v)) for v in b.flat]}
+                    try:
+                        result = getattr(np, op)(a, b)
+                        if result.dtype.kind not in 'biu':
+                            continue
+                        row.update(dtype=str(result.dtype), shape=list(result.shape),
+                                   values=[str(int(v)) for v in result.flat])
+                    except (TypeError, ValueError) as exc:
+                        row['error'] = type(exc).__name__
+                    rows.append(row)
+print(json.dumps(rows))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", script])
+            .output()
+            .expect("NumPy integer arithmetic oracle should run");
+        assert!(
+            output.status.success(),
+            "NumPy integer arithmetic oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            rows.len() > 2000,
+            "integer dtype/promotion matrix is incomplete"
+        );
+        let shape = |row: &serde_json::Value| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect::<Vec<_>>()
+        };
+        let storage = |dtype: DType, values: &serde_json::Value| {
+            let values = values.as_array().unwrap();
+            let mut storage = ArrayStorage::zeros(dtype, values.len());
+            for (i, value) in values.iter().enumerate() {
+                storage
+                    .set_i128(i, value.as_str().unwrap().parse().unwrap())
+                    .unwrap();
+            }
+            storage
+        };
+        let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        for row in rows {
+            let op = match row["op"].as_str().unwrap() {
+                "add" => BinaryOp::Add,
+                "subtract" => BinaryOp::Sub,
+                "multiply" => BinaryOp::Mul,
+                "power" => BinaryOp::Power,
+                "floor_divide" => BinaryOp::FloorDivide,
+                "remainder" => BinaryOp::Remainder,
+                "fmod" => BinaryOp::Fmod,
+                "minimum" => BinaryOp::Minimum,
+                "maximum" => BinaryOp::Maximum,
+                "fmin" => BinaryOp::Fmin,
+                "fmax" => BinaryOp::Fmax,
+                "bitwise_and" => BinaryOp::BitwiseAnd,
+                "bitwise_or" => BinaryOp::BitwiseOr,
+                "bitwise_xor" => BinaryOp::BitwiseXor,
+                "left_shift" => BinaryOp::LeftShift,
+                "right_shift" => BinaryOp::RightShift,
+                _ => unreachable!("oracle lists known integer operations"),
+            };
+            let ld = DType::parse(row["lhs_dtype"].as_str().unwrap()).unwrap();
+            let rd = DType::parse(row["rhs_dtype"].as_str().unwrap()).unwrap();
+            let lhs = UFuncArray::from_storage(shape(&row["lhs_shape"]), storage(ld, &row["lhs"]))
+                .unwrap();
+            let rhs = UFuncArray::from_storage(shape(&row["rhs_shape"]), storage(rd, &row["rhs"]))
+                .unwrap();
+            let actual = lhs.elementwise_binary(&rhs, op);
+            if row.get("error").is_some() {
+                assert!(actual.is_err(), "expected NumPy rejection: {row}");
+                continue;
+            }
+            let actual = actual.unwrap_or_else(|error| panic!("{row}: {error}"));
+            let dtype = DType::parse(row["dtype"].as_str().unwrap()).unwrap();
+            assert_eq!(actual.dtype(), dtype, "{row}");
+            assert_eq!(actual.shape(), shape(&row["shape"]), "{row}");
+            assert_eq!(
+                actual.to_storage().unwrap(),
+                storage(dtype, &row["values"]),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_elementwise_partition_execution_preserves_wrapped_values() {
+        let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        let lhs =
+            UFuncArray::from_storage(vec![8, 1], ArrayStorage::I32(vec![i32::MAX; 8])).unwrap();
+        let rhs = UFuncArray::from_storage(vec![2], ArrayStorage::I32(vec![i32::MAX, 2])).unwrap();
+        let config = crate::ParallelPartitionConfig {
+            worker_count: 4,
+            min_elements_per_chunk: 1,
+        };
+        let contract = lhs
+            .plan_elementwise_binary_partitions(&rhs, BinaryOp::Add, config)
+            .unwrap();
+        let expected = ArrayStorage::I32([-2, i32::MIN + 1].repeat(8));
+        for actual in [
+            lhs.execute_elementwise_binary_partition_plan(&rhs, BinaryOp::Add, &contract)
+                .unwrap(),
+            lhs.execute_elementwise_binary_partition_plan_parallel(&rhs, BinaryOp::Add, &contract)
+                .unwrap(),
+            lhs.elementwise_binary_parallel(&rhs, BinaryOp::Add, config)
+                .unwrap(),
+        ] {
+            assert_eq!(actual.shape(), &[8, 2]);
+            assert_eq!(actual.to_storage().unwrap(), expected);
+        }
     }
 
     #[test]
