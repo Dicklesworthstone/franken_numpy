@@ -1,5 +1,159 @@
 use fnp_dtype::DType;
 use fnp_ufunc::{UFuncArray, UFuncError};
+use serde_json::{Value, json};
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+#[test]
+fn default_sum_preserves_numpy_contiguous_and_strided_order() {
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for len in [0, 1, 2, 8, 9, 127, 128, 129, 8193] {
+        for pattern in [
+            [1e16, 1.0, -1e16, 1.0],
+            [1e308, 1e308, -1e308, -1e308],
+            [-0.0; 4],
+            [f64::INFINITY, 1.0, f64::NEG_INFINITY, 2.0],
+        ] {
+            let values: Vec<f64> = (0..len * 2).map(|i| pattern[i % 4]).collect();
+            for shape in [vec![2, len], vec![len, 2]] {
+                let array = UFuncArray::new(shape.clone(), values.clone(), DType::F64).unwrap();
+                for axis in [None, Some(0), Some(-1)] {
+                    for keepdims in [false, true] {
+                        cases.push(json!({
+                            "shape": shape, "axis": axis, "keepdims": keepdims,
+                            "values": values.iter().map(f64::to_string).collect::<Vec<_>>(),
+                        }));
+                        actual.push(array.reduce_sum(axis, keepdims).unwrap());
+                    }
+                }
+            }
+        }
+    }
+    let script = r#"
+import json, sys, warnings
+import numpy as np
+out = []
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    for case in json.load(sys.stdin):
+        a = np.array(case['values'], dtype=np.float64).reshape(case['shape'])
+        result = np.asarray(np.sum(a, axis=case['axis'], keepdims=case['keepdims']))
+        out.append({'shape': list(result.shape), 'bits': result.reshape(-1).view(np.uint64).tolist()})
+print(json.dumps(out))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch NumPy sum oracle");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&cases).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            json!(actual.shape()),
+            expected["shape"],
+            "case {index} shape"
+        );
+        assert_eq!(actual.dtype(), DType::F64);
+        let bits = expected["bits"].as_array().unwrap();
+        assert_eq!(actual.values().len(), bits.len(), "case {index} length");
+        for (&value, bits) in actual.values().iter().zip(bits) {
+            let bits = bits.as_u64().unwrap();
+            assert!(
+                value.to_bits() == bits || (value.is_nan() && f64::from_bits(bits).is_nan()),
+                "case {index}: sum {value:?}, NumPy {:?}",
+                f64::from_bits(bits)
+            );
+        }
+    }
+}
+
+#[test]
+fn default_arithmetic_reductions_accept_scalar_axis_aliases() {
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::U32,
+        DType::I64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+    ] {
+        let scalar = UFuncArray::scalar(1.0, dtype);
+        for axis in [Some(0), Some(-1)] {
+            for keepdims in [false, true] {
+                for result in [
+                    scalar.reduce_sum(axis, keepdims),
+                    scalar.reduce_prod(axis, keepdims),
+                ] {
+                    let result = result.expect("NumPy accepts axis 0 and -1 for scalar sum/prod");
+                    assert!(result.shape().is_empty());
+                    assert_eq!(result.values(), &[1.0]);
+                }
+            }
+        }
+        assert!(scalar.reduce_sum(Some(1), false).is_err());
+        assert!(scalar.reduce_prod(Some(-2), false).is_err());
+    }
+}
+
+#[test]
+fn default_arithmetic_reductions_validate_empty_output_shapes() {
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+    ] {
+        let impossible = UFuncArray::new(vec![0, usize::MAX], Vec::new(), dtype).unwrap();
+        for result in [
+            impossible.reduce_sum(Some(0), false),
+            impossible.reduce_prod(Some(0), true),
+        ] {
+            assert!(matches!(
+                result,
+                Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+            ));
+        }
+        let empty = UFuncArray::new(vec![0, 1, usize::MAX, 2], Vec::new(), dtype).unwrap();
+        for keepdims in [false, true] {
+            for result in [
+                empty.reduce_sum(Some(1), keepdims),
+                empty.reduce_prod(Some(1), keepdims),
+            ] {
+                let result =
+                    result.expect("empty output does not calculate unused stride products");
+                assert!(result.values().is_empty());
+                assert_eq!(
+                    result.shape(),
+                    if keepdims {
+                        &[0, 1, usize::MAX, 2][..]
+                    } else {
+                        &[0, usize::MAX, 2][..]
+                    }
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn test_strided_backwards() -> Result<(), UFuncError> {
@@ -151,4 +305,53 @@ fn integer_power_rejects_negative_exponents_only_for_evaluated_elements() {
         assert_eq!(result.dtype(), dtype);
         assert!(result.values().is_empty());
     }
+}
+
+#[test]
+fn masked_f64_sum_preserves_true_run_boundaries() -> Result<(), UFuncError> {
+    // NumPy sums each contiguous true-mask run separately. The first
+    // seven-element run is linear; the second eight-element run is pairwise.
+    let row = [1e16, 1.0, -1e16, 1.0, 1.0, 1.0, 1.0, 1.0];
+    let array = UFuncArray::new(vec![2, 8], row.repeat(2), DType::F64)?;
+    let mut selected = vec![1.0; 16];
+    selected[7] = 0.0;
+    let mask = UFuncArray::new(vec![2, 8], selected, DType::Bool)?;
+    for keepdims in [false, true] {
+        let all = array.reduce_sum_where(&mask, None, keepdims)?;
+        assert_eq!(all.values(), &[8.0]);
+        let rows = array.reduce_sum_where(&mask, Some(-1), keepdims)?;
+        assert_eq!(rows.values(), &[4.0, 4.0]);
+        let columns = array.reduce_sum_where(&mask, Some(0), keepdims)?;
+        assert_eq!(
+            columns.values(),
+            &[2e16, 2.0, -2e16, 2.0, 2.0, 2.0, 2.0, 1.0]
+        );
+        assert_eq!(all.shape(), if keepdims { &[1, 1][..] } else { &[][..] });
+        assert_eq!(rows.shape(), if keepdims { &[2, 1][..] } else { &[2][..] });
+    }
+    let empty = UFuncArray::new(vec![0, 2], vec![], DType::F64)?;
+    let include = UFuncArray::scalar(1.0, DType::Bool);
+    assert_eq!(
+        empty.reduce_sum_where(&include, Some(0), false)?.values(),
+        &[0.0, 0.0]
+    );
+    assert!(
+        empty
+            .reduce_sum_where(&include, Some(1), false)?
+            .values()
+            .is_empty()
+    );
+    let scalar = UFuncArray::scalar(3.0, DType::F64);
+    for axis in [None, Some(0), Some(-1)] {
+        assert_eq!(
+            scalar.reduce_sum_where(&include, axis, false)?.values(),
+            &[3.0]
+        );
+    }
+    let exclude = UFuncArray::scalar(0.0, DType::Bool);
+    assert_eq!(
+        array.reduce_sum_where(&exclude, None, false)?.values(),
+        &[0.0]
+    );
+    Ok(())
 }

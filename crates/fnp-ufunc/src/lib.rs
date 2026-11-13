@@ -50,6 +50,8 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+// Historical threshold for choosing the strided scalar loop over SIMD.
+// Both paths now preserve NumPy's left-to-right order without compensation.
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -8896,7 +8898,28 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_sum_prod(axis, keepdims, self.dtype, false);
         }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        if self.values.is_empty()
+            && (self.dtype.is_integer()
+                || matches!(
+                    self.dtype,
+                    DType::Bool | DType::F16 | DType::F32 | DType::F64
+                ))
+        {
+            // A zero-sized input can carry unused extents whose product, or
+            // reduced output capacity, is not representable. The joint plan
+            // validates those before any allocation or stride calculation.
+            let axes: Vec<isize> = match axis {
+                Some(axis) => vec![axis],
+                None => (0..self.shape.len()).map(|axis| axis as isize).collect(),
+            };
+            return self.reduce_sum_axes_with_dtype(&axes, keepdims, out_dtype);
+        }
         // Carry an exact i64/u64 sidecar for ALL integer inputs (incl. narrow ints
         // NumPy widens to int64/uint64). Fold with wrapping arithmetic so an
         // overflowing integer sum matches NumPy's wraparound accumulator instead of
@@ -9166,9 +9189,9 @@ impl UFuncArray {
     ) -> f64 {
         const CONVERSION_BUFFER_LEN: usize = 8192;
 
-        // Match DOUBLE_pairwise_sum in NumPy's loops_utils.h.src. The generic
-        // legacy f64 reducer uses a different summation order, so keep this
-        // conversion-loop kernel separate from the existing default API.
+        // Match DOUBLE_pairwise_sum in NumPy's loops_utils.h.src. Default
+        // contiguous f64 sums share this kernel; converted accumulators also
+        // preserve NumPy's conversion-buffer boundaries.
         fn pairwise_sum_f64(values: &[f64]) -> f64 {
             let n = values.len();
             if n < 8 {
@@ -9665,7 +9688,25 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_sum_prod(axis, keepdims, self.dtype, true);
         }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        if self.values.is_empty()
+            && (self.dtype.is_integer()
+                || matches!(
+                    self.dtype,
+                    DType::Bool | DType::F16 | DType::F32 | DType::F64
+                ))
+        {
+            let axes: Vec<isize> = match axis {
+                Some(axis) => vec![axis],
+                None => (0..self.shape.len()).map(|axis| axis as isize).collect(),
+            };
+            return self.reduce_prod_axes_with_dtype(&axes, keepdims, out_dtype);
+        }
         // Carry an exact i64/u64 sidecar for ALL integer inputs (incl. narrow ints
         // NumPy widens to int64/uint64). A product overflows almost immediately, so
         // folding the sidecar with wrapping arithmetic is essential: the old f64
@@ -10170,28 +10211,29 @@ impl UFuncArray {
         if self.dtype.is_complex() {
             return self.reduce_complex_mean(axis, keepdims, self.dtype);
         }
-        if self.dtype == DType::F16 {
-            // The default half mean reads rounded half inputs through NumPy's
-            // f32 conversion buffers and rounds the final f32 mean back to half.
-            return Ok(self
-                .reduce_mean_with_dtype(axis, keepdims, DType::F32)?
-                .astype(DType::F16));
+        if self.dtype.is_integer()
+            || matches!(
+                self.dtype,
+                DType::Bool | DType::F16 | DType::F32 | DType::F64
+            )
+        {
+            // Single-axis and flattened means share NumPy's pairwise runs,
+            // typed source conversion, and integer count with tuple means.
+            // Casting a large count to f32 first changes the final quotient;
+            // a legacy linear/compensated sum also changes the reduction tree.
+            return match axis {
+                Some(axis) => self.reduce_mean_axes(&[axis], keepdims),
+                None => {
+                    let axes: Vec<isize> =
+                        (0..self.shape.len()).map(|axis| axis as isize).collect();
+                    self.reduce_mean_axes(&axes, keepdims)
+                }
+            };
         }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
-                let mean = match out_dtype {
-                    DType::F32 => {
-                        let n = self.values.len() as f32;
-                        let sum = reduce_sum_values_f32(&self.values) as f32;
-                        f64::from(sum / n)
-                    }
-                    _ => {
-                        let n = self.values.len() as f64;
-                        let sum = reduce_sum_values(&self.values);
-                        sum / n
-                    }
-                };
+                let mean = reduce_sum_values(&self.values) / self.values.len() as f64;
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -10209,31 +10251,10 @@ impl UFuncArray {
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
-                match out_dtype {
-                    DType::F32 => {
-                        let axis_len = self.shape[axis] as f32;
-                        reduce_sum_axis_contiguous_f32(
-                            &self.values,
-                            &self.shape,
-                            axis,
-                            &mut out_values,
-                        );
-                        for v in &mut out_values {
-                            *v = f64::from((*v as f32) / axis_len);
-                        }
-                    }
-                    _ => {
-                        let axis_len = self.shape[axis] as f64;
-                        reduce_sum_axis_contiguous(
-                            &self.values,
-                            &self.shape,
-                            axis,
-                            &mut out_values,
-                        );
-                        for v in &mut out_values {
-                            *v /= axis_len;
-                        }
-                    }
+                let axis_len = self.shape[axis] as f64;
+                reduce_sum_axis_contiguous(&self.values, &self.shape, axis, &mut out_values);
+                for v in &mut out_values {
+                    *v /= axis_len;
                 }
 
                 Ok(Self {
@@ -10869,7 +10890,51 @@ impl UFuncArray {
             dtype: self.dtype,
             integer_sidecar: masked_sidecar,
         };
-        masked.reduce_sum(axis, keepdims)
+        let mut result = masked.reduce_sum(axis, keepdims)?;
+        if self.dtype != DType::F64 || self.values.is_empty() {
+            return Ok(result);
+        }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
+        let lane_len = match axis {
+            None => self.values.len(),
+            Some(axis) => {
+                let axis = normalize_axis(axis, self.shape.len())?;
+                let inner = element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+                if inner != 1 {
+                    return Ok(result);
+                }
+                self.shape[axis]
+            }
+        };
+        // NumPy's where loop invokes the sum kernel once per unmasked run.
+        // Replacing masked values with zero changes the pairwise tree.
+        for ((values, selected), output) in self
+            .values
+            .chunks(lane_len)
+            .zip(mask.values.chunks(lane_len))
+            .zip(&mut result.values)
+        {
+            let mut sum = 0.0;
+            let mut index = 0;
+            while index < lane_len {
+                while index < lane_len && selected[index] == 0.0 {
+                    index += 1;
+                }
+                let start = index;
+                while index < lane_len && selected[index] != 0.0 {
+                    index += 1;
+                }
+                if start != index {
+                    sum += reduce_sum_values(&values[start..index]);
+                }
+            }
+            *output = sum;
+        }
+        Ok(result)
     }
 
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
@@ -13486,7 +13551,11 @@ impl UFuncArray {
             }
         };
         let mut values = try_zeroed_f64(
-            if return_indices { count } else { self.values.len() },
+            if return_indices {
+                count
+            } else {
+                self.values.len()
+            },
             operation,
         )?;
 
@@ -14412,7 +14481,11 @@ impl UFuncArray {
             return Err(UFuncError::Msg(format!("{operation}: kth out of bounds")));
         }
         let mut values = try_zeroed_f64(
-            if return_indices { count } else { self.values.len() },
+            if return_indices {
+                count
+            } else {
+                self.values.len()
+            },
             operation,
         )?;
         if count != 0 {
@@ -18875,14 +18948,7 @@ impl UFuncArray {
             let inner = element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
             let outer = self.values.len() / (axis_len * inner);
             let mut values = vec![0.0; plan.output_count];
-            reduce_var_axis_simd(
-                &self.values,
-                &means,
-                axis_len,
-                inner,
-                outer,
-                &mut values,
-            );
+            reduce_var_axis_simd(&self.values, &means, axis_len, inner, outer, &mut values);
             let denominator = plan.reduction_count.saturating_sub(ddof) as f64;
             for value in &mut values {
                 *value /= denominator;
@@ -19458,8 +19524,12 @@ impl UFuncArray {
                     a.mul_add(b, c) != result
                 } else {
                     const SCALE: f64 = f64::from_bits((1023 + 600) << 52);
-                    let (a, b, c, target) =
-                        (a * SCALE, b * SCALE, c * SCALE * SCALE, result * SCALE * SCALE);
+                    let (a, b, c, target) = (
+                        a * SCALE,
+                        b * SCALE,
+                        c * SCALE * SCALE,
+                        result * SCALE * SCALE,
+                    );
                     let product = a * b;
                     let sum = product + c;
                     if product.is_finite() && sum.is_finite() {
@@ -19545,9 +19615,7 @@ impl UFuncArray {
         let minimum = Self::complex_unary_min_normal(dtype);
         if magnitude < minimum && re != 0.0 && im != 0.0 {
             const SCALE: f64 = f64::from_bits((1023 + 80) << 52);
-            if dtype == DType::Complex128
-                || (re * SCALE).hypot(im * SCALE) != magnitude * SCALE
-            {
+            if dtype == DType::Complex128 || (re * SCALE).hypot(im * SCALE) != magnitude * SCALE {
                 flags.note(FloatErrorKind::Under);
             }
         }
@@ -19576,9 +19644,19 @@ impl UFuncArray {
         }
         if re.is_infinite() {
             return if re.is_sign_positive() {
-                (f64::INFINITY, if im.is_nan() { im } else { 0.0_f64.copysign(im) })
+                (
+                    f64::INFINITY,
+                    if im.is_nan() {
+                        im
+                    } else {
+                        0.0_f64.copysign(im)
+                    },
+                )
             } else {
-                (if im.is_nan() { im } else { 0.0 }, f64::INFINITY.copysign(im))
+                (
+                    if im.is_nan() { im } else { 0.0 },
+                    f64::INFINITY.copysign(im),
+                )
             };
         }
         if re.is_nan() || im.is_nan() {
@@ -19593,7 +19671,11 @@ impl UFuncArray {
         let (a, b, root_scale) = if largest > f64::MAX / 4.0 {
             (re * 0.25, im * 0.25, 2.0)
         } else if largest < f64::MIN_POSITIVE * 4.0 {
-            (re * 18014398509481984.0, im * 18014398509481984.0, 1.0 / 134217728.0)
+            (
+                re * 18014398509481984.0,
+                im * 18014398509481984.0,
+                1.0 / 134217728.0,
+            )
         } else {
             (re, im, 1.0)
         };
@@ -19654,7 +19736,11 @@ impl UFuncArray {
             // A power-of-two split avoids rounding the exponent before exp.
             let scale = (re * 0.25).exp();
             let component = |value: f64| {
-                if value == 0.0 { value } else { (((value * scale) * scale) * scale) * scale }
+                if value == 0.0 {
+                    value
+                } else {
+                    (((value * scale) * scale) * scale) * scale
+                }
             };
             (component(cos), component(sin))
         } else {
@@ -19803,9 +19889,7 @@ impl UFuncArray {
         } else if numerator.is_finite() && denominator.is_finite() {
             if result.is_infinite() {
                 flags.note(FloatErrorKind::Over);
-            } else if numerator != 0.0
-                && result.abs() < Self::complex_unary_min_normal(dtype)
-            {
+            } else if numerator != 0.0 && result.abs() < Self::complex_unary_min_normal(dtype) {
                 // A floating residual can itself underflow. Compare the exact
                 // binary significands of result * denominator and numerator;
                 // a product of two f64 significands fits in u128.
@@ -32505,14 +32589,11 @@ impl UFuncArray {
         Ok((values, indices, inverse, counts))
     }
 
-    fn unique_checked_metadata(
-        shape: Vec<usize>,
-        source: &[usize],
-    ) -> Result<Self, UFuncError> {
+    fn unique_checked_metadata(shape: Vec<usize>, source: &[usize]) -> Result<Self, UFuncError> {
         let mut values = Vec::new();
-        values.try_reserve_exact(source.len()).map_err(|_| {
-            UFuncError::Msg("unique: unable to allocate integer metadata".into())
-        })?;
+        values
+            .try_reserve_exact(source.len())
+            .map_err(|_| UFuncError::Msg("unique: unable to allocate integer metadata".into()))?;
         for &value in source {
             values.push(i64::try_from(value).map_err(|_| {
                 UFuncError::Msg("unique: integer metadata exceeds int64 range".into())
@@ -32567,12 +32648,12 @@ impl UFuncArray {
                 UFuncError::Msg("unique: unable to allocate sorting indices".into())
             })?;
             order.extend(0..axis_len);
-            first_indices.try_reserve_exact(axis_len).map_err(|_| {
-                UFuncError::Msg("unique: unable to allocate group indices".into())
-            })?;
-            counts.try_reserve_exact(axis_len).map_err(|_| {
-                UFuncError::Msg("unique: unable to allocate group counts".into())
-            })?;
+            first_indices
+                .try_reserve_exact(axis_len)
+                .map_err(|_| UFuncError::Msg("unique: unable to allocate group indices".into()))?;
+            counts
+                .try_reserve_exact(axis_len)
+                .map_err(|_| UFuncError::Msg("unique: unable to allocate group counts".into()))?;
 
             order.sort_by(|&lhs, &rhs| {
                 for outer_index in 0..outer {
@@ -32595,12 +32676,10 @@ impl UFuncArray {
                     for outer_index in 0..outer {
                         let base = outer_index * axis_len * inner;
                         for inner_index in 0..inner {
-                            let lhs = self.complex_extrema_value(
-                                base + representative * inner + inner_index,
-                            );
-                            let rhs = self.complex_extrema_value(
-                                base + original_index * inner + inner_index,
-                            );
+                            let lhs = self
+                                .complex_extrema_value(base + representative * inner + inner_index);
+                            let rhs = self
+                                .complex_extrema_value(base + original_index * inner + inner_index);
                             let both_nan = (lhs.0.is_nan() || lhs.1.is_nan())
                                 && (rhs.0.is_nan() || rhs.1.is_nan());
                             if lhs != rhs && !(axis.is_none() && equal_nan && both_nan) {
@@ -32628,7 +32707,11 @@ impl UFuncArray {
         // NumPy 2.4's value-only hash path retains the first input NaN before
         // sorting the unique values. Requesting any metadata uses the sorted
         // path instead, whose representative is the minimum complex NaN class.
-        if axis.is_none() && equal_nan && !return_index && !return_inverse && !return_counts
+        if axis.is_none()
+            && equal_nan
+            && !return_index
+            && !return_inverse
+            && !return_counts
             && let Some(first_nan) = (0..count).find(|&index| {
                 let (re, im) = self.complex_extrema_value(index);
                 re.is_nan() || im.is_nan()
@@ -32660,12 +32743,10 @@ impl UFuncArray {
         for outer_index in 0..outer {
             for (new_index, &original_index) in first_indices.iter().enumerate() {
                 for inner_index in 0..inner {
-                    let source = outer_index * axis_len * inner
-                        + original_index * inner
-                        + inner_index;
-                    let target = outer_index * unique_count * inner
-                        + new_index * inner
-                        + inner_index;
+                    let source =
+                        outer_index * axis_len * inner + original_index * inner + inner_index;
+                    let target =
+                        outer_index * unique_count * inner + new_index * inner + inner_index;
                     let (re, im) = self.complex_extrema_value(source);
                     values[target * components] = re;
                     if components == 2 {
@@ -33883,6 +33964,38 @@ impl UFuncArray {
         (arr, nan_counts)
     }
 
+    // Return the logical output count after checking physical capacity. A
+    // full reduction always has one output, so a zero count implies an
+    // explicit axis; callers can use its tuple spelling to skip unused
+    // strides while retaining the tuple kernels' dtype/error validation.
+    fn validate_nan_reduction_capacity(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+    ) -> Result<usize, UFuncError> {
+        let shape = self.complex_logical_shape("NaN reduction")?;
+        let output_shape = match axis {
+            Some(0 | -1) if shape.is_empty() => Vec::new(),
+            Some(axis) => reduced_shape(&shape, normalize_axis(axis, shape.len())?, false),
+            None => Vec::new(),
+        };
+        // Empty inputs can have huge unused extents. They must not request an
+        // impossible output or valid-count buffer before a later dtype/shape
+        // check gets a chance to run. Every working component occupies f64
+        // bytes even when the declared result dtype is narrower.
+        let output_count = if output_shape.contains(&0) {
+            0
+        } else {
+            element_count(&output_shape).map_err(UFuncError::Shape)?
+        };
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        output_count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        Ok(output_count)
+    }
+
     fn nan_empty_axis_result(
         &self,
         axis: usize,
@@ -34052,6 +34165,9 @@ impl UFuncArray {
         keepdims: bool,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        if self.validate_nan_reduction_capacity(axis, dtype)? == 0 {
+            return self.nansum_axes_with_dtype(axis.as_slice(), keepdims, dtype);
+        }
         if self.dtype.is_complex() {
             return self
                 .complex_nan_filtered_fill(0.0)?
@@ -34066,6 +34182,16 @@ impl UFuncArray {
 
     /// `np.nansum` — sum ignoring NaN values.
     pub fn nansum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        // Like sum(), NumPy permits axis=0/-1 on a scalar. This applies to
+        // every numeric dtype, including the integer no-mask path below.
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
+        if self.validate_nan_reduction_capacity(axis, promote_for_sum_reduction(self.dtype))? == 0 {
+            return self.nansum_axes(axis.as_slice(), keepdims);
+        }
         if self.dtype.is_complex() {
             return self
                 .complex_nan_filtered_fill(0.0)?
@@ -34138,10 +34264,15 @@ impl UFuncArray {
         keepdims: bool,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        if !(self.dtype.is_integer() || self.dtype == DType::Bool) {
+            self.validate_nan_statistical_dtype(dtype, "nanmean")?;
+        }
+        if self.validate_nan_reduction_capacity(axis, dtype)? == 0 {
+            return self.nanmean_axes_with_dtype(axis.as_slice(), keepdims, dtype);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_mean_with_dtype(axis, keepdims, dtype);
         }
-        self.validate_nan_statistical_dtype(dtype, "nanmean")?;
         let counts = self.nan_reduction_counts(axis)?;
         Ok(self
             .nansum_with_dtype(axis, keepdims, dtype)?
@@ -34150,12 +34281,24 @@ impl UFuncArray {
 
     /// `np.nanmean` — mean ignoring NaN values.
     pub fn nanmean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.validate_nan_reduction_capacity(axis, promote_for_mean_reduction(self.dtype))? == 0
+        {
+            return self.nanmean_axes(axis.as_slice(), keepdims);
+        }
         if self.dtype.is_complex() {
             return self.complex_nanmean(axis, keepdims);
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_mean(axis, keepdims);
         }
+        // Inexact NaN statistics count valid values with sum(), which accepts
+        // scalar axis=0/-1. Integer nanmean uses ordinary mean and keeps its
+        // stricter scalar-axis validation.
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         if self.dtype == DType::F64 && axis.is_none() {
             return self.nanmean_with_dtype(axis, keepdims, self.dtype);
         }
@@ -34277,10 +34420,15 @@ impl UFuncArray {
         ddof: usize,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        if !(self.dtype.is_integer() || self.dtype == DType::Bool) {
+            self.validate_nan_statistical_dtype(dtype, "nanvar")?;
+        }
+        if self.validate_nan_reduction_capacity(axis, dtype)? == 0 {
+            return self.nanvar_axes_with_dtype(axis.as_slice(), keepdims, ddof, dtype);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_var_with_dtype(axis, keepdims, ddof, dtype);
         }
-        self.validate_nan_statistical_dtype(dtype, "nanvar")?;
         self.nanvar_inexact(axis, keepdims, ddof, Some(dtype))
     }
 
@@ -34291,12 +34439,23 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        // The intermediate mean retains the source's complex dtype even
+        // when the final variance contains only real squared magnitudes.
+        if self.validate_nan_reduction_capacity(axis, promote_for_mean_reduction(self.dtype))? == 0
+        {
+            return self.nanvar_axes(axis.as_slice(), keepdims, ddof);
+        }
         if self.dtype.is_complex() {
             return self.complex_nanvar(axis, keepdims, ddof);
         }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.reduce_var(axis, keepdims, ddof);
         }
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
         if self.dtype == DType::F64 && axis.is_none() {
             return self.nanvar_inexact(axis, keepdims, ddof, None);
         }
@@ -34422,12 +34581,17 @@ impl UFuncArray {
                         promote_for_mean_reduction(self.dtype),
                     );
                 }
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if self.dtype == DType::F64 && inner == 1 {
+                    // Both the mean and squared-deviation sum must retain
+                    // masked positions in the same contiguous pairwise tree.
+                    return self.nanvar_inexact(Some(ax as isize), keepdims, ddof, None);
+                }
                 // Compute nanmean first, then compute variance from filled data
                 let mean_arr = self.nanmean(Some(ax as isize), true)?;
                 let out_shape = reduced_shape(&self.shape, ax, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
-                let inner: usize = self.shape[ax + 1..].iter().product();
                 if inner > 1 {
                     // Fused NaN-ignoring variance — register-blocked sum-of-squared-
                     // deviations over the precomputed per-column means, no strided gather.
@@ -34859,9 +35023,7 @@ impl UFuncArray {
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmin(axis);
         }
-        if self.dtype.is_integer()
-            || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32)
-        {
+        if self.dtype.is_integer() || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32) {
             // Compare declared source values, not an unrounded f64 working
             // buffer. Narrow floats can tie or overflow to infinity on storage.
             return Self::new(
@@ -34984,9 +35146,7 @@ impl UFuncArray {
         if matches!(self.dtype, DType::I64 | DType::U64) {
             return self.reduce_argmax(axis);
         }
-        if self.dtype.is_integer()
-            || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32)
-        {
+        if self.dtype.is_integer() || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32) {
             return Self::new(
                 self.shape.clone(),
                 self.to_storage()?.to_f64_vec(),
@@ -35098,6 +35258,9 @@ impl UFuncArray {
         keepdims: bool,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        if self.validate_nan_reduction_capacity(axis, dtype)? == 0 {
+            return self.nanprod_axes_with_dtype(axis.as_slice(), keepdims, dtype);
+        }
         if self.dtype.is_complex() {
             return self
                 .complex_nan_filtered_fill(1.0)?
@@ -35112,6 +35275,14 @@ impl UFuncArray {
 
     /// `np.nanprod` — product of elements ignoring NaN values (treated as 1).
     pub fn nanprod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+            None
+        } else {
+            axis
+        };
+        if self.validate_nan_reduction_capacity(axis, promote_for_sum_reduction(self.dtype))? == 0 {
+            return self.nanprod_axes(axis.as_slice(), keepdims);
+        }
         if self.dtype.is_complex() {
             return self
                 .complex_nan_filtered_fill(1.0)?
@@ -41213,31 +41384,11 @@ fn reduce_sum_lane_for_dtype(
     }
 }
 
-fn linear_sum_values(values: &[f64]) -> f64 {
-    finalize_sum(values.iter().copied().fold(0.0, |acc, value| acc + value))
-}
-
-fn neumaier_sum_values(values: &[f64]) -> f64 {
-    let mut sum = 0.0f64;
-    let mut correction = 0.0f64;
-    for &value in values {
-        let next = sum + value;
-        if sum.abs() >= value.abs() {
-            correction += (sum - next) + value;
-        } else {
-            correction += (value - next) + sum;
-        }
-        sum = next;
-    }
-    finalize_sum(sum + correction)
-}
-
 fn reduce_sum_values(values: &[f64]) -> f64 {
-    if values.len() <= COMPENSATED_SUM_MIN_LEN || values.iter().any(|value| !value.is_finite()) {
-        linear_sum_values(values)
-    } else {
-        neumaier_sum_values(values)
-    }
+    // Contiguous float64 reductions use NumPy's pairwise tree at every size.
+    // Neither a serial fold nor a size-dependent compensation scheme preserves
+    // its rounding and overflow behavior, even when mathematically more accurate.
+    UFuncArray::reduce_float_lane_with_dtype(values, DType::F64, false, false)
 }
 
 fn reduce_sum_non_nan_values(values: &[f64]) -> f64 {
@@ -41269,38 +41420,13 @@ fn linear_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> 
     finalize_sum(sum)
 }
 
-fn neumaier_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
-    let mut sum = 0.0f64;
-    let mut correction = 0.0f64;
-    let mut offset = start;
-    for _ in 0..len {
-        let value = values[offset];
-        let next = sum + value;
-        if sum.abs() >= value.abs() {
-            correction += (sum - next) + value;
-        } else {
-            correction += (value - next) + sum;
-        }
-        sum = next;
-        offset += step;
-    }
-    finalize_sum(sum + correction)
-}
-
 fn reduce_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
-    if len <= COMPENSATED_SUM_MIN_LEN {
-        return linear_sum_strided(values, start, step, len);
+    if step == 1 {
+        return reduce_sum_values(&values[start..start + len]);
     }
-
-    let mut offset = start;
-    for _ in 0..len {
-        if !values[offset].is_finite() {
-            return linear_sum_strided(values, start, step, len);
-        }
-        offset += step;
-    }
-
-    neumaier_sum_strided(values, start, step, len)
+    // NumPy's noncontiguous reduction loop keeps a left fold even for very
+    // long lanes. Partitioned execution must use that same accumulator order.
+    linear_sum_strided(values, start, step, len)
 }
 
 /// Register-blocked portable-SIMD linear sum over a NON-LAST axis (`inner > 1`).
@@ -41726,10 +41852,9 @@ fn reduce_sum_axis_contiguous(
         return;
     }
 
-    // Non-last axis. For every realistic axis length the strided sum is a plain
-    // left-to-right linear sum, which register-blocks cleanly (bit-identical). The
-    // rare axis_len > 1e6 case can engage Neumaier compensation, so keep it on the
-    // exact scalar strided path.
+    // Non-last axes keep NumPy's left-to-right order at every length. Retain
+    // the existing SIMD admission threshold; larger lanes use the same scalar
+    // left fold without changing the accumulator policy.
     if axis_len <= COMPENSATED_SUM_MIN_LEN {
         reduce_sum_axis_linear_simd(values, axis_len, inner, outer, out_values);
         return;
@@ -55817,7 +55942,7 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn reduce_sum_axis_one_preserves_left_to_right_rounding() {
+    fn reduce_sum_axis_one_preserves_numpy_pairwise_rounding() {
         let arr = UFuncArray::new(
             vec![1, 8],
             vec![1.0e16, 1.0, -1.0e16, 1.0, 1.0e16, 1.0, -1.0e16, 1.0],
@@ -55826,7 +55951,9 @@ print(json.dumps(payload))
         .expect("arr");
 
         let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
-        assert_eq!(out.values(), &[1.0]);
+        // NumPy's eight-lane pairwise tree cancels both large pairs before
+        // the final addition. A serial fold incorrectly leaves 1.0 here.
+        assert_eq!(out.values(), &[0.0]);
     }
 
     #[test]
@@ -55973,28 +56100,40 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn reduce_sum_axis_none_compensates_large_cancellation() {
+    fn reduce_sum_axis_none_preserves_numpy_large_cancellation_order() {
         let values = large_cancellation_values();
         let repeats = values.len() / 4;
         let arr = UFuncArray::new(vec![values.len()], values, DType::F64).expect("arr");
 
         let out = arr.reduce_sum(None, false).expect("sum all");
-        assert_eq!(out.values(), &[2.0 * repeats as f64]);
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            numpy_large_cancellation_reduction_bits(repeats, false, "sum")
+        );
     }
 
     #[test]
-    fn reduce_sum_axis_one_compensates_large_contiguous_rows() {
+    fn reduce_sum_axis_one_preserves_numpy_large_contiguous_order() {
         let values = large_cancellation_values();
         let repeats = values.len() / 4;
         let arr = UFuncArray::new(vec![1, values.len()], values, DType::F64).expect("arr");
 
         let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
         assert_eq!(out.shape(), &[1]);
-        assert_eq!(out.values(), &[2.0 * repeats as f64]);
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            numpy_large_cancellation_reduction_bits(repeats, false, "sum")
+        );
     }
 
     #[test]
-    fn reduce_sum_axis_zero_compensates_large_strided_columns() {
+    fn reduce_sum_axis_zero_preserves_numpy_large_strided_order() {
         let repeats = (COMPENSATED_SUM_MIN_LEN / 4) + 1;
         let mut values = Vec::with_capacity(repeats * 8);
         for _ in 0..repeats {
@@ -56005,8 +56144,11 @@ print(json.dumps(payload))
         let out = arr.reduce_sum(Some(0), false).expect("sum axis=0");
         assert_eq!(out.shape(), &[2]);
         assert_eq!(
-            out.values(),
-            &[2.0 * repeats as f64, 100.0 * repeats as f64]
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            numpy_large_cancellation_reduction_bits(repeats, true, "sum")
         );
     }
 
@@ -57917,17 +58059,61 @@ print(json.dumps(payload))
         assert!((out.values()[1] - 5.0).abs() < 1e-10);
     }
 
-    #[test]
-    fn reduce_mean_axis_none_uses_compensated_sum_for_large_inputs() {
-        let values = large_cancellation_values();
-        let arr = UFuncArray::new(vec![values.len()], values, DType::F64).expect("arr");
-
-        let out = arr.reduce_mean(None, false).expect("mean all");
-        assert_eq!(out.values(), &[0.5]);
+    fn numpy_large_cancellation_reduction_bits(
+        repeats: usize,
+        strided: bool,
+        op: &str,
+    ) -> Vec<u64> {
+        let output = Command::new(oracle_python_bin())
+            .args([
+                "-c",
+                r#"
+import json, sys
+import numpy as np
+repeats = int(sys.argv[1])
+reduce = getattr(np, sys.argv[3])
+if sys.argv[2] == '1':
+    values = np.tile([1.e16, 10., 1., 20., -1.e16, 30., 1., 40.], repeats)
+    result = reduce(values.reshape(repeats * 4, 2), axis=0)
+else:
+    values = np.tile([1.e16, 1., -1.e16, 1.], repeats)
+    result = reduce(values)
+print(json.dumps(np.asarray(result).reshape(-1).view(np.uint64).tolist()))
+"#,
+                &repeats.to_string(),
+                if strided { "1" } else { "0" },
+                op,
+            ])
+            .output()
+            .expect("launch NumPy cancellation reduction oracle");
+        assert!(
+            output.status.success(),
+            "NumPy cancellation {op} oracle: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("NumPy cancellation reduction bits")
     }
 
     #[test]
-    fn reduce_mean_axis_zero_uses_compensated_sum_for_large_strided_columns() {
+    fn reduce_mean_axis_none_preserves_numpy_large_cancellation_order() {
+        let values = large_cancellation_values();
+        let repeats = values.len() / 4;
+        let arr = UFuncArray::new(vec![values.len()], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_mean(None, false).expect("mean all");
+        // The previous 0.5 expectation required compensated summation and
+        // contradicted NumPy's observed pairwise result for this same input.
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            numpy_large_cancellation_reduction_bits(repeats, false, "mean")
+        );
+    }
+
+    #[test]
+    fn reduce_mean_axis_zero_preserves_numpy_large_strided_order() {
         let repeats = (COMPENSATED_SUM_MIN_LEN / 4) + 1;
         let mut values = Vec::with_capacity(repeats * 8);
         for _ in 0..repeats {
@@ -57937,7 +58123,13 @@ print(json.dumps(payload))
 
         let out = arr.reduce_mean(Some(0), false).expect("mean axis=0");
         assert_eq!(out.shape(), &[2]);
-        assert_eq!(out.values(), &[0.5, 25.0]);
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            numpy_large_cancellation_reduction_bits(repeats, true, "mean")
+        );
     }
 
     #[test]

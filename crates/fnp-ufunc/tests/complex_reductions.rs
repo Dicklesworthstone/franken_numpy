@@ -2699,3 +2699,252 @@ fn typed_complex_storage_round_trips_reduction_and_cast_results() {
         );
     }
 }
+
+#[test]
+fn real_default_nan_reductions_keep_contiguous_pairwise_order() {
+    let mut batch = OracleBatch::default();
+    for source_dtype in [DType::F16, DType::F32, DType::F64] {
+        let large = match source_dtype {
+            DType::F16 => 2048.0,
+            DType::F32 => 16_777_216.0,
+            _ => 1e16,
+        };
+        let pattern = [large, 1.0, f64::NAN, 1.0, -large, 1.0, 1.0, 1.0];
+        for len in [1, 7, 8, 9, 127, 128, 129, 8193] {
+            let values = (0..len * 2)
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            for shape in [[2, len], [len, 2]] {
+                let array = UFuncArray::new(shape.to_vec(), values.clone(), source_dtype).unwrap();
+                let input = batch.add_input(&array);
+                for operation in ["nansum", "nanmean", "nanvar", "nanstd"] {
+                    for axis in [None, Some(0), Some(-1)] {
+                        for keepdims in [false, true] {
+                            batch.push(input, &array, operation, None, axis, keepdims, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_default_nan_reductions_scalar_empty_and_all_nan_axes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for source_dtype in [DType::F16, DType::F32, DType::F64] {
+        for shape in [vec![], vec![0], vec![2, 0, 3], vec![0, 2], vec![2, 3]] {
+            let count = shape.iter().product();
+            for all_nan in [false, true] {
+                let pattern = [1.5, -2.5, f64::NAN, 7.0];
+                let values = (0..count)
+                    .map(|index| {
+                        if all_nan {
+                            f64::NAN
+                        } else {
+                            pattern[index % pattern.len()]
+                        }
+                    })
+                    .collect();
+                let array = UFuncArray::new(shape.clone(), values, source_dtype).unwrap();
+                let input = batch.add_input(&array);
+                for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    for axis in [None, Some(0), Some(-1), Some(1), Some(-3)] {
+                        for keepdims in [false, true] {
+                            for &ddof in if matches!(operation, "nanvar" | "nanstd") {
+                                &[0, 1, 7][..]
+                            } else {
+                                &[0][..]
+                            } {
+                                batch.push(input, &array, operation, None, axis, keepdims, ddof);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn real_default_nan_reductions_keep_left_fold_on_long_strided_axes() {
+    // A live NumPy probe yields 1.0 in each column: each five-row block
+    // loses the previous small sum before adding its final one. A
+    // compensated strided sum would instead retain the cancelled ones.
+    let repeats = 200_001usize;
+    let pattern = [1e16, 1.0, f64::NAN, -1e16, 1.0];
+    let rows = repeats * pattern.len();
+    let values = (0..rows)
+        .flat_map(|index| [pattern[index % pattern.len()]; 2])
+        .collect();
+    let array = UFuncArray::new(vec![rows, 2], values, DType::F64).unwrap();
+    for keepdims in [false, true] {
+        let sum = array.nansum(Some(0), keepdims).unwrap();
+        assert_eq!(sum.values(), &[1.0, 1.0]);
+        let mean = array.nanmean(Some(0), keepdims).unwrap();
+        let expected = 1.0 / (4 * repeats) as f64;
+        assert_eq!(mean.values(), &[expected, expected]);
+        let shape = if keepdims { vec![1, 2] } else { vec![2] };
+        assert_eq!(sum.shape(), shape.as_slice());
+        assert_eq!(mean.shape(), shape.as_slice());
+    }
+}
+
+#[test]
+fn nan_reductions_reject_unrepresentable_output_before_allocating_counts() {
+    let real_limit = isize::MAX as usize / std::mem::size_of::<f64>();
+    let complex_limit = real_limit / 2;
+    for source_dtype in [
+        DType::I64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for columns in [usize::MAX, real_limit + 1, complex_limit + 1] {
+            let array = if source_dtype.is_complex() {
+                complex_array(&[0, columns], &[], source_dtype)
+            } else {
+                UFuncArray::new(vec![0, columns], vec![], source_dtype).unwrap()
+            };
+            for dtype in [
+                None,
+                Some(DType::F16),
+                Some(DType::F64),
+                Some(DType::Complex64),
+                Some(DType::Complex128),
+            ] {
+                // Default complex variance has a real output, but computing
+                // its mean still requires two components for each lane.
+                let accumulator = dtype.unwrap_or(source_dtype);
+                let limit = if accumulator.is_complex() {
+                    complex_limit
+                } else {
+                    real_limit
+                };
+                if columns <= limit {
+                    // Avoid a representable but impractically huge allocation.
+                    continue;
+                }
+                for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    for keepdims in [false, true] {
+                        let result = reduce(&array, operation, dtype, Some(0), keepdims, 0);
+                        assert!(
+                            matches!(
+                                result,
+                                Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+                            ),
+                            "{source_dtype:?} {operation} {dtype:?} columns={columns}: {result:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nan_reductions_skip_unused_extents_for_empty_outputs() {
+    for source_dtype in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for (shape, axis) in [
+            (vec![0, 1, usize::MAX, 2], 1usize),
+            (vec![0, usize::MAX, 2], 1),
+            (vec![0, 2, usize::MAX], 2),
+        ] {
+            let array = if source_dtype.is_complex() {
+                complex_array(&shape, &[], source_dtype)
+            } else {
+                UFuncArray::new(shape.clone(), vec![], source_dtype).unwrap()
+            };
+            for dtype in [
+                None,
+                Some(DType::F16),
+                Some(DType::F32),
+                Some(DType::F64),
+                Some(DType::Complex64),
+                Some(DType::Complex128),
+            ] {
+                for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                    for keepdims in [false, true] {
+                        let result = reduce(
+                            &array,
+                            operation,
+                            dtype,
+                            Some(axis as isize),
+                            keepdims,
+                            1,
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("{source_dtype:?} {operation} {dtype:?} {shape:?}: {error}")
+                        });
+                        let expected_dtype = dtype.unwrap_or_else(|| {
+                            if matches!(operation, "nanvar" | "nanstd") {
+                                match source_dtype {
+                                    DType::Complex64 => DType::F32,
+                                    DType::Complex128 => DType::F64,
+                                    dtype => dtype,
+                                }
+                            } else {
+                                source_dtype
+                            }
+                        });
+                        let mut expected_shape = shape.clone();
+                        if keepdims {
+                            expected_shape[axis] = 1;
+                        } else {
+                            expected_shape.remove(axis);
+                        }
+                        if expected_dtype.is_complex() {
+                            expected_shape.push(2);
+                        }
+                        assert_eq!(result.shape(), expected_shape.as_slice());
+                        assert_eq!(result.dtype(), expected_dtype);
+                        assert!(result.values().is_empty());
+                    }
+                }
+            }
+            for operation in ["nanmean", "nanvar", "nanstd"] {
+                for axis in [axis as isize, shape.len() as isize] {
+                    let result = reduce(&array, operation, Some(DType::I64), Some(axis), false, 0);
+                    assert!(
+                        matches!(result, Err(UFuncError::Msg(_))),
+                        "invalid accumulator must precede axis validation: {result:?}"
+                    );
+                }
+            }
+            for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
+                assert!(
+                    reduce(
+                        &array,
+                        operation,
+                        Some(DType::DateTime64),
+                        Some(axis as isize),
+                        false,
+                        0,
+                    )
+                    .is_err()
+                );
+                assert!(
+                    reduce(
+                        &array,
+                        operation,
+                        None,
+                        Some(shape.len() as isize),
+                        false,
+                        0,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+}

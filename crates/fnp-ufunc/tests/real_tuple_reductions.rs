@@ -347,6 +347,188 @@ print(json.dumps(rows))
 }
 
 #[test]
+fn default_mean_preserves_numpy_pairwise_order_and_source_dtypes() {
+    let mut batch = OracleBatch::default();
+    let mut overflow_cancellation = vec![1.0e308; 8];
+    overflow_cancellation.extend_from_slice(&[-1.0e308; 8]);
+    for values in [
+        vec![1.0e16, 1.0, -1.0e16, 1.0, 1.0e16, 1.0, -1.0e16, 1.0],
+        overflow_cancellation,
+        vec![1.0e20; 129],
+        vec![-0.0, -0.0, 0.0, 0.0],
+        vec![f64::INFINITY, 1.0, f64::NEG_INFINITY, 4.0],
+        vec![1.0, f64::NAN, -2.0, 3.0],
+    ] {
+        let n = values.len();
+        for shape in [vec![n], vec![1, n], vec![n, 1]] {
+            let array = UFuncArray::new(shape, values.clone(), DType::F64).unwrap();
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1)] {
+                for keepdims in [false, true] {
+                    batch.push_single_mean(input, &array, axis, keepdims);
+                }
+            }
+        }
+    }
+
+    // Exercise both contiguous pairwise lanes and strided output updates,
+    // including source rounding and both sides of the pairwise boundaries.
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        let large = match dtype {
+            DType::F16 => 2048.0,
+            DType::F32 => 1.0e8,
+            _ => 1.0e16,
+        };
+        let pattern = [
+            large,
+            1.000_488_281_250_000_2,
+            -large,
+            0.25,
+            3.1,
+            -0.7,
+            -2.0,
+        ];
+        for n in [7, 8, 9, 127, 128, 129, 257] {
+            let values: Vec<f64> = (0..2 * n)
+                .map(|index| pattern[index % pattern.len()])
+                .collect();
+            for shape in [vec![2, n], vec![n, 2], vec![2, n, 1]] {
+                let array = UFuncArray::new(shape, values.clone(), dtype).unwrap();
+                let input = batch.add_input(&array);
+                for axis in [None, Some(0), Some(1), Some(-1)] {
+                    for keepdims in [false, true] {
+                        batch.push_single_mean(input, &array, axis, keepdims);
+                    }
+                }
+            }
+        }
+    }
+
+    // A numeric constructor can retain an unnormalized working buffer.
+    // Mean must read the declared source storage before accumulating.
+    for dtype in [DType::Bool, DType::I8, DType::U8, DType::I16, DType::U16] {
+        let array = UFuncArray::new(vec![2, 3], vec![0.0, 1.2, 2.7, 0.0, 3.9, 4.1], dtype).unwrap();
+        let input = batch.add_input(&array);
+        for axis in [None, Some(0), Some(1), Some(-1)] {
+            for keepdims in [false, true] {
+                batch.push_single_mean(input, &array, axis, keepdims);
+            }
+        }
+    }
+
+    // Integer sidecars preserve values that cannot be represented by the
+    // working f64 buffer until NumPy's accumulator conversion takes place.
+    for storage in [
+        ArrayStorage::I64(vec![
+            (1_i64 << 53) + 1,
+            (1_i64 << 53) + 3,
+            -((1_i64 << 53) + 1),
+            -((1_i64 << 53) + 3),
+            i64::MIN + 1,
+            i64::MAX - 1,
+            17,
+            -7,
+        ]),
+        ArrayStorage::U64(vec![
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 3,
+            (1_u64 << 63) + 1,
+            (1_u64 << 63) + 3,
+            u64::MAX,
+            u64::MAX - 2,
+            17,
+            7,
+        ]),
+    ] {
+        for shape in [vec![8], vec![2, 4], vec![4, 2]] {
+            let array = UFuncArray::from_storage(shape, storage.clone()).unwrap();
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1)] {
+                for keepdims in [false, true] {
+                    batch.push_single_mean(input, &array, axis, keepdims);
+                }
+            }
+        }
+    }
+
+    for dtype in [
+        DType::Bool,
+        DType::I64,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+    ] {
+        for (shape, values) in [
+            (vec![], vec![1.25]),
+            (vec![0], vec![]),
+            (vec![0, 2], vec![]),
+            (vec![2, 0], vec![]),
+        ] {
+            let array = UFuncArray::new(shape, values, dtype).unwrap();
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1), Some(-2)] {
+                for keepdims in [false, true] {
+                    batch.push_single_mean(input, &array, axis, keepdims);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn default_float32_mean_keeps_large_reduction_counts_exact() {
+    let n = (1_usize << 24) + 1;
+    // Generate this one bounded large fixture inside NumPy instead of sending
+    // millions of values through JSON. The exact integer divisor differs
+    // from its float32 rounding at this length.
+    let script = r#"
+import json, sys
+import numpy as np
+
+values = np.zeros(int(sys.argv[1]), dtype=np.float32)
+values[0] = 1.0
+rows = []
+for axis in (None, 0):
+    result = np.asarray(np.mean(values, axis=axis))
+    rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                     bits=int(result.astype(np.float64).view(np.uint64).item())))
+print(json.dumps(rows))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = Command::new(python)
+        .args(["-c", script])
+        .arg(n.to_string())
+        .output()
+        .expect("launch live NumPy large-count mean oracle");
+    assert!(
+        output.status.success(),
+        "NumPy large-count mean oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+    assert_eq!(expected.len(), 2);
+
+    let mut values = vec![0.0; n];
+    values[0] = 1.0;
+    let array = UFuncArray::new(vec![n], values, DType::F32).unwrap();
+    for (axis, expected) in [None, Some(0)].into_iter().zip(expected) {
+        let actual = array.reduce_mean(axis, false).unwrap();
+        assert_eq!(actual.dtype(), DType::F32);
+        assert_eq!(dtype_name(actual.dtype()), expected["dtype"]);
+        assert!(actual.shape().is_empty());
+        assert_eq!(json!(actual.shape()), expected["shape"]);
+        assert_eq!(actual.values().len(), 1);
+        assert_eq!(
+            actual.values()[0].to_bits(),
+            expected["bits"].as_u64().expect("float bits"),
+            "axis {axis:?}: mean must divide by the exact reduction count"
+        );
+    }
+}
+
+#[test]
 fn default_variance_and_std_preserve_numpy_reduction_order() {
     // Sequentially summing the mean used to invent a standard deviation of
     // 262144 for this constant array; NumPy's pairwise mean is exactly 1e20.
@@ -1486,10 +1668,8 @@ fn real_tuple_mean_conversion_buffers_match_numpy() {
                         batch.push(input, &array, "mean", &axes, keepdims, 0);
                     }
                 }
-                if dtype == DType::F16 {
-                    for axis in [None, Some(0), Some(1), Some(-1)] {
-                        batch.push_single_mean(input, &array, axis, false);
-                    }
+                for axis in [None, Some(0), Some(1), Some(-1)] {
+                    batch.push_single_mean(input, &array, axis, false);
                 }
             }
         }
