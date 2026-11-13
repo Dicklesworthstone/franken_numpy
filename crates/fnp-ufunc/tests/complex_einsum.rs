@@ -98,15 +98,29 @@ struct OracleBatch {
 
 impl OracleBatch {
     fn case(&mut self, sub: &str, operands: &[UFuncArray], optimize: Option<&str>, exact: bool) {
+        self.case_with_limit(sub, operands, optimize, None, exact);
+    }
+
+    fn case_with_limit(
+        &mut self,
+        sub: &str,
+        operands: &[UFuncArray],
+        optimize: Option<&str>,
+        memory_limit: Option<usize>,
+        exact: bool,
+    ) {
         let refs: Vec<_> = operands.iter().collect();
         self.actual.push(match optimize {
-            Some(strategy) => UFuncArray::einsum_optimized(sub, &refs, strategy),
+            Some(strategy) => {
+                UFuncArray::einsum_optimized_with_memory_limit(sub, &refs, strategy, memory_limit)
+            }
             None => UFuncArray::einsum(sub, &refs),
         });
         self.cases.push(json!({
             "sub": sub,
             "operands": operands.iter().map(oracle_input).collect::<Vec<_>>(),
             "optimize": optimize,
+            "memory_limit": memory_limit,
             "exact": exact,
         }));
     }
@@ -136,6 +150,8 @@ for case in json.load(sys.stdin):
         optimize = case['optimize'] or False
         if optimize == 'auto':
             optimize = 'greedy'
+        if case['memory_limit'] is not None:
+            optimize = (optimize, case['memory_limit'])
         result = np.asarray(np.einsum(case['sub'], *arrays, optimize=optimize))
         parts = np.empty(result.size * 2, dtype=np.float64)
         parts[0::2] = result.real.ravel()
@@ -437,8 +453,7 @@ fn wide_integer_inputs_and_pairwise_promotion_match_numpy() {
 #[test]
 fn complex_einsum_without_reduction_promotes_all_operands_together() {
     let half = UFuncArray::new(vec![2, 2], vec![65504.0; 4], DType::F16).unwrap();
-    let signs =
-        UFuncArray::new(vec![2, 2], vec![2.0, -2.0, 2.0, -2.0], DType::F16).unwrap();
+    let signs = UFuncArray::new(vec![2, 2], vec![2.0, -2.0, 2.0, -2.0], DType::F16).unwrap();
     let half_vector = UFuncArray::new(vec![2], vec![65504.0; 2], DType::F16).unwrap();
     let sign_vector = UFuncArray::new(vec![2], vec![2.0, -2.0], DType::F16).unwrap();
     let narrow = UFuncArray::from_storage(vec![2], ArrayStorage::I8(vec![100, 100])).unwrap();
@@ -475,8 +490,7 @@ fn complex_einsum_without_reduction_promotes_all_operands_together() {
         (
             "i,i,->i",
             vec![
-                UFuncArray::new(vec![2], vec![f64::from(f32::MAX); 2], DType::F32)
-                    .unwrap(),
+                UFuncArray::new(vec![2], vec![f64::from(f32::MAX); 2], DType::F32).unwrap(),
                 UFuncArray::new(vec![2], vec![2.0, -2.0], DType::F32).unwrap(),
                 one.clone(),
             ],
@@ -514,8 +528,7 @@ fn complex_einsum_without_reduction_promotes_all_operands_together() {
     // The all-operand fallback must bypass the integer evaluator's own planner
     // shortcut, so a real integer expression terminates with native wrapping.
     let result =
-        UFuncArray::einsum_optimized("i,i,i->i", &[&narrow, &narrow, &narrow], "greedy")
-            .unwrap();
+        UFuncArray::einsum_optimized("i,i,i->i", &[&narrow, &narrow, &narrow], "greedy").unwrap();
     assert_eq!(result.dtype(), DType::I8);
     assert_eq!(result.values(), &[64.0, 64.0]);
 }
@@ -649,4 +662,303 @@ print(json.dumps(np.einsum_path('ij,jk,kl->il', *arrays, optimize='greedy')[0][1
     let expected: Vec<Vec<usize>> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(path, expected);
     assert!(description.contains("[14, 21, 12]"), "{description}");
+}
+
+#[test]
+fn optimal_einsum_minimizes_total_cost_before_narrow_intermediate_rounding() {
+    // The smaller intermediate (5x5) costs 1,350 FLOPs over the full path;
+    // the 1x26 intermediate costs only 520. Choosing the former also overflows
+    // float16 before the complex operand can promote the expression.
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let operands = [
+            UFuncArray::new(vec![5, 1], vec![65504.0; 5], DType::F16).unwrap(),
+            UFuncArray::new(vec![1, 5], vec![2.0; 5], DType::F16).unwrap(),
+            UFuncArray::new(vec![5, 26, 2], [1.0, 0.0].repeat(5 * 26), dtype).unwrap(),
+        ];
+        let refs: Vec<_> = operands.iter().collect();
+        let (path, _) =
+            UFuncArray::einsum_path_with_options("ab,bc,cd->ad", &refs, "optimal", None).unwrap();
+        assert_eq!(path, vec![vec![1, 2], vec![0, 1]]);
+        let actual = UFuncArray::einsum_optimized("ab,bc,cd->ad", &refs, "optimal").unwrap();
+        assert_eq!(actual.dtype(), dtype);
+        assert_eq!(actual.shape(), &[5, 26, 2]);
+        assert_eq!(actual.values(), [655040.0, 0.0].repeat(5 * 26));
+        for limit in [None, Some(0), Some(25), Some(26)] {
+            batch.case_with_limit("ab,bc,cd->ad", &operands, Some("optimal"), limit, true);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn einsum_paths_match_numpy_across_strategies_memory_broadcasts_and_empty_axes() {
+    let cases: &[(&str, &[&[usize]])] = &[
+        ("ab,bc,cd->ad", &[&[5, 1], &[1, 5], &[5, 26]]),
+        ("ab,bc,cd,de->ae", &[&[1, 1], &[1, 1], &[1, 1], &[1, 1]]),
+        ("ab,bc,cd,de->ae", &[&[2, 1], &[1, 2], &[2, 3], &[3, 5]]),
+        ("ab,bc,cd,de->ae", &[&[5, 2], &[2, 3], &[3, 4], &[4, 2]]),
+        ("ab,ac,ad->bcd", &[&[3, 4], &[3, 5], &[3, 6]]),
+        ("ii,ij,jk->k", &[&[3, 3], &[3, 2], &[2, 4]]),
+        ("ab,bc,cd->ad", &[&[1, 3], &[3, 1], &[4, 5]]),
+        (
+            "...ij,...jk,...kl->...il",
+            &[&[2, 1, 2, 3], &[4, 3, 2], &[1, 2, 3]],
+        ),
+        ("...i,...i,i->", &[&[2, 3], &[1, 3], &[3]]),
+        ("ab,bc,cd->ad", &[&[0, 3], &[3, 2], &[2, 4]]),
+        ("i,j,k->ijk", &[&[2], &[3], &[4]]),
+        (",i,i->", &[&[], &[3], &[3]]),
+    ];
+    let mut requests = Vec::new();
+    let mut actual = Vec::new();
+    for &(sub, shapes) in cases {
+        let operands: Vec<_> = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, shape)| {
+                source(
+                    shape,
+                    if i % 2 == 0 {
+                        DType::Complex64
+                    } else {
+                        DType::F64
+                    },
+                    i,
+                )
+            })
+            .collect();
+        let refs: Vec<_> = operands.iter().collect();
+        for strategy in ["optimal", "greedy", "auto"] {
+            for limit in [
+                None,
+                Some(0),
+                Some(1),
+                Some(4),
+                Some(8),
+                Some(32),
+                Some(256),
+            ] {
+                let (path, _) = UFuncArray::einsum_path_with_options(sub, &refs, strategy, limit)
+                    .unwrap_or_else(|error| panic!("{sub} {strategy} {limit:?}: {error}"));
+                actual.push(path);
+                requests.push(
+                    json!({"sub": sub, "shapes": shapes, "strategy": strategy, "limit": limit}),
+                );
+            }
+        }
+    }
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = r#"
+import json, sys
+import numpy as np
+rows = []
+for case in json.load(sys.stdin):
+    arrays = [np.broadcast_to(np.array(0, dtype=np.complex64), shape) for shape in case['shapes']]
+    strategy = 'greedy' if case['strategy'] == 'auto' else case['strategy']
+    optimize = strategy if case['limit'] is None else (strategy, case['limit'])
+    rows.append(np.einsum_path(case['sub'], *arrays, optimize=optimize)[0][1:])
+print(json.dumps(rows))
+"#;
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch live NumPy path oracle");
+    serde_json::to_writer(child.stdin.take().unwrap(), &requests).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Vec<Vec<usize>>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(expected.len(), actual.len());
+    for ((request, actual), expected) in requests.iter().zip(actual).zip(expected) {
+        assert_eq!(actual, expected, "{request}");
+    }
+}
+
+#[test]
+fn memory_limited_einsum_executes_remaining_operands_as_one_contraction() {
+    let cases: &[(&str, &[&[usize]])] = &[
+        ("ab,bc,cd,de->ae", &[&[2, 1], &[1, 2], &[2, 3], &[3, 5]]),
+        ("ab,ac,ad->bcd", &[&[3, 4], &[3, 5], &[3, 6]]),
+        (
+            "...ij,...jk,...kl->...il",
+            &[&[2, 1, 2, 3], &[4, 3, 2], &[1, 2, 3]],
+        ),
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &(sub, shapes) in cases {
+            let operands: Vec<_> = shapes
+                .iter()
+                .enumerate()
+                .map(|(i, shape)| source(shape, dtype, i + 2))
+                .collect();
+            for strategy in ["greedy", "optimal"] {
+                for limit in [None, Some(0), Some(1), Some(4)] {
+                    batch.case_with_limit(sub, &operands, Some(strategy), limit, false);
+                }
+            }
+        }
+    }
+    batch.finish();
+
+    let operands = [
+        source(&[2, 1], DType::Complex64, 0),
+        source(&[1, 2], DType::Complex64, 1),
+        source(&[2, 3], DType::Complex64, 2),
+        source(&[3, 5], DType::Complex64, 3),
+    ];
+    let refs: Vec<_> = operands.iter().collect();
+    let (path, _) =
+        UFuncArray::einsum_path_with_options("ab,bc,cd,de->ae", &refs, "optimal", Some(4)).unwrap();
+    assert_eq!(path, vec![vec![0, 1], vec![0, 1, 2]]);
+}
+
+#[test]
+fn optimal_einsum_merges_equivalent_states_above_ten_operands() {
+    let empty = source(&[0], DType::Complex128, 0);
+    let operands = vec![&empty; 11];
+    let sub = format!("{}->", vec!["i"; operands.len()].join(","));
+    let (path, _) = UFuncArray::einsum_path_with_options(&sub, &operands, "optimal", None).unwrap();
+    assert_eq!(path, vec![vec![0, 1]; operands.len() - 1]);
+    let result = UFuncArray::einsum_optimized(&sub, &operands, "optimal").unwrap();
+    assert_eq!(result.shape(), &[2]);
+    assert_eq!(result.values(), &[0.0, 0.0]);
+
+    let scalar = source(&[], DType::Complex128, 0);
+    assert!(UFuncArray::einsum_path_with_options("->", &[&scalar], "unknown", Some(0)).is_err());
+    assert!(
+        UFuncArray::einsum_optimized_with_memory_limit("->", &[&scalar], "unknown", Some(0))
+            .is_err()
+    );
+    let malformed = UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex128).unwrap();
+    assert!(
+        UFuncArray::einsum_path_with_options("i->i", &[&malformed], "optimal", Some(0)).is_err()
+    );
+
+    let huge = UFuncArray::new(vec![0, usize::MAX, 2], vec![], DType::Complex128).unwrap();
+    assert!(
+        UFuncArray::einsum_optimized_with_memory_limit(
+            "ab,ab,->b",
+            &[&huge, &huge, &scalar],
+            "optimal",
+            Some(0),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn real_einsum_memory_fallback_and_narrow_pairs_preserve_result_precision() {
+    let shapes: &[&[usize]] = &[&[2, 1], &[1, 2], &[2, 3], &[3, 2]];
+    let mut requests = Vec::new();
+    let mut actual = Vec::new();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        for extreme in [false, true] {
+            let maximum = match dtype {
+                DType::F16 => 65504.0,
+                DType::F32 => f64::from(f32::MAX),
+                _ => f64::MAX,
+            };
+            let operands: Vec<_> = shapes
+                .iter()
+                .enumerate()
+                .map(|(operand, shape)| {
+                    let count: usize = shape.iter().product();
+                    let values = (0..count)
+                        .map(|index| {
+                            if extreme {
+                                if operand == 0 { maximum } else { 2.0 }
+                            } else if index % 5 == 0 {
+                                1.0 + 2.0_f64.powi(-24)
+                            } else {
+                                ((index * 3 + operand) % 7 + 1) as f64 / 4.0
+                            }
+                        })
+                        .collect();
+                    UFuncArray::new(shape.to_vec(), values, dtype).unwrap()
+                })
+                .collect();
+            let refs: Vec<_> = operands.iter().collect();
+            for strategy in ["greedy", "optimal"] {
+                for limit in [None, Some(0), Some(4)] {
+                    actual.push(
+                        UFuncArray::einsum_optimized_with_memory_limit(
+                            "ab,bc,cd,de->ae",
+                            &refs,
+                            strategy,
+                            limit,
+                        )
+                        .unwrap(),
+                    );
+                    requests.push(json!({
+                        "operands": operands.iter().map(oracle_input).collect::<Vec<_>>(),
+                        "strategy": strategy, "limit": limit,
+                    }));
+                }
+            }
+        }
+    }
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = r#"
+import json, sys, warnings
+import numpy as np
+warnings.simplefilter('ignore')
+np.seterr(all='ignore')
+rows = []
+for case in json.load(sys.stdin):
+    arrays = [np.array([float(v) for v in a['values']], dtype=a['dtype']).reshape(a['shape'])
+              for a in case['operands']]
+    optimize = case['strategy'] if case['limit'] is None else (case['strategy'], case['limit'])
+    value = np.asarray(np.einsum('ab,bc,cd,de->ae', *arrays, optimize=optimize))
+    rows.append(dict(dtype=str(value.dtype), shape=list(value.shape),
+                     bits=value.astype(np.float64).ravel().view(np.uint64).tolist()))
+print(json.dumps(rows))
+"#;
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch live NumPy real-einsum oracle");
+    serde_json::to_writer(child.stdin.take().unwrap(), &requests).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(expected.len(), actual.len());
+    for ((request, actual), expected) in requests.iter().zip(actual).zip(expected) {
+        assert_eq!(dtype_name(actual.dtype()), expected["dtype"], "{request}");
+        assert_eq!(json!(actual.shape()), expected["shape"], "{request}");
+        let epsilon = match actual.dtype() {
+            DType::F16 => 2.0_f64.powi(-10),
+            DType::F32 => f64::from(f32::EPSILON),
+            _ => f64::EPSILON,
+        };
+        let bits = expected["bits"].as_array().unwrap();
+        assert_eq!(actual.values().len(), bits.len());
+        for (&got, bits) in actual.values().iter().zip(bits) {
+            let want = f64::from_bits(bits.as_u64().unwrap());
+            if want.is_nan() {
+                assert!(got.is_nan(), "{request}: expected NaN, got {got}");
+            } else if want.is_infinite() {
+                assert_eq!(got.to_bits(), want.to_bits(), "{request}");
+            } else {
+                assert!(
+                    got.is_finite() && (got - want).abs() <= 8.0 * epsilon * want.abs().max(1.0),
+                    "{request}: got {got}, expected {want}"
+                );
+            }
+        }
+    }
 }

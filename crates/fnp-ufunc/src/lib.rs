@@ -30794,18 +30794,37 @@ impl UFuncArray {
         })
     }
 
-    /// Evaluate the optimal contraction order for `einsum` (np.einsum_path).
+    /// Evaluate the greedy contraction order for `einsum` (np.einsum_path).
     ///
     /// Returns a tuple of `(contraction_list, description_string)`.
     /// The contraction list contains operand indices for each contraction step.
     /// The description string provides a human-readable summary of the path.
     ///
-    /// This is a greedy heuristic: at each step, it picks the pair of operands
-    /// whose contraction produces the smallest intermediate result.
+    /// The default temporary-size limit is the largest broadcast-expanded
+    /// input or output. Use `einsum_path_with_options` for exact optimal search
+    /// or an explicit limit on intermediate elements.
     pub fn einsum_path(
         subscripts: &str,
         operands: &[&Self],
     ) -> Result<(Vec<Vec<usize>>, String), UFuncError> {
+        Self::einsum_path_with_options(subscripts, operands, "greedy", None)
+    }
+
+    /// Plan a contraction with NumPy's `greedy` or `optimal` strategy.
+    ///
+    /// `memory_limit` bounds temporary logical elements, not bytes. `None`
+    /// uses the largest broadcast-expanded input or output. As in NumPy, a
+    /// blocked pairwise search finishes by contracting the remaining operands
+    /// together, and single-step contractions do not reject a smaller limit.
+    /// Exact optimal search is exponential in the number of distinct operands;
+    /// equivalent remaining states are merged without changing its answer.
+    pub fn einsum_path_with_options(
+        subscripts: &str,
+        operands: &[&Self],
+        optimize: &str,
+        memory_limit: Option<usize>,
+    ) -> Result<(Vec<Vec<usize>>, String), UFuncError> {
+        Self::validate_einsum_strategy(optimize)?;
         let normalized_subscripts =
             Self::normalize_einsum_subscripts("einsum_path", subscripts, false)?;
         let parts: Vec<&str> = normalized_subscripts.split("->").collect();
@@ -30852,7 +30871,8 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_path", &input_subs, &output_labels)?;
-        Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands, false)?;
+        let label_sizes =
+            Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands, false)?;
 
         let n = operands.len();
         let reduces_labels = input_subs
@@ -30877,40 +30897,13 @@ impl UFuncArray {
             return Ok((path, desc));
         }
 
-        let output_str: String = output_labels.iter().collect();
-
-        // Greedy algorithm: repeatedly contract the pair that removes the most
-        // intermediate work, matching NumPy's preference for inner contractions
-        // before Hadamard- or outer-style steps.
-        let mut path = Vec::new();
-        let mut current_subs: Vec<String> = processed_input_subs.clone();
-        let mut current_shapes = operands
-            .iter()
-            .map(|op| op.complex_logical_shape("einsum_path"))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        while current_shapes.len() > 1 {
-            let (best_lo, best_hi) =
-                Self::pick_greedy_pair_from_specs(&current_shapes, &current_subs, &output_labels);
-            path.push(vec![best_lo, best_hi]);
-
-            let (inter_str, inter_shape) = Self::build_einsum_intermediate(
-                &current_subs,
-                &current_shapes,
-                &output_labels,
-                best_lo,
-                best_hi,
-                current_shapes.len() == 2,
-                &output_str,
-            );
-
-            current_shapes.remove(best_hi);
-            current_subs.remove(best_hi);
-            current_shapes.remove(best_lo);
-            current_subs.remove(best_lo);
-            current_shapes.push(inter_shape);
-            current_subs.push(inter_str);
-        }
+        let path = Self::plan_einsum_contractions(
+            &processed_input_subs,
+            &output_labels,
+            &label_sizes,
+            optimize,
+            memory_limit,
+        )?;
 
         let input_sizes = operands
             .iter()
@@ -30929,7 +30922,7 @@ impl UFuncArray {
     ///
     /// `optimize` values:
     /// - `"greedy"`: greedily pick the cheapest pairwise contraction at each step
-    /// - `"optimal"`: pick the pair with the smallest retained intermediate (≤10 operands)
+    /// - `"optimal"`: minimize total contraction cost over all memory-feasible paths
     /// - `"auto"`: use greedy
     ///
     /// For ≤2 operands or expressions without label reduction, all operands
@@ -30940,11 +30933,21 @@ impl UFuncArray {
         operands: &[&Self],
         optimize: &str,
     ) -> Result<Self, UFuncError> {
-        if !matches!(optimize, "greedy" | "optimal" | "auto") {
-            return Err(UFuncError::Msg(format!(
-                "einsum_optimized: unknown optimize value '{optimize}'"
-            )));
-        }
+        Self::einsum_optimized_with_memory_limit(subscripts, operands, optimize, None)
+    }
+
+    /// Optimized Einstein summation with a temporary logical-element limit.
+    ///
+    /// The same path is returned by `einsum_path_with_options`. A memory limit
+    /// constrains pairwise intermediates, not the final output allocation or
+    /// the size of a single all-remaining-operands contraction.
+    pub fn einsum_optimized_with_memory_limit(
+        subscripts: &str,
+        operands: &[&Self],
+        optimize: &str,
+        memory_limit: Option<usize>,
+    ) -> Result<Self, UFuncError> {
+        Self::validate_einsum_strategy(optimize)?;
         if operands.len() <= 2 {
             return Self::einsum_impl(subscripts, operands, false, true);
         }
@@ -31002,7 +31005,8 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_optimized", &input_subs, &output_labels)?;
-        Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands, true)?;
+        let label_sizes =
+            Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands, true)?;
         let output_str: String = output_labels.iter().collect();
 
         if input_subs
@@ -31018,7 +31022,16 @@ impl UFuncArray {
             return Self::einsum_impl(subscripts, operands, true, true);
         }
 
-        // Inline greedy contraction: repeatedly pick and contract the cheapest pair
+        let path = Self::plan_einsum_contractions(
+            &processed_input_subs,
+            &output_labels,
+            &label_sizes,
+            optimize,
+            memory_limit,
+        )?;
+
+        // Execute the complete selected path. Replanning each step locally
+        // would turn the optimal strategy back into a greedy heuristic.
         let mut current_ops: Vec<Self> = operands.iter().map(|o| (*o).clone()).collect();
         let mut current_subs: Vec<String> = processed_input_subs.clone();
         let contains_complex = operands.iter().any(|op| op.dtype.is_complex());
@@ -31032,13 +31045,30 @@ impl UFuncArray {
             ));
         }
 
-        while current_ops.len() > 1 {
-            // Pick the best pair to contract
-            let (best_lo, best_hi) = if optimize == "optimal" && current_ops.len() <= 10 {
-                Self::pick_optimal_pair(&current_ops, &current_subs, &output_labels)?
-            } else {
-                Self::pick_greedy_pair(&current_ops, &current_subs, &output_labels)?
-            };
+        for contraction in path {
+            if contraction.len() != 2 {
+                // A memory-blocked planner retains every remaining operand in
+                // one expression. This also retains common dtype promotion
+                // instead of introducing an unplanned narrow intermediate.
+                let sub = format!("{}->{output_str}", current_subs.join(","));
+                let refs: Vec<_> = current_ops.iter().collect();
+                let dtype = refs
+                    .iter()
+                    .skip(1)
+                    .fold(refs[0].dtype, |dtype, op| promote(dtype, op.dtype));
+                if matches!(dtype, DType::F16 | DType::F32) {
+                    let inputs: Vec<_> = current_subs.iter().map(String::as_str).collect();
+                    return Self::einsum_inexact(
+                        &inputs,
+                        &output_labels,
+                        &refs,
+                        &label_sizes,
+                        dtype,
+                    );
+                }
+                return Self::einsum_impl(&sub, &refs, true, true);
+            }
+            let (best_lo, best_hi) = (contraction[0], contraction[1]);
 
             let sub_a = current_subs[best_lo].clone();
             let sub_b = current_subs[best_hi].clone();
@@ -31060,7 +31090,8 @@ impl UFuncArray {
             let right = &current_ops[best_hi];
             let pair_dtype = promote(left.dtype, right.dtype);
             let pair_inputs = [left, right];
-            let result = if contains_complex && pair_dtype.is_float() {
+            let result = if pair_dtype.is_float() && (contains_complex || pair_dtype != DType::F64)
+            {
                 // A real-only intermediate must retain both the pair's dtype
                 // and its arithmetic precision. Computing in f64 then casting
                 // would erase float32 overflow/underflow before the later
@@ -31158,193 +31189,276 @@ impl UFuncArray {
         (inter_str, inter_shape)
     }
 
-    fn greedy_pair_sort_key(
-        shapes: &[Vec<usize>],
-        subs: &[String],
-        output_labels: &[char],
-        i: usize,
-        j: usize,
-    ) -> (std::cmp::Reverse<usize>, usize, usize, usize) {
-        let input_sizes = shapes[i]
+    fn validate_einsum_strategy(optimize: &str) -> Result<(), UFuncError> {
+        if matches!(optimize, "greedy" | "optimal" | "auto") {
+            Ok(())
+        } else {
+            Err(UFuncError::Msg(format!(
+                "einsum_optimized: unknown optimize value '{optimize}'"
+            )))
+        }
+    }
+
+    fn einsum_planner_size(
+        labels: &[char],
+        dimensions: &std::collections::HashMap<char, usize>,
+    ) -> Result<u128, UFuncError> {
+        // Empty extents are zero even when multiplying earlier dimensions
+        // would overflow. Cost arithmetic must not saturate distinct paths
+        // into an arbitrary tie or turn an empty intermediate into one cell.
+        if labels.iter().any(|label| dimensions[label] == 0) {
+            return Ok(0);
+        }
+        labels.iter().try_fold(1_u128, |size, label| {
+            size.checked_mul(dimensions[label] as u128)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        })
+    }
+
+    fn einsum_pair_labels(
+        inputs: &[Vec<char>],
+        output: &[char],
+        pair: [usize; 2],
+    ) -> (Vec<char>, Vec<char>) {
+        let contracted: std::collections::BTreeSet<char> = inputs[pair[0]]
+            .iter()
+            .chain(&inputs[pair[1]])
+            .copied()
+            .collect();
+        let needed: std::collections::BTreeSet<char> = output
             .iter()
             .copied()
-            .fold(1usize, usize::saturating_mul)
-            .saturating_add(
-                shapes[j]
+            .chain(
+                inputs
                     .iter()
-                    .copied()
-                    .fold(1usize, usize::saturating_mul),
-            );
-        let mut label_sizes = std::collections::HashMap::new();
-        for (shape, sub) in [
-            (shapes[i].as_slice(), &subs[i]),
-            (shapes[j].as_slice(), &subs[j]),
-        ] {
-            for (idx, c) in sub.chars().enumerate() {
-                if idx < shape.len() {
-                    label_sizes
-                        .entry(c)
-                        .and_modify(|size| {
-                            if *size == 1 {
-                                *size = shape[idx];
+                    .enumerate()
+                    .filter(|(index, _)| !pair.contains(index))
+                    .flat_map(|(_, labels)| labels.iter().copied()),
+            )
+            .collect();
+        (
+            contracted.intersection(&needed).copied().collect(),
+            contracted.into_iter().collect(),
+        )
+    }
+
+    fn plan_einsum_contractions(
+        subs: &[String],
+        output: &[char],
+        dimensions: &std::collections::HashMap<char, usize>,
+        optimize: &str,
+        memory_limit: Option<usize>,
+    ) -> Result<Vec<Vec<usize>>, UFuncError> {
+        if subs.len() <= 2
+            || subs
+                .iter()
+                .flat_map(|sub| sub.chars())
+                .all(|c| output.contains(&c))
+        {
+            return Ok(vec![(0..subs.len()).collect()]);
+        }
+        let limit = if let Some(limit) = memory_limit {
+            limit as u128
+        } else {
+            // NumPy sizes inputs after broadcasting every shared label and
+            // includes repeated labels (diagonals) in this initial bound.
+            let mut limit = Self::einsum_planner_size(output, dimensions)?;
+            for sub in subs {
+                limit = limit.max(Self::einsum_planner_size(
+                    &sub.chars().collect::<Vec<_>>(),
+                    dimensions,
+                )?);
+            }
+            limit
+        };
+        let inputs: Vec<Vec<char>> = subs
+            .iter()
+            .map(|sub| {
+                sub.chars()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
+        if optimize == "optimal" {
+            Self::optimal_einsum_path(inputs, output, dimensions, limit)
+        } else {
+            Self::greedy_einsum_path(inputs, output, dimensions, limit)
+        }
+    }
+
+    fn optimal_einsum_path(
+        inputs: Vec<Vec<char>>,
+        output: &[char],
+        dimensions: &std::collections::HashMap<char, usize>,
+        memory_limit: u128,
+    ) -> Result<Vec<Vec<usize>>, UFuncError> {
+        // A state's future depends only on its ordered remaining label sets.
+        // Keep the least-cost prefix for each state, breaking equal-cost ties
+        // by the first path in NumPy's lexicographic pair enumeration. This
+        // searches the entire path without retaining factorially many copies
+        // of an equivalent state or silently switching strategies above 10.
+        type States = std::collections::HashMap<Vec<Vec<char>>, (u128, Vec<Vec<usize>>)>;
+        let count = inputs.len();
+        let mut states = States::from([(inputs, (0, Vec::new()))]);
+        for remaining_count in (2..=count).rev() {
+            let mut next = States::new();
+            for (remaining, (cost, path)) in &states {
+                for lo in 0..remaining_count {
+                    for hi in lo + 1..remaining_count {
+                        let (result, contracted) =
+                            Self::einsum_pair_labels(remaining, output, [lo, hi]);
+                        if Self::einsum_planner_size(&result, dimensions)? > memory_limit {
+                            continue;
+                        }
+                        let pair_cost = Self::einsum_planner_size(&contracted, dimensions)?
+                            .checked_mul(if result.len() < contracted.len() {
+                                2
+                            } else {
+                                1
+                            })
+                            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+                        let total = cost
+                            .checked_add(pair_cost)
+                            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+                        let mut next_path = path.clone();
+                        next_path.push(vec![lo, hi]);
+                        let mut next_inputs = remaining.clone();
+                        next_inputs.remove(hi);
+                        next_inputs.remove(lo);
+                        next_inputs.push(result);
+                        let candidate = (total, next_path);
+                        match next.entry(next_inputs) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(candidate);
                             }
-                        })
-                        .or_insert(shape[idx]);
-                }
-            }
-        }
-
-        let contract_labels = subs[i]
-            .chars()
-            .chain(subs[j].chars())
-            .collect::<std::collections::HashSet<_>>();
-        let mut remaining_labels: std::collections::HashSet<char> =
-            output_labels.iter().copied().collect();
-        for (idx, sub) in subs.iter().enumerate() {
-            if idx != i && idx != j {
-                for label in sub.chars() {
-                    remaining_labels.insert(label);
-                }
-            }
-        }
-        let new_result_labels = contract_labels
-            .iter()
-            .filter(|label| remaining_labels.contains(label))
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let new_size = new_result_labels
-            .iter()
-            .map(|label| label_sizes.get(label).copied().unwrap_or(1))
-            .fold(1usize, usize::saturating_mul)
-            .max(1);
-        let removed_size = input_sizes.saturating_sub(new_size);
-        let idx_removed = contract_labels.difference(&new_result_labels).count();
-        let cost = contract_labels
-            .iter()
-            .map(|label| label_sizes.get(label).copied().unwrap_or(1))
-            .fold(1usize, usize::saturating_mul)
-            .saturating_mul(if idx_removed > 0 { 2 } else { 1 });
-
-        (std::cmp::Reverse(removed_size), cost, i, j)
-    }
-
-    fn pick_greedy_pair_from_specs(
-        shapes: &[Vec<usize>],
-        subs: &[String],
-        output_labels: &[char],
-    ) -> (usize, usize) {
-        let mut best_shared: Option<(std::cmp::Reverse<usize>, usize, usize, usize)> = None;
-        let mut best_any: Option<(std::cmp::Reverse<usize>, usize, usize, usize)> = None;
-
-        for i in 0..shapes.len() {
-            for j in (i + 1)..shapes.len() {
-                let key = Self::greedy_pair_sort_key(shapes, subs, output_labels, i, j);
-                if best_any.as_ref().is_none_or(|best| key < *best) {
-                    best_any = Some(key);
-                }
-
-                let labels_i = subs[i].chars().collect::<std::collections::HashSet<_>>();
-                let labels_j = subs[j].chars().collect::<std::collections::HashSet<_>>();
-                if !labels_i.is_disjoint(&labels_j)
-                    && best_shared.as_ref().is_none_or(|best| key < *best)
-                {
-                    best_shared = Some(key);
-                }
-            }
-        }
-
-        let (_, _, best_lo, best_hi) =
-            best_shared
-                .or(best_any)
-                .unwrap_or((std::cmp::Reverse(0), usize::MAX, 0, 1));
-        (best_lo, best_hi)
-    }
-
-    /// Pick the pair with NumPy-style greedy priority: maximize removed
-    /// intermediate size, then minimize flop cost.
-    fn pick_greedy_pair(
-        ops: &[Self],
-        subs: &[String],
-        output_labels: &[char],
-    ) -> Result<(usize, usize), UFuncError> {
-        let shapes = ops
-            .iter()
-            .map(|op| op.complex_logical_shape("einsum_optimized"))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self::pick_greedy_pair_from_specs(
-            &shapes,
-            subs,
-            output_labels,
-        ))
-    }
-
-    /// Pick the optimal pair by trying all pairs and choosing the one that
-    /// minimizes intermediate result size (accounts for shared indices).
-    fn pick_optimal_pair(
-        ops: &[Self],
-        subs: &[String],
-        output_labels: &[char],
-    ) -> Result<(usize, usize), UFuncError> {
-        let shapes = ops
-            .iter()
-            .map(|op| op.complex_logical_shape("einsum_optimized"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut best_lo = 0;
-        let mut best_hi = 1;
-        let mut best_inter_size = usize::MAX;
-
-        for i in 0..ops.len() {
-            for j in (i + 1)..ops.len() {
-                // Compute size of intermediate result
-                let mut needed: std::collections::HashSet<char> =
-                    output_labels.iter().copied().collect();
-                for (idx, s) in subs.iter().enumerate() {
-                    if idx != i && idx != j {
-                        for c in s.chars() {
-                            needed.insert(c);
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                if candidate < *entry.get() {
+                                    entry.insert(candidate);
+                                }
+                            }
                         }
                     }
                 }
-                // Build label-to-size map for this pair
-                let mut label_sizes: std::collections::HashMap<char, usize> =
-                    std::collections::HashMap::new();
-                let chars_i: Vec<char> = subs[i].chars().collect();
-                for (idx, &c) in chars_i.iter().enumerate() {
-                    if idx < shapes[i].len() {
-                        label_sizes.insert(c, shapes[i][idx]);
-                    }
-                }
-                let chars_j: Vec<char> = subs[j].chars().collect();
-                for (idx, &c) in chars_j.iter().enumerate() {
-                    if idx < shapes[j].len() {
-                        label_sizes
-                            .entry(c)
-                            .and_modify(|size| {
-                                if *size == 1 {
-                                    *size = shapes[j][idx];
-                                }
-                            })
-                            .or_insert(shapes[j][idx]);
-                    }
-                }
-                let inter_size: usize = subs[i]
-                    .chars()
-                    .chain(subs[j].chars())
-                    .filter(|c| needed.contains(c))
-                    .collect::<std::collections::HashSet<_>>()
-                    .iter()
-                    .map(|c| label_sizes.get(c).copied().unwrap_or(1))
-                    .fold(1usize, usize::saturating_mul)
-                    .max(1);
+            }
+            if next.is_empty() {
+                let (_, mut path) = states
+                    .into_values()
+                    .min()
+                    .expect("optimal search retains a nonempty frontier");
+                path.push((0..remaining_count).collect());
+                return Ok(path);
+            }
+            states = next;
+        }
+        Ok(states
+            .into_values()
+            .min()
+            .expect("optimal search retains a completed path")
+            .1)
+    }
 
-                if inter_size < best_inter_size {
-                    best_inter_size = inter_size;
-                    best_lo = i;
-                    best_hi = j;
+    fn greedy_einsum_path(
+        mut inputs: Vec<Vec<char>>,
+        output: &[char],
+        dimensions: &std::collections::HashMap<char, usize>,
+        memory_limit: u128,
+    ) -> Result<Vec<Vec<usize>>, UFuncError> {
+        let all_labels: Vec<char> = inputs
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let factor = (inputs.len() - 1) as u128
+            + u128::from(all_labels.iter().any(|label| !output.contains(label)));
+        let naive_cost = Self::einsum_planner_size(&all_labels, dimensions)?
+            .checked_mul(factor)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        // The sort key is -removed_size, then FLOPs. Represent its signed
+        // first component without narrowing the checked u128 size arithmetic.
+        type Candidate = ([usize; 2], (bool, u128, u128));
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut pairs: Vec<[usize; 2]> = (0..inputs.len())
+            .flat_map(|lo| (lo + 1..inputs.len()).map(move |hi| [lo, hi]))
+            .collect();
+        let mut cost = 0_u128;
+        let mut path = Vec::new();
+        while inputs.len() > 1 {
+            let candidate_for = |pair: [usize; 2]| -> Result<Option<Candidate>, UFuncError> {
+                let (result, contracted) = Self::einsum_pair_labels(&inputs, output, pair);
+                let size = Self::einsum_planner_size(&result, dimensions)?;
+                if size > memory_limit {
+                    return Ok(None);
+                }
+                let pair_cost = Self::einsum_planner_size(&contracted, dimensions)?
+                    .checked_mul(if result.len() < contracted.len() {
+                        2
+                    } else {
+                        1
+                    })
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+                if cost
+                    .checked_add(pair_cost)
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))?
+                    > naive_cost
+                {
+                    return Ok(None);
+                }
+                let old_size = Self::einsum_planner_size(&inputs[pair[0]], dimensions)?
+                    .checked_add(Self::einsum_planner_size(&inputs[pair[1]], dimensions)?)
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+                let key = if old_size >= size {
+                    (false, u128::MAX - (old_size - size), pair_cost)
+                } else {
+                    (true, size - old_size, pair_cost)
+                };
+                Ok(Some((pair, key)))
+            };
+            for &pair in &pairs {
+                if inputs[pair[0]]
+                    .iter()
+                    .any(|label| inputs[pair[1]].contains(label))
+                    && let Some(candidate) = candidate_for(pair)?
+                {
+                    candidates.push(candidate);
                 }
             }
+            if candidates.is_empty() {
+                for lo in 0..inputs.len() {
+                    for hi in lo + 1..inputs.len() {
+                        if let Some(candidate) = candidate_for([lo, hi])? {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+            let Some(&(pair, key)) = candidates.iter().min_by_key(|candidate| candidate.1) else {
+                path.push((0..inputs.len()).collect());
+                break;
+            };
+            path.push(pair.to_vec());
+            cost = cost
+                .checked_add(key.2)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            let (result, _) = Self::einsum_pair_labels(&inputs, output, pair);
+            inputs.remove(pair[1]);
+            inputs.remove(pair[0]);
+            inputs.push(result);
+
+            // Preserve earlier surviving candidates before adding new pairs:
+            // NumPy uses that order to break equal-cost greedy ties.
+            candidates.retain(|(indices, _)| !indices.iter().any(|index| pair.contains(index)));
+            for (indices, _) in &mut candidates {
+                for index in indices {
+                    *index -= usize::from(*index > pair[0]) + usize::from(*index > pair[1]);
+                }
+            }
+            let last = inputs.len() - 1;
+            pairs = (0..last).map(|lo| [lo, last]).collect();
         }
-        Ok((best_lo, best_hi))
+        Ok(path)
     }
 
     /// Stack arrays vertically (np.vstack). Row-wise concatenation.
