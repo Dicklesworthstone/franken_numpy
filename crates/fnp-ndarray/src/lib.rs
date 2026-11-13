@@ -922,7 +922,11 @@ pub fn views_overlap(
         && let Some(diff) = lhs_base_offset.checked_sub(rhs_base_offset)
     {
         let rem = diff.rem_euclid(g_isize);
-        if rem >= lhs_item && g_isize - rem >= rhs_item {
+        // `rem` measures the lhs start after a rhs start, so separation on
+        // that side requires passing the rhs end. The remaining gap to the
+        // next rhs start must fit the lhs element. Keep the widths attached
+        // to their own intervals when the views have different dtypes.
+        if rem >= rhs_item && g_isize - rem >= lhs_item {
             return Ok(false);
         }
     }
@@ -2551,35 +2555,172 @@ print("\n".join(out))
         rhs_base_offset: isize,
         rhs: &NdLayout,
     ) -> bool {
-        let lhs_count = element_count(&lhs.shape).unwrap();
-        let rhs_count = element_count(&rhs.shape).unwrap();
-        if lhs_count == 0 || rhs_count == 0 {
-            return false;
+        fn collect_bytes(
+            offset: isize,
+            shape: &[usize],
+            strides: &[isize],
+            item_size: usize,
+            bytes: &mut std::collections::BTreeSet<isize>,
+        ) {
+            match shape.split_first() {
+                Some((&dim, rest)) => {
+                    for index in 0..dim {
+                        collect_bytes(
+                            offset + index as isize * strides[0],
+                            rest,
+                            &strides[1..],
+                            item_size,
+                            bytes,
+                        );
+                    }
+                }
+                None => bytes.extend(offset..offset + item_size as isize),
+            }
         }
-        let lhs_offsets = super::collect_sorted_element_offsets(
+        // Keep the oracle independent of the production offset enumerator,
+        // bounding boxes, and GCD separation rule.
+        let mut lhs_bytes = std::collections::BTreeSet::new();
+        let mut rhs_bytes = std::collections::BTreeSet::new();
+        collect_bytes(
             lhs_base_offset,
             &lhs.shape,
             &lhs.strides,
-            lhs_count,
-        )
-        .unwrap();
-        let rhs_offsets = super::collect_sorted_element_offsets(
+            lhs.item_size,
+            &mut lhs_bytes,
+        );
+        collect_bytes(
             rhs_base_offset,
             &rhs.shape,
             &rhs.strides,
-            rhs_count,
-        )
-        .unwrap();
-        let lhs_item = lhs.item_size as isize;
-        let rhs_item = rhs.item_size as isize;
-        for &l in &lhs_offsets {
-            for &r in &rhs_offsets {
-                if l < r + rhs_item && r < l + lhs_item {
-                    return true;
+            rhs.item_size,
+            &mut rhs_bytes,
+        );
+        !lhs_bytes.is_disjoint(&rhs_bytes)
+    }
+
+    #[test]
+    fn mixed_item_size_views_overlap_at_partial_element_boundaries() {
+        for count in [2, super::EXACT_OVERLAP_ELEMENT_LIMIT + 100] {
+            for stride in [-16, 16] {
+                let wide = NdLayout {
+                    shape: vec![count],
+                    strides: vec![stride],
+                    item_size: 8,
+                    writeable: true,
+                    has_internal_overlap: false,
+                };
+                let narrow = NdLayout {
+                    item_size: 1,
+                    ..wide.clone()
+                };
+                for offset in 0..=16 {
+                    let expected = offset % 16 < 8;
+                    assert_eq!(
+                        views_overlap(0, &wide, offset, &narrow).unwrap(),
+                        expected,
+                        "wide/narrow count={count} stride={stride} offset={offset}"
+                    );
+                    assert_eq!(
+                        views_overlap(offset, &narrow, 0, &wide).unwrap(),
+                        expected,
+                        "narrow/wide count={count} stride={stride} offset={offset}"
+                    );
                 }
             }
         }
-        false
+    }
+
+    #[test]
+    fn mixed_item_size_views_overlap_matches_independent_byte_oracle() {
+        let mut layouts = Vec::new();
+        for item_size in [1, 2, 3, 4, 8] {
+            for (shape, strides) in [
+                (vec![], vec![]),
+                (vec![0], vec![16]),
+                (vec![3], vec![16]),
+                (vec![3], vec![-16]),
+                (vec![3], vec![0]),
+                (vec![2, 2], vec![32, 16]),
+                (vec![2, 2], vec![16, -8]),
+                (vec![2, 2], vec![16, 3]),
+            ] {
+                layouts.push(NdLayout {
+                    shape,
+                    strides,
+                    item_size,
+                    writeable: false,
+                    has_internal_overlap: false,
+                });
+            }
+        }
+        for lhs in &layouts {
+            for rhs in &layouts {
+                for rhs_offset in -17..=17 {
+                    let expected = brute_force_views_overlap_oracle(0, lhs, rhs_offset, rhs);
+                    assert_eq!(
+                        views_overlap(0, lhs, rhs_offset, rhs).unwrap(),
+                        expected,
+                        "lhs={lhs:?} rhs={rhs:?} rhs_offset={rhs_offset}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_item_size_views_overlap_matches_live_numpy() {
+        let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let script = r#"
+import numpy as np
+buffer = np.zeros(256, dtype=np.uint8)
+for lhs_item in (1, 2, 4, 8):
+    for rhs_item in (1, 2, 4, 8):
+        for lhs_stride in (-16, 0, 16):
+            for rhs_stride in (-16, 0, 16):
+                for rhs_offset in (-1, 0, 1, 7, 8, 15, 16, 17):
+                    lhs = np.ndarray((3,), dtype=f'u{lhs_item}', buffer=buffer,
+                                     offset=128, strides=(lhs_stride,))
+                    rhs = np.ndarray((3,), dtype=f'u{rhs_item}', buffer=buffer,
+                                     offset=128 + rhs_offset, strides=(rhs_stride,))
+                    print(lhs_item, rhs_item, lhs_stride, rhs_stride, rhs_offset,
+                          int(np.shares_memory(lhs, rhs)))
+"#;
+        let output = std::process::Command::new(&python)
+            .args(["-c", script])
+            .output()
+            .expect("NumPy overlap oracle should run");
+        assert!(
+            output.status.success(),
+            "NumPy overlap oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 oracle output");
+        assert_eq!(stdout.lines().count(), 1152, "NumPy overlap case count");
+        for line in stdout.lines() {
+            let row: Vec<isize> = line
+                .split_whitespace()
+                .map(|field| field.parse().expect("integer oracle field"))
+                .collect();
+            assert_eq!(row.len(), 6);
+            let lhs = NdLayout {
+                shape: vec![3],
+                strides: vec![row[2]],
+                item_size: row[0] as usize,
+                writeable: false,
+                has_internal_overlap: row[2] == 0,
+            };
+            let rhs = NdLayout {
+                strides: vec![row[3]],
+                item_size: row[1] as usize,
+                has_internal_overlap: row[3] == 0,
+                ..lhs.clone()
+            };
+            assert_eq!(
+                views_overlap(128, &lhs, 128 + row[4], &rhs).unwrap(),
+                row[5] != 0,
+                "NumPy overlap case {line}"
+            );
+        }
     }
 
     #[test]
