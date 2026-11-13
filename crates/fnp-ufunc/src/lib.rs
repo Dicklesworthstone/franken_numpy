@@ -8781,6 +8781,15 @@ impl UFuncArray {
                         | UnaryOp::Reciprocal
                         | UnaryOp::Log2
                         | UnaryOp::Log10
+                        | UnaryOp::Sin
+                        | UnaryOp::Cos
+                        | UnaryOp::Tan
+                        | UnaryOp::Sinh
+                        | UnaryOp::Cosh
+                        | UnaryOp::Tanh
+                        | UnaryOp::Exp2
+                        | UnaryOp::Expm1
+                        | UnaryOp::Log1p
                 )
                 && let Ok((result, _)) = self.complex_unary_values(op)
             {
@@ -19255,7 +19264,16 @@ impl UFuncArray {
             | UnaryOp::Log
             | UnaryOp::Reciprocal
             | UnaryOp::Log2
-            | UnaryOp::Log10 => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
+            | UnaryOp::Log10
+            | UnaryOp::Sin
+            | UnaryOp::Cos
+            | UnaryOp::Tan
+            | UnaryOp::Sinh
+            | UnaryOp::Cosh
+            | UnaryOp::Tanh
+            | UnaryOp::Exp2
+            | UnaryOp::Expm1
+            | UnaryOp::Log1p => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
                 dispatch_float_error_flags(flags, op.name())?;
                 Ok(array)
             })),
@@ -19558,6 +19576,125 @@ impl UFuncArray {
         }
     }
 
+    fn complex_unary_exp2(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        // NumPy's complex base-two exponential scales both components before
+        // the complex exponential. The intermediate rounding is observable
+        // for complex64, especially when a large imaginary part sets phase.
+        let scale = Self::complex_unary_round(std::f64::consts::LN_2, dtype);
+        let real = Self::complex_unary_round(re * scale, dtype);
+        let imag = Self::complex_unary_round(im * scale, dtype);
+        Self::complex_unary_product_flags(flags, re, scale, real, dtype);
+        Self::complex_unary_product_flags(flags, im, scale, imag, dtype);
+        let result = Self::complex_unary_exp(real, imag, flags);
+        let result = (
+            Self::complex_unary_round(result.0, dtype),
+            Self::complex_unary_round(result.1, dtype),
+        );
+        if real.is_finite() && imag.is_finite() {
+            if result.0.is_infinite() || result.1.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            let minimum = Self::complex_unary_min_normal(dtype);
+            if result.0.abs() < minimum || (imag != 0.0 && result.1.abs() < minimum) {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        result
+    }
+
+    fn complex_unary_expm1(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        // exp(z) - 1 loses the entire small real result near zero. Combine
+        // expm1(re) with cos(im) - 1 = -2*sin(im/2)^2 instead, retaining the
+        // source dtype at each stage of NumPy's real-component calculation.
+        let half_imag = Self::complex_unary_round(im * 0.5, dtype);
+        let (sin_half, sin, cos, magnitude, excess) = if dtype == DType::Complex64 {
+            (
+                f64::from((half_imag as f32).sin()),
+                f64::from((im as f32).sin()),
+                f64::from((im as f32).cos()),
+                f64::from((re as f32).exp()),
+                f64::from((re as f32).exp_m1()),
+            )
+        } else {
+            (half_imag.sin(), im.sin(), im.cos(), re.exp(), re.exp_m1())
+        };
+        let twice_sin_half = Self::complex_unary_round(2.0 * sin_half, dtype);
+        let correction = Self::complex_unary_round(twice_sin_half * sin_half, dtype);
+        let real_term = Self::complex_unary_round(excess * cos, dtype);
+        let imag = Self::complex_unary_round(magnitude * sin, dtype);
+        let real = Self::complex_unary_round(real_term - correction, dtype);
+
+        Self::complex_unary_product_flags(flags, im, 0.5, half_imag, dtype);
+        Self::complex_unary_product_flags(flags, twice_sin_half, sin_half, correction, dtype);
+        Self::complex_unary_product_flags(flags, excess, cos, real_term, dtype);
+        Self::complex_unary_product_flags(flags, magnitude, sin, imag, dtype);
+        let minimum = Self::complex_unary_min_normal(dtype);
+        if im.is_infinite() {
+            flags.note(FloatErrorKind::Invalid);
+        }
+        // The real exponential and sin calls can underflow before a later
+        // multiplication magnifies their result or a NaN masks it. Preserve
+        // those events independently of the final complex classification.
+        if (half_imag != 0.0 && half_imag.abs() < minimum)
+            || (im != 0.0 && im.abs() < minimum)
+            || (re != 0.0 && re.abs() < minimum)
+            || (re.is_finite() && magnitude < minimum)
+        {
+            flags.note(FloatErrorKind::Under);
+        }
+        if re.is_finite() && (magnitude.is_infinite() || excess.is_infinite()) {
+            flags.note(FloatErrorKind::Over);
+        }
+        (real, imag)
+    }
+
+    fn complex_unary_log1p(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        // The shifted real component, norm, phase, and logarithm each retain
+        // source precision. In particular, NumPy's complex log1p deliberately
+        // observes a norm rounded to one near zero, unlike its real log1p.
+        let shifted = Self::complex_unary_round(re + 1.0, dtype);
+        let (magnitude, phase) = if dtype == DType::Complex64 {
+            (
+                f64::from((shifted as f32).hypot(im as f32)),
+                f64::from((im as f32).atan2(shifted as f32)),
+            )
+        } else {
+            (shifted.hypot(im), im.atan2(shifted))
+        };
+        let real = if dtype == DType::Complex64 {
+            f64::from((magnitude as f32).ln())
+        } else {
+            magnitude.ln()
+        };
+        if magnitude == 0.0 {
+            flags.note(FloatErrorKind::Divide);
+        }
+        if shifted.is_finite() && im.is_finite() {
+            if magnitude.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if shifted > 0.0 && im != 0.0 && phase.abs() < Self::complex_unary_min_normal(dtype) {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        (real, phase)
+    }
+
     fn complex_unary_divide(
         numerator: f64,
         denominator: f64,
@@ -19716,15 +19853,263 @@ impl UFuncArray {
         (magnitude_log, phase)
     }
 
+    /// Paired sinh/cosh evaluation with scaling before exponential growth.
+    /// This retains finite minor components when the magnitude overflows.
+    fn complex_unary_hyperbolic(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        cosine: bool,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        if !re.is_finite() || !im.is_finite() {
+            if im == 0.0 {
+                return if cosine {
+                    (
+                        re * re,
+                        if re.is_nan() {
+                            im
+                        } else {
+                            0.0_f64.copysign(re) * im
+                        },
+                    )
+                } else {
+                    (re, im)
+                };
+            }
+            if re.is_nan() {
+                return (f64::NAN, f64::NAN);
+            }
+            if im.is_infinite() {
+                flags.note(FloatErrorKind::Invalid);
+            }
+            if !im.is_finite() {
+                if re == 0.0 {
+                    return if cosine {
+                        (f64::NAN, 0.0)
+                    } else {
+                        (re, f64::NAN)
+                    };
+                }
+                if re.is_infinite() {
+                    return (f64::INFINITY, f64::NAN);
+                }
+                if !cosine && im.is_nan() {
+                    flags.note(FloatErrorKind::Invalid);
+                }
+                return (f64::NAN, f64::NAN);
+            }
+            let (sin, cos) = im.sin_cos();
+            return if cosine {
+                (f64::INFINITY.copysign(cos), re * sin)
+            } else {
+                (re * cos, f64::INFINITY.copysign(sin))
+            };
+        }
+        let round = |value| Self::complex_unary_round(value, dtype);
+        let result = if im == 0.0 {
+            let real = if dtype == DType::Complex64 {
+                f64::from(if cosine {
+                    (re as f32).cosh()
+                } else {
+                    (re as f32).sinh()
+                })
+            } else if cosine {
+                re.cosh()
+            } else {
+                re.sinh()
+            };
+            (real, if cosine { re * im } else { im })
+        } else {
+            let (sin, cos) = if dtype == DType::Complex64 {
+                let (sin, cos) = (im as f32).sin_cos();
+                (f64::from(sin), f64::from(cos))
+            } else {
+                im.sin_cos()
+            };
+            let exponential_region = if dtype == DType::Complex64 { 9.0 } else { 22.0 };
+            if re.abs() < exponential_region {
+                let (sinh, cosh) = if dtype == DType::Complex64 {
+                    (f64::from((re as f32).sinh()), f64::from((re as f32).cosh()))
+                } else {
+                    (re.sinh(), re.cosh())
+                };
+                if cosine {
+                    (round(cosh * cos), round(sinh * sin))
+                } else {
+                    (round(sinh * cos), round(cosh * sin))
+                }
+            } else {
+                // exp(-|re|)/2 is below an ulp here. The power-of-two split
+                // does not round the argument. Multiply the small factor first
+                // and narrow only after all four growth steps.
+                let max_log = if dtype == DType::Complex64 {
+                    f64::from(f32::MAX).ln()
+                } else {
+                    f64::MAX.ln()
+                };
+                let magnitude = if re.abs() < max_log {
+                    Some(if dtype == DType::Complex64 {
+                        f64::from((re.abs() as f32).exp() * 0.5)
+                    } else {
+                        re.abs().exp() * 0.5
+                    })
+                } else {
+                    None
+                };
+                let scale = (re.abs() * 0.25).exp();
+                let component = |factor: f64| {
+                    if factor == 0.0 {
+                        factor
+                    } else if let Some(magnitude) = magnitude {
+                        // A subnormal factor must meet the full magnitude in
+                        // one multiplication. Small growth stages would round
+                        // away bits before later stages magnify that error.
+                        round(factor * magnitude)
+                    } else {
+                        round((((factor * scale) * scale) * scale) * (0.5 * scale))
+                    }
+                };
+                if cosine {
+                    (component(cos), component(sin) * 1.0_f64.copysign(re))
+                } else {
+                    (component(cos) * 1.0_f64.copysign(re), component(sin))
+                }
+            }
+        };
+        if result.0.is_infinite() || result.1.is_infinite() {
+            flags.note(FloatErrorKind::Over);
+        }
+        let minimum = Self::complex_unary_min_normal(dtype);
+        if (re != 0.0 && re.abs() < minimum)
+            || (!cosine && re != 0.0 && result.0.abs() < minimum)
+            || (im != 0.0 && (!cosine || re != 0.0) && result.1.abs() < minimum)
+        {
+            flags.note(FloatErrorKind::Under);
+        }
+        result
+    }
+
+    fn complex_unary_tanh(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        if re.is_infinite() {
+            let sign = if im.is_infinite() || im == 0.0 {
+                im
+            } else if im.is_nan() {
+                0.0
+            } else {
+                im.sin() * im.cos()
+            };
+            return (1.0_f64.copysign(re), 0.0_f64.copysign(sign));
+        }
+        if im.is_infinite() {
+            flags.note(FloatErrorKind::Invalid);
+        }
+        if re.is_nan() || !im.is_finite() {
+            return if im == 0.0 {
+                (re, im)
+            } else if re == 0.0 {
+                (re, f64::NAN)
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+        }
+        let round = |value| Self::complex_unary_round(value, dtype);
+        let result = if im == 0.0 {
+            let real = if dtype == DType::Complex64 {
+                f64::from((re as f32).tanh())
+            } else {
+                re.tanh()
+            };
+            (real, im)
+        } else if re == 0.0 {
+            let imag = if dtype == DType::Complex64 {
+                f64::from((im as f32).tan())
+            } else {
+                im.tan()
+            };
+            (re, imag)
+        } else {
+            let (sin, cos) = if dtype == DType::Complex64 {
+                let (sin, cos) = (im as f32).sin_cos();
+                (f64::from(sin), f64::from(cos))
+            } else {
+                im.sin_cos()
+            };
+            let saturated = if dtype == DType::Complex64 {
+                11.0
+            } else {
+                22.0
+            };
+            if re.abs() >= saturated {
+                let decay = round((-re.abs()).exp());
+                let imag = round(round(round(4.0 * sin) * cos) * decay);
+                (1.0_f64.copysign(re), round(imag * decay))
+            } else {
+                // Collecting the real terms of sinh(z)/cosh(z) gives
+                // sinh(re)^2 + cos(im)^2 in the denominator. It avoids
+                // subtracting nearly equal terms near a tangent pole.
+                let (sinh, cosh) = if dtype == DType::Complex64 {
+                    (f64::from((re as f32).sinh()), f64::from((re as f32).cosh()))
+                } else {
+                    (re.sinh(), re.cosh())
+                };
+                let denominator = round(round(sinh * sinh) + round(cos * cos));
+                (
+                    round(round(sinh * cosh) / denominator),
+                    round(round(sin * cos) / denominator),
+                )
+            }
+        };
+        let minimum = Self::complex_unary_min_normal(dtype);
+        if (re != 0.0 && result.0.abs() < minimum) || (im != 0.0 && result.1.abs() < minimum) {
+            flags.note(FloatErrorKind::Under);
+        }
+        result
+    }
+
     fn complex_unary_values(&self, op: UnaryOp) -> Result<(Self, FloatErrorFlags), UFuncError> {
-        if !matches!(op, UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Square | UnaryOp::Sign | UnaryOp::LogicalNot | UnaryOp::Sqrt | UnaryOp::Exp | UnaryOp::Log | UnaryOp::Reciprocal | UnaryOp::Log2 | UnaryOp::Log10) {
-            return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name())));
+        if !matches!(
+            op,
+            UnaryOp::Negative
+                | UnaryOp::Positive
+                | UnaryOp::Square
+                | UnaryOp::Sign
+                | UnaryOp::LogicalNot
+                | UnaryOp::Sqrt
+                | UnaryOp::Exp
+                | UnaryOp::Log
+                | UnaryOp::Reciprocal
+                | UnaryOp::Log2
+                | UnaryOp::Log10
+                | UnaryOp::Sin
+                | UnaryOp::Cos
+                | UnaryOp::Tan
+                | UnaryOp::Sinh
+                | UnaryOp::Cosh
+                | UnaryOp::Tanh
+                | UnaryOp::Exp2
+                | UnaryOp::Expm1
+                | UnaryOp::Log1p
+        ) {
+            return Err(UFuncError::Msg(format!(
+                "unsupported complex unary operation '{}'",
+                op.name()
+            )));
         }
         let logical_shape = self.complex_logical_shape(op.name())?;
         let logical_not = op == UnaryOp::LogicalNot;
         let fused_square = op == UnaryOp::Square && Self::complex_multiply_uses_fma();
         let mut flags = FloatErrorFlags::default();
-        let mut values = Vec::with_capacity(if logical_not { self.values.len() / 2 } else { self.values.len() });
+        let mut values = Vec::with_capacity(if logical_not {
+            self.values.len() / 2
+        } else {
+            self.values.len()
+        });
         for parts in self.values.as_chunks::<2>().0 {
             let re = Self::complex_unary_round(parts[0], self.dtype);
             let im = Self::complex_unary_round(parts[1], self.dtype);
@@ -19735,19 +20120,77 @@ impl UFuncArray {
             let result = match op {
                 UnaryOp::Negative => (-re, -im),
                 UnaryOp::Positive => (re, im),
-                UnaryOp::Square => Self::complex_unary_square((re, im), self.dtype, fused_square, &mut flags),
+                UnaryOp::Square => {
+                    Self::complex_unary_square((re, im), self.dtype, fused_square, &mut flags)
+                }
                 UnaryOp::Sign => Self::complex_unary_sign(re, im, self.dtype, &mut flags),
                 UnaryOp::Sqrt => Self::complex_unary_sqrt(re, im, self.dtype),
                 UnaryOp::Exp => Self::complex_unary_exp(re, im, &mut flags),
                 UnaryOp::Log => Self::complex_unary_log(re, im, &mut flags),
-                UnaryOp::Reciprocal => Self::complex_unary_reciprocal(re, im, self.dtype, &mut flags),
+                UnaryOp::Reciprocal => {
+                    Self::complex_unary_reciprocal(re, im, self.dtype, &mut flags)
+                }
                 UnaryOp::Log2 => Self::complex_unary_log_base(
-                    re, im, self.dtype, std::f64::consts::LOG2_E, &mut flags,
+                    re,
+                    im,
+                    self.dtype,
+                    std::f64::consts::LOG2_E,
+                    &mut flags,
                 ),
                 UnaryOp::Log10 => Self::complex_unary_log_base(
-                    re, im, self.dtype, std::f64::consts::LOG10_E, &mut flags,
+                    re,
+                    im,
+                    self.dtype,
+                    std::f64::consts::LOG10_E,
+                    &mut flags,
                 ),
-                _ => return Err(UFuncError::Msg(format!("unsupported complex unary operation '{}'", op.name()))),
+                UnaryOp::Exp2 => Self::complex_unary_exp2(re, im, self.dtype, &mut flags),
+                UnaryOp::Expm1 => Self::complex_unary_expm1(re, im, self.dtype, &mut flags),
+                UnaryOp::Log1p => Self::complex_unary_log1p(re, im, self.dtype, &mut flags),
+                UnaryOp::Sinh | UnaryOp::Cosh => Self::complex_unary_hyperbolic(
+                    re,
+                    im,
+                    self.dtype,
+                    op == UnaryOp::Cosh,
+                    &mut flags,
+                ),
+                UnaryOp::Tanh => Self::complex_unary_tanh(re, im, self.dtype, &mut flags),
+                UnaryOp::Sin | UnaryOp::Cos => {
+                    // cos(z) = cosh(i*z); sin(z) = -i*sinh(i*z).
+                    // NumPy's nonfinite branches choose signs independently
+                    // of these identities; retain those observable choices.
+                    if op == UnaryOp::Sin && !re.is_finite() && im.is_infinite() {
+                        if re.is_infinite() {
+                            flags.note(FloatErrorKind::Invalid);
+                        }
+                        (f64::NAN, f64::INFINITY)
+                    } else if op == UnaryOp::Cos && re == 0.0 && im.is_nan() {
+                        (f64::NAN, re)
+                    } else {
+                        let value = Self::complex_unary_hyperbolic(
+                            -im,
+                            re,
+                            self.dtype,
+                            op == UnaryOp::Cos,
+                            &mut flags,
+                        );
+                        if op == UnaryOp::Cos {
+                            value
+                        } else {
+                            (value.1, -value.0)
+                        }
+                    }
+                }
+                UnaryOp::Tan => {
+                    let value = Self::complex_unary_tanh(-im, re, self.dtype, &mut flags);
+                    (value.1, -value.0)
+                }
+                _ => {
+                    return Err(UFuncError::Msg(format!(
+                        "unsupported complex unary operation '{}'",
+                        op.name()
+                    )));
+                }
             };
             let result = (
                 Self::complex_unary_round(result.0, self.dtype),
@@ -19756,7 +20199,9 @@ impl UFuncArray {
             if re.is_finite() && im.is_finite() {
                 let minimum = Self::complex_unary_min_normal(self.dtype);
                 match op {
-                    UnaryOp::Sqrt if im != 0.0 && (result.0.abs() < minimum || result.1.abs() < minimum) => {
+                    UnaryOp::Sqrt
+                        if im != 0.0 && (result.0.abs() < minimum || result.1.abs() < minimum) =>
+                    {
                         flags.note(FloatErrorKind::Under);
                     }
                     UnaryOp::Exp => {
@@ -19767,8 +20212,12 @@ impl UFuncArray {
                             flags.note(FloatErrorKind::Under);
                         }
                     }
-                    UnaryOp::Log if (re > 0.0 && im != 0.0 && result.1.abs() < minimum)
-                        || (re.abs().max(im.abs()) == 1.0 && re.abs().min(im.abs()) != 0.0 && result.0.abs() < minimum) => {
+                    UnaryOp::Log
+                        if (re > 0.0 && im != 0.0 && result.1.abs() < minimum)
+                            || (re.abs().max(im.abs()) == 1.0
+                                && re.abs().min(im.abs()) != 0.0
+                                && result.0.abs() < minimum) =>
+                    {
                         flags.note(FloatErrorKind::Under);
                     }
                     _ => {}
