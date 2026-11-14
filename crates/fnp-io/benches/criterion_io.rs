@@ -3241,10 +3241,7 @@ fn bench_fromfile_structured_single_field(c: &mut Criterion) {
     const RECORDS: usize = 1_048_576;
 
     let descriptor = StructuredIODescriptor {
-        fields: vec![StructuredIOField {
-            name: "value".to_string(),
-            dtype: IOSupportedDType::F64,
-        }],
+        fields: vec![StructuredIOField::new("value", IOSupportedDType::F64)],
     };
     let values: Vec<u64> = (0..RECORDS)
         .map(|index| (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))

@@ -6180,70 +6180,198 @@ pub fn open_memmap(
 
 // ── Structured / Record Dtype NPY support ──
 
+/// Maximum nesting accepted in a structured dtype or subarray descriptor.
+/// Bound recursive parsing and layout checks independently of header byte size.
+pub const MAX_STRUCTURED_DTYPE_DEPTH: usize = 64;
+/// NumPy permits at most 64 axes in a fixed-size subarray dtype.
+pub const MAX_STRUCTURED_SUBARRAY_NDIM: usize = 64;
+
+/// A field type in an NPY record. Nested records and fixed-size subarrays retain
+/// their own layout; scalar leaves retain their declared byte order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuredIOType {
+    Scalar(IOSupportedDType),
+    Record(StructuredIODescriptor),
+    Subarray {
+        base: Box<StructuredIOType>,
+        shape: Vec<usize>,
+    },
+    /// Uninterpreted bytes, including the anonymous padding emitted by NumPy
+    /// for aligned records and explicit field offsets.
+    Void(usize),
+}
+
+impl From<IOSupportedDType> for StructuredIOType {
+    fn from(dtype: IOSupportedDType) -> Self {
+        Self::Scalar(dtype)
+    }
+}
+
+impl StructuredIOType {
+    /// Checked size of one complete field, including every subarray element.
+    #[must_use]
+    pub fn item_size(&self) -> Option<usize> {
+        self.checked_item_size(0).ok()
+    }
+
+    fn checked_item_size(&self, depth: usize) -> Result<usize, IOError> {
+        if depth > MAX_STRUCTURED_DTYPE_DEPTH {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        let size = match self {
+            Self::Scalar(dtype) => dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?,
+            Self::Void(size) => *size,
+            Self::Record(descriptor) => descriptor.checked_record_size(depth + 1)?,
+            Self::Subarray { base, shape } => {
+                if shape.len() > MAX_STRUCTURED_SUBARRAY_NDIM
+                    || shape
+                        .iter()
+                        .any(|&dimension| dimension > isize::MAX as usize)
+                {
+                    return Err(IOError::DTypeDescriptorInvalid);
+                }
+                // Validate the base even when an extent is zero: an empty
+                // subarray must not conceal an object or an invalid nested type.
+                let base_size = base.checked_item_size(depth + 1)?;
+                let count = if shape.contains(&0) {
+                    0
+                } else {
+                    element_count(shape)?
+                };
+                base_size
+                    .checked_mul(count)
+                    .ok_or(IOError::HeaderSchemaInvalid(
+                        "subarray item size overflowed",
+                    ))?
+            }
+        };
+        if size > isize::MAX as usize {
+            return Err(IOError::HeaderSchemaInvalid("field item size overflowed"));
+        }
+        Ok(size)
+    }
+
+    /// Scalar descriptor text or the corresponding nested Python dtype literal.
+    /// Hand-built recursive types must be validated with item_size before formatting.
+    #[must_use]
+    pub fn descr(&self) -> String {
+        match self {
+            Self::Scalar(dtype) => dtype.descr(),
+            Self::Void(size) => format!("|V{size}"),
+            Self::Record(descriptor) => descriptor.to_descr_string(),
+            Self::Subarray { base, shape } => {
+                format!("({}, {})", base.literal(), format_shape_tuple(shape))
+            }
+        }
+    }
+
+    fn literal(&self) -> String {
+        match self {
+            Self::Scalar(_) | Self::Void(_) => format!("'{}'", self.descr()),
+            _ => self.descr(),
+        }
+    }
+}
+
 /// A field in a structured/record dtype descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredIOField {
-    /// Field name (e.g. "x", "label").
+    /// Field name (e.g. "x", "label"). An untitled empty-name void field is padding.
     pub name: String,
-    /// Field dtype (e.g. `IOSupportedDType::F64`, `IOSupportedDType::Bytes(5)`).
-    pub dtype: IOSupportedDType,
+    /// Optional string title, represented by NumPy as ((title, name), dtype).
+    pub title: Option<String>,
+    pub dtype: StructuredIOType,
 }
 
-/// Descriptor for a structured/record dtype: an ordered list of named, typed fields.
-///
-/// Corresponds to NumPy's compound dtype descriptors such as
-/// `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`.
+impl StructuredIOField {
+    #[must_use]
+    pub fn new(name: impl Into<String>, dtype: impl Into<StructuredIOType>) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            dtype: dtype.into(),
+        }
+    }
+}
+
+/// An ordered record layout. Anonymous void fields preserve explicit offsets
+/// and trailing padding; nested records and subarrays are complete field types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredIODescriptor {
     pub fields: Vec<StructuredIOField>,
 }
 
 impl StructuredIODescriptor {
-    /// Total byte size per record (sum of field item sizes).
+    /// Total byte size per record, including nested fields and padding.
     pub fn record_size(&self) -> Result<usize, IOError> {
+        self.checked_record_size(0)
+    }
+
+    fn checked_record_size(&self, depth: usize) -> Result<usize, IOError> {
+        if depth > MAX_STRUCTURED_DTYPE_DEPTH {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        let mut names = HashSet::new();
         let mut total = 0usize;
         for field in &self.fields {
-            let sz = field
-                .dtype
-                .item_size()
-                .ok_or(IOError::DTypeDescriptorInvalid)?;
+            let padding = field.name.is_empty()
+                && field.title.is_none()
+                && matches!(&field.dtype, StructuredIOType::Void(_));
+            if !padding && !names.insert(field.name.as_str()) {
+                return Err(IOError::DTypeDescriptorInvalid);
+            }
+            if let Some(title) = &field.title
+                && !names.insert(title.as_str())
+            {
+                return Err(IOError::DTypeDescriptorInvalid);
+            }
+            let size = field.dtype.checked_item_size(depth)?;
             total = total
-                .checked_add(sz)
+                .checked_add(size)
                 .ok_or(IOError::HeaderSchemaInvalid("record size overflowed"))?;
+            if total > isize::MAX as usize {
+                return Err(IOError::HeaderSchemaInvalid("record size overflowed"));
+            }
         }
         Ok(total)
     }
 
-    /// Byte offset of each field within a record.
+    /// Byte offset of each field or padding entry within a record.
     pub fn field_offsets(&self) -> Result<Vec<usize>, IOError> {
+        self.record_size()?;
         let mut offsets = Vec::with_capacity(self.fields.len());
         let mut offset = 0usize;
         for field in &self.fields {
             offsets.push(offset);
-            let sz = field
-                .dtype
-                .item_size()
-                .ok_or(IOError::DTypeDescriptorInvalid)?;
             offset = offset
-                .checked_add(sz)
+                .checked_add(field.dtype.checked_item_size(0)?)
                 .ok_or(IOError::HeaderSchemaInvalid("field offset overflowed"))?;
         }
         Ok(offsets)
     }
 
-    /// Format as a NumPy-style structured descriptor string for NPY headers.
-    ///
-    /// E.g. `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`
+    /// Format a NumPy dtype literal, preserving nested shapes, titles and padding.
+    /// Parsed descriptors are validated; call record_size first for a hand-built
+    /// descriptor. The NPY writer performs that validation before formatting.
+    #[must_use]
     pub fn to_descr_string(&self) -> String {
         let parts: Vec<String> = self
             .fields
             .iter()
-            .map(|f| {
-                format!(
-                    "('{}', '{}')",
-                    escape_structured_field_name(&f.name),
-                    f.dtype.descr()
-                )
+            .map(|field| {
+                let name = format!("'{}'", escape_structured_field_name(&field.name));
+                let name = field.title.as_ref().map_or_else(
+                    || name.clone(),
+                    |title| format!("('{}', {name})", escape_structured_field_name(title)),
+                );
+                match &field.dtype {
+                    StructuredIOType::Subarray { base, shape } => format!(
+                        "({name}, {}, {})",
+                        base.literal(),
+                        format_shape_tuple(shape),
+                    ),
+                    dtype => format!("({name}, {})", dtype.literal()),
+                }
             })
             .collect();
         format!("[{}]", parts.join(", "))
@@ -6266,80 +6394,206 @@ fn escape_structured_field_name(name: &str) -> String {
     escaped
 }
 
-/// Parse a NumPy structured dtype descriptor string.
-///
-/// Handles the format: `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`
+/// Parse the structured dtype literal used by NumPy's NPY headers.
+/// Supports scalar leaves, nested records, fixed-size subarrays, string titles,
+/// and anonymous void padding. No expression evaluation or object data is allowed.
 pub fn parse_structured_descr(value: &str) -> Result<StructuredIODescriptor, IOError> {
-    let value = value.trim();
-    if !value.starts_with('[') || !value.ends_with(']') {
+    if value.len() > MAX_HEADER_BYTES {
         return Err(IOError::DTypeDescriptorInvalid);
     }
-    let inner = &value[1..value.len() - 1];
-    let inner = inner.trim();
-    if inner.is_empty() {
+    let mut parser = StructuredDescrParser { value, position: 0 };
+    let descriptor = parser.record(0)?;
+    parser.whitespace();
+    if parser.position != value.len() {
         return Err(IOError::DTypeDescriptorInvalid);
     }
+    descriptor.record_size()?;
+    Ok(descriptor)
+}
 
-    let mut fields = Vec::new();
-    let mut pos = 0;
-    let bytes = inner.as_bytes();
+struct StructuredDescrParser<'a> {
+    value: &'a str,
+    position: usize,
+}
 
-    while pos < bytes.len() {
-        // Skip whitespace and commas between tuples
-        while pos < bytes.len() && (bytes[pos].is_ascii_whitespace() || bytes[pos] == b',') {
-            pos += 1;
+impl StructuredDescrParser<'_> {
+    fn whitespace(&mut self) {
+        while self
+            .value
+            .as_bytes()
+            .get(self.position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.position += 1;
         }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Expect '('
-        if bytes[pos] != b'(' {
-            return Err(IOError::DTypeDescriptorInvalid);
-        }
-        pos += 1;
-
-        // Parse field name (quoted string)
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        let (name, new_pos) = parse_structured_quoted_string(inner, pos)?;
-        pos = new_pos;
-
-        // Skip comma
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= bytes.len() || bytes[pos] != b',' {
-            return Err(IOError::DTypeDescriptorInvalid);
-        }
-        pos += 1;
-
-        // Parse dtype descriptor (quoted string)
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        let (dtype_str, new_pos) = parse_structured_quoted_string(inner, pos)?;
-        pos = new_pos;
-
-        // Skip to closing ')'
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= bytes.len() || bytes[pos] != b')' {
-            return Err(IOError::DTypeDescriptorInvalid);
-        }
-        pos += 1;
-
-        let dtype = IOSupportedDType::decode(&dtype_str)?;
-        fields.push(StructuredIOField { name, dtype });
     }
 
-    if fields.is_empty() {
-        return Err(IOError::DTypeDescriptorInvalid);
+    fn take(&mut self, token: u8) -> bool {
+        self.whitespace();
+        if self.value.as_bytes().get(self.position) == Some(&token) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
     }
 
-    Ok(StructuredIODescriptor { fields })
+    fn expect(&mut self, token: u8) -> Result<(), IOError> {
+        if self.take(token) {
+            Ok(())
+        } else {
+            Err(IOError::DTypeDescriptorInvalid)
+        }
+    }
+
+    fn string(&mut self) -> Result<String, IOError> {
+        self.whitespace();
+        let (value, next) = parse_structured_quoted_string(self.value, self.position)?;
+        self.position = next;
+        Ok(value)
+    }
+
+    fn record(&mut self, depth: usize) -> Result<StructuredIODescriptor, IOError> {
+        if depth > MAX_STRUCTURED_DTYPE_DEPTH {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        self.expect(b'[')?;
+        let mut fields = Vec::new();
+        if self.take(b']') {
+            return Ok(StructuredIODescriptor { fields });
+        }
+        loop {
+            self.expect(b'(')?;
+            let (title, name) = if self.take(b'(') {
+                let title = self.string()?;
+                self.expect(b',')?;
+                let name = self.string()?;
+                let _ = self.take(b',');
+                self.expect(b')')?;
+                (Some(title), name)
+            } else {
+                (None, self.string()?)
+            };
+            self.expect(b',')?;
+            let mut dtype = self.dtype(depth + 1)?;
+            if self.take(b',') {
+                if !self.take(b')') {
+                    let shape = self.shape()?;
+                    dtype = StructuredIOType::Subarray {
+                        base: Box::new(dtype),
+                        shape,
+                    };
+                    let _ = self.take(b',');
+                    self.expect(b')')?;
+                }
+            } else {
+                self.expect(b')')?;
+            }
+            fields.push(StructuredIOField { name, title, dtype });
+            if self.take(b']') {
+                break;
+            }
+            self.expect(b',')?;
+            if self.take(b']') {
+                break;
+            }
+        }
+        Ok(StructuredIODescriptor { fields })
+    }
+
+    fn dtype(&mut self, depth: usize) -> Result<StructuredIOType, IOError> {
+        if depth > MAX_STRUCTURED_DTYPE_DEPTH {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        self.whitespace();
+        match self.value.as_bytes().get(self.position).copied() {
+            Some(b'[') => Ok(StructuredIOType::Record(self.record(depth)?)),
+            Some(b'(') => {
+                self.position += 1;
+                let base = self.dtype(depth + 1)?;
+                self.expect(b',')?;
+                let shape = self.shape()?;
+                let _ = self.take(b',');
+                self.expect(b')')?;
+                Ok(StructuredIOType::Subarray {
+                    base: Box::new(base),
+                    shape,
+                })
+            }
+            Some(b'\'') | Some(b'"') => {
+                let literal = self.string()?;
+                let bytes = literal.as_bytes();
+                if bytes.len() >= 3
+                    && matches!(bytes[0], b'|' | b'<' | b'>' | b'=')
+                    && bytes[1] == b'V'
+                    && bytes[2..].iter().all(u8::is_ascii_digit)
+                {
+                    let size = literal[2..]
+                        .parse()
+                        .map_err(|_| IOError::DTypeDescriptorInvalid)?;
+                    Ok(StructuredIOType::Void(size))
+                } else {
+                    // Zero-width strings are legal record fields even though
+                    // the scalar-array decoder requires a nonzero item width.
+                    let dtype = match literal.as_str() {
+                        "|S0" | "=S0" | "<S0" | ">S0" => IOSupportedDType::Bytes(0),
+                        "<U0" => IOSupportedDType::Unicode(0),
+                        ">U0" => IOSupportedDType::UnicodeBe(0),
+                        "=U0" | "|U0" => IOSupportedDType::native_endian(
+                            IOSupportedDType::Unicode(0),
+                            IOSupportedDType::UnicodeBe(0),
+                        ),
+                        _ => IOSupportedDType::decode(&literal)?,
+                    };
+                    Ok(StructuredIOType::Scalar(dtype))
+                }
+            }
+            _ => Err(IOError::DTypeDescriptorInvalid),
+        }
+    }
+
+    fn dimension(&mut self) -> Result<usize, IOError> {
+        self.whitespace();
+        let start = self.position;
+        while self
+            .value
+            .as_bytes()
+            .get(self.position)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.position += 1;
+        }
+        if self.position == start {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        self.value[start..self.position]
+            .parse()
+            .map_err(|_| IOError::DTypeDescriptorInvalid)
+    }
+
+    fn shape(&mut self) -> Result<Vec<usize>, IOError> {
+        if !self.take(b'(') {
+            return Ok(vec![self.dimension()?]);
+        }
+        let mut shape = Vec::new();
+        if self.take(b')') {
+            return Ok(shape);
+        }
+        loop {
+            if shape.len() >= MAX_STRUCTURED_SUBARRAY_NDIM {
+                return Err(IOError::DTypeDescriptorInvalid);
+            }
+            shape.push(self.dimension()?);
+            if self.take(b')') {
+                break;
+            }
+            self.expect(b',')?;
+            if self.take(b')') {
+                break;
+            }
+        }
+        Ok(shape)
+    }
 }
 
 /// Parse a single-quoted or double-quoted string starting at `pos`.
@@ -6466,10 +6720,32 @@ pub struct StructuredNpyData {
     pub columns: Vec<Vec<u8>>,
 }
 
-/// Read raw binary bytes into structured per-field column data.
-///
-/// Each record in the binary data has fields packed consecutively
-/// (field 0 bytes, then field 1 bytes, ..., then next record).
+fn structured_record_count(shape: &[usize]) -> Result<usize, IOError> {
+    if shape.len() > MAX_STRUCTURED_SUBARRAY_NDIM
+        || shape
+            .iter()
+            .any(|&dimension| dimension > isize::MAX as usize)
+    {
+        return Err(IOError::HeaderSchemaInvalid(
+            "structured array shape exceeds intp bounds",
+        ));
+    }
+    let count = if shape.contains(&0) {
+        0
+    } else {
+        element_count(shape)?
+    };
+    if count > isize::MAX as usize {
+        return Err(IOError::HeaderSchemaInvalid(
+            "structured record count exceeds intp bounds",
+        ));
+    }
+    Ok(count)
+}
+
+/// Read packed records into one raw byte column per top-level field.
+/// Nested records and subarrays remain intact inside each column. An explicit
+/// count is required for a zero-byte record, whose count cannot be inferred.
 pub fn fromfile_structured(
     data: &[u8],
     descriptor: &StructuredIODescriptor,
@@ -6477,48 +6753,54 @@ pub fn fromfile_structured(
 ) -> Result<StructuredNpyData, IOError> {
     let record_size = descriptor.record_size()?;
     if record_size == 0 {
-        return Err(IOError::DTypeDescriptorInvalid);
-    }
-    let max_records = data.len() / record_size;
-    let n = clamp_count(count, max_records);
-
-    let offsets = descriptor.field_offsets()?;
-    if descriptor.fields.len() == 1 {
+        let count = count.ok_or(IOError::DTypeDescriptorInvalid)?;
+        structured_record_count(&[count])?;
+        if !data.is_empty() {
+            return Err(IOError::ReadPayloadIncomplete(
+                "zero-width structured records cannot contain payload bytes",
+            ));
+        }
         return Ok(StructuredNpyData {
-            shape: vec![n],
+            shape: vec![count],
             fortran_order: false,
             descriptor: descriptor.clone(),
-            columns: vec![data[..n * record_size].to_vec()],
+            columns: vec![Vec::new(); descriptor.fields.len()],
         });
     }
-
-    let mut columns: Vec<Vec<u8>> = descriptor
+    let n = clamp_count(count, data.len() / record_size);
+    let offsets = descriptor.field_offsets()?;
+    let sizes = descriptor
         .fields
         .iter()
-        .map(|f| {
-            let sz = f.dtype.item_size().unwrap_or(0);
-            Vec::with_capacity(n * sz)
-        })
-        .collect();
-
-    for record_idx in 0..n {
-        let record_start = record_idx * record_size;
-        for (field_idx, field) in descriptor.fields.iter().enumerate() {
-            let field_size = field
+        .map(|field| {
+            field
                 .dtype
                 .item_size()
-                .ok_or(IOError::DTypeDescriptorInvalid)?;
-            let field_start = record_start + offsets[field_idx];
-            let field_end = field_start + field_size;
-            if field_end > data.len() {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "structured record extends past end of data",
-                ));
+                .ok_or(IOError::DTypeDescriptorInvalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut columns = Vec::with_capacity(sizes.len());
+    for &size in &sizes {
+        let len = n.checked_mul(size).ok_or(IOError::ReadPayloadIncomplete(
+            "structured column size overflowed",
+        ))?;
+        let mut column = Vec::new();
+        column
+            .try_reserve_exact(len)
+            .map_err(|_| IOError::ReadPayloadIncomplete("unable to allocate structured column"))?;
+        columns.push(column);
+    }
+    if descriptor.fields.len() == 1 {
+        columns[0].extend_from_slice(&data[..n * record_size]);
+    } else {
+        for record_idx in 0..n {
+            let record_start = record_idx * record_size;
+            for (field_idx, &size) in sizes.iter().enumerate() {
+                let start = record_start + offsets[field_idx];
+                columns[field_idx].extend_from_slice(&data[start..start + size]);
             }
-            columns[field_idx].extend_from_slice(&data[field_start..field_end]);
         }
     }
-
     Ok(StructuredNpyData {
         shape: vec![n],
         fortran_order: false,
@@ -6527,9 +6809,64 @@ pub fn fromfile_structured(
     })
 }
 
-/// Write structured per-field column data to interleaved record bytes.
-///
-/// All columns must have the same number of records (column.len() / field.item_size).
+/// Interleave columns with a known count, including zero-sized fields and records.
+fn tofile_structured_records(
+    descriptor: &StructuredIODescriptor,
+    columns: &[Vec<u8>],
+    records: usize,
+) -> Result<Vec<u8>, IOError> {
+    if columns.len() != descriptor.fields.len() {
+        return Err(IOError::WriteContractViolation(
+            "column count does not match structured descriptor field count",
+        ));
+    }
+    let record_size = descriptor.record_size()?;
+    let sizes = descriptor
+        .fields
+        .iter()
+        .map(|field| {
+            field
+                .dtype
+                .item_size()
+                .ok_or(IOError::DTypeDescriptorInvalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (&size, column) in sizes.iter().zip(columns) {
+        let expected = records
+            .checked_mul(size)
+            .ok_or(IOError::WriteContractViolation(
+                "structured column size overflowed",
+            ))?;
+        if column.len() != expected {
+            return Err(IOError::WriteContractViolation(
+                "structured column byte length does not match record count and field size",
+            ));
+        }
+    }
+    let size = records
+        .checked_mul(record_size)
+        .ok_or(IOError::WriteContractViolation(
+            "structured payload size overflowed",
+        ))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| IOError::WriteContractViolation("unable to allocate structured payload"))?;
+    if size == 0 {
+        return Ok(bytes);
+    }
+    for record in 0..records {
+        for (&size, column) in sizes.iter().zip(columns) {
+            let start = record * size;
+            bytes.extend_from_slice(&column[start..start + size]);
+        }
+    }
+    Ok(bytes)
+}
+
+/// Write structured per-field column data as packed records.
+/// Nonzero-width fields determine the record count; zero-width fields must have
+/// empty columns. An all-zero-width record has an empty binary representation.
 pub fn tofile_structured(
     descriptor: &StructuredIODescriptor,
     columns: &[Vec<u8>],
@@ -6539,137 +6876,109 @@ pub fn tofile_structured(
             "column count does not match structured descriptor field count",
         ));
     }
-
-    let record_size = descriptor.record_size()?;
-    if record_size == 0 {
-        return Err(IOError::DTypeDescriptorInvalid);
-    }
-
-    // Determine record count from first column
-    let n = if descriptor.fields.is_empty() {
-        0
-    } else {
-        let first_item_size = descriptor.fields[0]
+    descriptor.record_size()?;
+    let mut records = None;
+    for (field, column) in descriptor.fields.iter().zip(columns) {
+        let size = field
             .dtype
             .item_size()
             .ok_or(IOError::DTypeDescriptorInvalid)?;
-        if first_item_size == 0 {
-            return Err(IOError::DTypeDescriptorInvalid);
+        if size == 0 {
+            if !column.is_empty() {
+                return Err(IOError::WriteContractViolation(
+                    "structured column byte length must be 0 for zero-width field",
+                ));
+            }
+            continue;
         }
-        if !columns[0].len().is_multiple_of(first_item_size) {
+        if !column.len().is_multiple_of(size) {
             return Err(IOError::WriteContractViolation(
                 "structured column byte length must be an exact multiple of field item size",
             ));
         }
-        columns[0].len() / first_item_size
-    };
-
-    // Validate all columns have the same record count
-    for (i, field) in descriptor.fields.iter().enumerate() {
-        let item_size = field
-            .dtype
-            .item_size()
-            .ok_or(IOError::DTypeDescriptorInvalid)?;
-        if !columns[i].len().is_multiple_of(item_size) {
-            return Err(IOError::WriteContractViolation(
-                "structured column byte length must be an exact multiple of field item size",
-            ));
-        }
-        if item_size == 0 && !columns[i].is_empty() {
-            return Err(IOError::WriteContractViolation(
-                "structured column byte length must be 0 for zero-width field",
-            ));
-        }
-        let col_records = columns[i].len().checked_div(item_size).unwrap_or(n);
-        if col_records != n {
+        let count = column.len() / size;
+        if records.is_some_and(|previous| previous != count) {
             return Err(IOError::WriteContractViolation(
                 "structured columns have inconsistent record counts",
             ));
         }
+        records = Some(count);
     }
-
-    let mut buf = Vec::with_capacity(n * record_size);
-    for record_idx in 0..n {
-        for (field_idx, field) in descriptor.fields.iter().enumerate() {
-            let item_size = field
-                .dtype
-                .item_size()
-                .ok_or(IOError::DTypeDescriptorInvalid)?;
-            let start = record_idx * item_size;
-            let end = start + item_size;
-            buf.extend_from_slice(&columns[field_idx][start..end]);
-        }
-    }
-
-    Ok(buf)
+    tofile_structured_records(descriptor, columns, records.unwrap_or(0))
 }
 
-/// High-level save for structured arrays to NPY bytes.
+/// Save structured columns in C record order.
 pub fn save_structured(
     shape: &[usize],
     descriptor: &StructuredIODescriptor,
     columns: &[Vec<u8>],
 ) -> Result<Vec<u8>, IOError> {
-    let expected_records = element_count(shape)?;
-    let record_size = descriptor.record_size()?;
+    save_structured_with_order(shape, descriptor, columns, false)
+}
 
-    // Validate record count matches shape
-    if !descriptor.fields.is_empty() {
-        let first_item_size = descriptor.fields[0]
-            .dtype
-            .item_size()
-            .ok_or(IOError::DTypeDescriptorInvalid)?;
-        if first_item_size > 0 {
-            let n = columns.first().map_or(0, |c| c.len() / first_item_size);
-            if n != expected_records {
-                return Err(IOError::WriteContractViolation(
-                    "structured record count does not match shape",
-                ));
-            }
-        }
-    }
-
-    let payload = tofile_structured(descriptor, columns)?;
-
-    // Build NPY header manually for structured dtype
-    let dict_str = encode_structured_header_dict(shape, false, descriptor);
-    // Choose the encoding with the format version. Writing UTF-8 under a 1.0
-    // preamble makes NumPy silently reinterpret field names as Latin-1.
-    let (version, dict_bytes) = if dict_str.chars().all(|ch| u32::from(ch) <= 0xff) {
+/// Save structured columns in the supplied record order.
+/// Each column is already arranged in that order, as returned by load_structured;
+/// subarray elements always retain their dtype's contiguous internal layout.
+pub fn save_structured_with_order(
+    shape: &[usize],
+    descriptor: &StructuredIODescriptor,
+    columns: &[Vec<u8>],
+    fortran_order: bool,
+) -> Result<Vec<u8>, IOError> {
+    let expected_records = structured_record_count(shape)?;
+    let payload = tofile_structured_records(descriptor, columns, expected_records)?;
+    let dictionary = encode_structured_header_dict(shape, fortran_order, descriptor);
+    let (mut version, dictionary) = if dictionary.chars().all(|ch| u32::from(ch) <= 0xff) {
         (
             (1, 0),
-            dict_str.chars().map(|ch| ch as u8).collect::<Vec<_>>(),
+            dictionary.chars().map(|ch| ch as u8).collect::<Vec<_>>(),
         )
     } else {
-        ((3, 0), dict_str.into_bytes())
+        ((3, 0), dictionary.into_bytes())
     };
-    let length_field_size = npy_length_field_size(version)?;
-    let prefix_len = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
-    let base_header_len = dict_bytes.len() + 1; // +1 for trailing newline
-    let padding =
-        (NPY_ARRAY_ALIGN - ((prefix_len + base_header_len) % NPY_ARRAY_ALIGN)) % NPY_ARRAY_ALIGN;
-    let header_len = base_header_len + padding;
-
-    if header_len > MAX_HEADER_BYTES {
+    let header_layout = |version| -> Result<(usize, usize, usize), IOError> {
+        let prefix = NPY_MAGIC_PREFIX.len() + 2 + npy_length_field_size(version)?;
+        let base = dictionary
+            .len()
+            .checked_add(1)
+            .ok_or(IOError::HeaderSchemaInvalid(
+                "structured header size overflowed",
+            ))?;
+        let unpadded = prefix
+            .checked_add(base)
+            .ok_or(IOError::HeaderSchemaInvalid(
+                "structured header size overflowed",
+            ))?;
+        let padding = (NPY_ARRAY_ALIGN - unpadded % NPY_ARRAY_ALIGN) % NPY_ARRAY_ALIGN;
+        let length = base
+            .checked_add(padding)
+            .ok_or(IOError::HeaderSchemaInvalid(
+                "structured header size overflowed",
+            ))?;
+        Ok((prefix, length, padding))
+    };
+    let (mut prefix, mut length, mut padding) = header_layout(version)?;
+    if version == (1, 0) && length > usize::from(u16::MAX) {
+        version = (2, 0);
+        (prefix, length, padding) = header_layout(version)?;
+    }
+    if length > MAX_HEADER_BYTES {
         return Err(IOError::HeaderSchemaInvalid(
             "structured header exceeds budget",
         ));
     }
-
-    let payload_len = expected_records
-        .checked_mul(record_size)
-        .ok_or(IOError::WriteContractViolation("payload size overflow"))?;
-    let total_size = prefix_len
-        .checked_add(header_len)
-        .and_then(|h| h.checked_add(payload_len))
+    let total = prefix
+        .checked_add(length)
+        .and_then(|size| size.checked_add(payload.len()))
         .ok_or(IOError::WriteContractViolation("total size overflow"))?;
-    let mut out = Vec::with_capacity(total_size);
-    write_npy_preamble(&mut out, version, header_len)?;
-    out.extend_from_slice(&dict_bytes);
+    let mut out = Vec::new();
+    out.try_reserve_exact(total)
+        .map_err(|_| IOError::WriteContractViolation("unable to allocate structured NPY output"))?;
+    write_npy_preamble(&mut out, version, length)?;
+    out.extend_from_slice(&dictionary);
     out.extend(std::iter::repeat_n(b' ', padding));
     out.push(b'\n');
     out.extend_from_slice(&payload);
-
     Ok(out)
 }
 
@@ -6714,7 +7023,7 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     let descriptor = parse_structured_descr(descr_tail)?;
 
     let body = &data[header_end..];
-    let expected_records = element_count(&shape)?;
+    let expected_records = structured_record_count(&shape)?;
     let record_size = descriptor.record_size()?;
     let expected_bytes =
         expected_records
@@ -6906,7 +7215,7 @@ mod tests {
         IORuntimeMode, IOSupportedDType, LoadBytes, LoadDispatch, MAX_ARCHIVE_MEMBERS,
         MAX_DISPATCH_RETRIES, MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode,
         NPY_ARRAY_ALIGN, NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeader,
-        NpzCompression, SaveTxtConfig, StructuredIODescriptor, StructuredIOField,
+        NpzCompression, SaveTxtConfig, StructuredIODescriptor, StructuredIOField, StructuredIOType,
         classify_load_dispatch, crc32_ieee, encode_npy_header_bytes, enforce_pickle_policy,
         fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
         fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
@@ -12105,14 +12414,8 @@ mm.flush()
     fn make_test_descriptor() -> StructuredIODescriptor {
         StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "x".to_string(),
-                    dtype: IOSupportedDType::F64,
-                },
-                StructuredIOField {
-                    name: "y".to_string(),
-                    dtype: IOSupportedDType::I32,
-                },
+                StructuredIOField::new("x", IOSupportedDType::F64),
+                StructuredIOField::new("y", IOSupportedDType::I32),
             ],
         }
     }
@@ -12140,14 +12443,8 @@ mm.flush()
     fn structured_descriptor_to_descr_string_escapes_field_names() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "can't".to_string(),
-                    dtype: IOSupportedDType::I32,
-                },
-                StructuredIOField {
-                    name: "path\\name".to_string(),
-                    dtype: IOSupportedDType::Bytes(8),
-                },
+                StructuredIOField::new("can't", IOSupportedDType::I32),
+                StructuredIOField::new("path\\name", IOSupportedDType::Bytes(8)),
             ],
         };
 
@@ -12216,18 +12513,9 @@ mm.flush()
     fn structured_descriptor_to_descr_string_escapes_control_field_names() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "line\nbreak".to_string(),
-                    dtype: IOSupportedDType::I32,
-                },
-                StructuredIOField {
-                    name: "tab\tstop".to_string(),
-                    dtype: IOSupportedDType::I16,
-                },
-                StructuredIOField {
-                    name: "nul\0byte".to_string(),
-                    dtype: IOSupportedDType::Bytes(2),
-                },
+                StructuredIOField::new("line\nbreak", IOSupportedDType::I32),
+                StructuredIOField::new("tab\tstop", IOSupportedDType::I16),
+                StructuredIOField::new("nul\0byte", IOSupportedDType::Bytes(2)),
             ],
         };
 
@@ -12242,14 +12530,8 @@ mm.flush()
     fn structured_descriptor_preserves_non_ascii_field_names() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "caf\u{00e9}".to_string(),
-                    dtype: IOSupportedDType::F64,
-                },
-                StructuredIOField {
-                    name: "\u{03b2}".to_string(),
-                    dtype: IOSupportedDType::I16,
-                },
+                StructuredIOField::new("caf\u{00e9}", IOSupportedDType::F64),
+                StructuredIOField::new("\u{03b2}", IOSupportedDType::I16),
             ],
         };
 
@@ -12263,9 +12545,15 @@ mm.flush()
         let desc = parse_structured_descr("[('x', '<f8'), ('y', '<i4')]").unwrap();
         assert_eq!(desc.fields.len(), 2);
         assert_eq!(desc.fields[0].name, "x");
-        assert_eq!(desc.fields[0].dtype, IOSupportedDType::F64);
+        assert_eq!(
+            desc.fields[0].dtype,
+            StructuredIOType::Scalar(IOSupportedDType::F64)
+        );
         assert_eq!(desc.fields[1].name, "y");
-        assert_eq!(desc.fields[1].dtype, IOSupportedDType::I32);
+        assert_eq!(
+            desc.fields[1].dtype,
+            StructuredIOType::Scalar(IOSupportedDType::I32)
+        );
     }
 
     #[test]
@@ -12273,9 +12561,15 @@ mm.flush()
         let desc = parse_structured_descr("[('name', '|S10'), ('value', '<f8')]").unwrap();
         assert_eq!(desc.fields.len(), 2);
         assert_eq!(desc.fields[0].name, "name");
-        assert_eq!(desc.fields[0].dtype, IOSupportedDType::Bytes(10));
+        assert_eq!(
+            desc.fields[0].dtype,
+            StructuredIOType::Scalar(IOSupportedDType::Bytes(10))
+        );
         assert_eq!(desc.fields[1].name, "value");
-        assert_eq!(desc.fields[1].dtype, IOSupportedDType::F64);
+        assert_eq!(
+            desc.fields[1].dtype,
+            StructuredIOType::Scalar(IOSupportedDType::F64)
+        );
     }
 
     #[test]
@@ -12283,12 +12577,18 @@ mm.flush()
         let desc = parse_structured_descr("[('z', '<f4')]").unwrap();
         assert_eq!(desc.fields.len(), 1);
         assert_eq!(desc.fields[0].name, "z");
-        assert_eq!(desc.fields[0].dtype, IOSupportedDType::F32);
+        assert_eq!(
+            desc.fields[0].dtype,
+            StructuredIOType::Scalar(IOSupportedDType::F32)
+        );
     }
 
     #[test]
-    fn parse_structured_descr_rejects_empty() {
-        assert!(parse_structured_descr("[]").is_err());
+    fn parse_structured_descr_accepts_empty_record_but_rejects_missing_literal() {
+        assert_eq!(
+            parse_structured_descr("[]").unwrap().record_size().unwrap(),
+            0
+        );
         assert!(parse_structured_descr("").is_err());
         assert!(parse_structured_descr("<f8").is_err());
     }
@@ -12358,10 +12658,10 @@ mm.flush()
     #[test]
     fn fromfile_structured_single_field_copies_the_selected_record_prefix() {
         let desc = StructuredIODescriptor {
-            fields: vec![StructuredIOField {
-                name: "payload".to_string(),
-                dtype: IOSupportedDType::Bytes(7),
-            }],
+            fields: vec![StructuredIOField::new(
+                "payload",
+                IOSupportedDType::Bytes(7),
+            )],
         };
         let records: Vec<u8> = (0..21).map(|value| (value * 17 + 3) as u8).collect();
         let mut data = records.clone();
@@ -12387,10 +12687,7 @@ mm.flush()
 
         for invalid_dtype in [IOSupportedDType::Bytes(0), IOSupportedDType::Object] {
             let invalid = StructuredIODescriptor {
-                fields: vec![StructuredIOField {
-                    name: "invalid".to_string(),
-                    dtype: invalid_dtype,
-                }],
+                fields: vec![StructuredIOField::new("invalid", invalid_dtype)],
             };
             assert_eq!(
                 fromfile_structured(&[], &invalid, None).unwrap_err(),
@@ -12446,14 +12743,8 @@ mm.flush()
     fn save_load_structured_with_string_field() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "id".to_string(),
-                    dtype: IOSupportedDType::I32,
-                },
-                StructuredIOField {
-                    name: "label".to_string(),
-                    dtype: IOSupportedDType::Bytes(5),
-                },
+                StructuredIOField::new("id", IOSupportedDType::I32),
+                StructuredIOField::new("label", IOSupportedDType::Bytes(5)),
             ],
         };
         // 2 records: (1, "hello"), (2, "world")
@@ -12476,14 +12767,8 @@ mm.flush()
     fn structured_npy_writer_byte_layout_matches_golden_snapshot() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "id".to_string(),
-                    dtype: IOSupportedDType::I32,
-                },
-                StructuredIOField {
-                    name: "label".to_string(),
-                    dtype: IOSupportedDType::Bytes(5),
-                },
+                StructuredIOField::new("id", IOSupportedDType::I32),
+                StructuredIOField::new("label", IOSupportedDType::Bytes(5)),
             ],
         };
         let col_id: Vec<u8> = [7i32.to_le_bytes(), 11i32.to_le_bytes()].concat();
@@ -12523,18 +12808,9 @@ mm.flush()
     fn structured_three_fields_roundtrip() {
         let desc = StructuredIODescriptor {
             fields: vec![
-                StructuredIOField {
-                    name: "a".to_string(),
-                    dtype: IOSupportedDType::F32,
-                },
-                StructuredIOField {
-                    name: "b".to_string(),
-                    dtype: IOSupportedDType::I64,
-                },
-                StructuredIOField {
-                    name: "c".to_string(),
-                    dtype: IOSupportedDType::U8,
-                },
+                StructuredIOField::new("a", IOSupportedDType::F32),
+                StructuredIOField::new("b", IOSupportedDType::I64),
+                StructuredIOField::new("c", IOSupportedDType::U8),
             ],
         };
         assert_eq!(desc.record_size().unwrap(), 13); // 4 + 8 + 1
@@ -12613,6 +12889,205 @@ mm.flush()
 
         let err = load_structured(&npy_bytes).expect_err("truncated payload must fail");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn structured_nested_subarray_layout_titles_and_padding_roundtrip() {
+        let literal = "[(('axis title', 'position'), '>f8', (3,)), \
+            ('meta', [('id', '<u8'), ('matrix', '>i2', (2, 2)), ('', '|V3'), ('label', '<U2')]), \
+            ('events', [('flag', '|u1'), ('value', '>c16')], (2,))]";
+        let descriptor = parse_structured_descr(literal).unwrap();
+        assert_eq!(descriptor.record_size().unwrap(), 85);
+        assert_eq!(descriptor.field_offsets().unwrap(), [0, 24, 51]);
+        assert_eq!(descriptor.fields[0].title.as_deref(), Some("axis title"));
+        assert_eq!(descriptor.fields[0].dtype.item_size(), Some(24));
+        assert_eq!(descriptor.fields[1].dtype.item_size(), Some(27));
+        assert_eq!(descriptor.fields[2].dtype.item_size(), Some(34));
+        assert_eq!(
+            parse_structured_descr(&descriptor.to_descr_string()).unwrap(),
+            descriptor,
+        );
+
+        let columns: Vec<Vec<u8>> = [24, 27, 34]
+            .into_iter()
+            .enumerate()
+            .map(|(field, size)| {
+                (0..6 * size)
+                    .map(|index| (index as u8).wrapping_add(field as u8))
+                    .collect()
+            })
+            .collect();
+        let packed = tofile_structured(&descriptor, &columns).unwrap();
+        assert_eq!(packed.len(), 6 * 85);
+        let decoded = fromfile_structured(&packed, &descriptor, None).unwrap();
+        assert_eq!(decoded.columns, columns);
+        let first_two = fromfile_structured(&packed, &descriptor, Some(2)).unwrap();
+        for (field, size) in [24, 27, 34].into_iter().enumerate() {
+            assert_eq!(first_two.columns[field], columns[field][..2 * size]);
+        }
+        for fortran_order in [false, true] {
+            let bytes =
+                super::save_structured_with_order(&[2, 3], &descriptor, &columns, fortran_order)
+                    .unwrap();
+            let loaded = load_structured(&bytes).unwrap();
+            assert_eq!(loaded.shape, [2, 3]);
+            assert_eq!(loaded.fortran_order, fortran_order);
+            assert_eq!(loaded.descriptor, descriptor);
+            assert_eq!(loaded.columns, columns);
+        }
+    }
+
+    #[test]
+    fn structured_zero_width_fields_and_records_keep_the_explicit_shape() {
+        let descriptor = parse_structured_descr(
+            "[('empty', '<f8', (0, 3)), ('bytes', '|S0'), ('unicode', '>U0'), \
+             ('nested', []), ('id', '>i4'), ('void', '|V0')]",
+        )
+        .unwrap();
+        assert_eq!(descriptor.record_size().unwrap(), 4);
+        assert_eq!(descriptor.field_offsets().unwrap(), [0, 0, 0, 0, 0, 4]);
+        let ids: Vec<u8> = [
+            1_i32.to_be_bytes(),
+            (-2_i32).to_be_bytes(),
+            3_i32.to_be_bytes(),
+        ]
+        .concat();
+        let columns = vec![vec![], vec![], vec![], vec![], ids.clone(), vec![]];
+        assert_eq!(tofile_structured(&descriptor, &columns).unwrap(), ids);
+        let bytes = save_structured(&[3], &descriptor, &columns).unwrap();
+        let loaded = load_structured(&bytes).unwrap();
+        assert_eq!(loaded.shape, [3]);
+        assert_eq!(loaded.columns, columns);
+        assert_eq!(loaded.descriptor, descriptor);
+        assert!(save_structured(&[2], &descriptor, &columns).is_err());
+        let mut bad_columns = columns.clone();
+        bad_columns[1].push(1);
+        assert!(tofile_structured(&descriptor, &bad_columns).is_err());
+        assert!(save_structured(&[3], &descriptor, &bad_columns).is_err());
+
+        for literal in [
+            "[]",
+            "[('empty', '<f8', (0,))]",
+            "[('nested', [])]",
+            "[('x', '|S0'), ('y', '<U0')]",
+        ] {
+            let descriptor = parse_structured_descr(literal).unwrap();
+            let columns = vec![Vec::new(); descriptor.fields.len()];
+            assert_eq!(descriptor.record_size().unwrap(), 0);
+            assert!(tofile_structured(&descriptor, &columns).unwrap().is_empty());
+            assert!(fromfile_structured(&[], &descriptor, None).is_err());
+            for shape in [vec![], vec![0], vec![2, 3], vec![2, 0, 3]] {
+                let records = super::element_count(&shape).unwrap();
+                let bytes = save_structured(&shape, &descriptor, &columns).unwrap();
+                let loaded = load_structured(&bytes).unwrap();
+                assert_eq!(loaded.shape, shape);
+                assert_eq!(loaded.columns, columns);
+                assert_eq!(loaded.descriptor, descriptor);
+                assert_eq!(
+                    fromfile_structured(&[], &descriptor, Some(records))
+                        .unwrap()
+                        .shape,
+                    [records],
+                );
+            }
+            assert!(fromfile_structured(&[1], &descriptor, Some(1)).is_err());
+        }
+        for literal in [
+            "[('x', '<S0')]",
+            "[('x', '>S0')]",
+            "[('x', '=U0')]",
+            "[('x', '|U0')]",
+        ] {
+            let descriptor = parse_structured_descr(literal).unwrap();
+            assert_eq!(descriptor.record_size().unwrap(), 0);
+            assert_eq!(
+                parse_structured_descr(&descriptor.to_descr_string()).unwrap(),
+                descriptor
+            );
+        }
+    }
+
+    #[test]
+    fn structured_zero_width_record_shapes_obey_intp_bounds() {
+        let descriptor = parse_structured_descr("[]").unwrap();
+        for shape in [
+            vec![isize::MAX as usize + 1],
+            vec![isize::MAX as usize, 2],
+            vec![0; super::MAX_STRUCTURED_SUBARRAY_NDIM + 1],
+        ] {
+            assert!(save_structured(&shape, &descriptor, &[]).is_err());
+            let header = super::encode_structured_header_dict(&shape, false, &descriptor);
+            let bytes = make_manual_npy_payload(&header, &[]);
+            assert!(load_structured(&bytes).is_err());
+        }
+        assert!(fromfile_structured(&[], &descriptor, Some(usize::MAX)).is_err());
+        let shape = [isize::MAX as usize, isize::MAX as usize, 0];
+        let bytes = save_structured(&shape, &descriptor, &[]).unwrap();
+        assert_eq!(load_structured(&bytes).unwrap().shape, shape);
+    }
+
+    #[test]
+    fn structured_parser_enforces_recursive_grammar_and_layout_bounds() {
+        for literal in [
+            "[('x', '<i4') ('y', '<i4')]",
+            "[('x', '<i4'),, ('y', '<i4')]",
+            "[('x', '<i4'),] trailing",
+            "[('x', '<i4', (2,), 3)]",
+            "[('x', '<i4', (-1,))]",
+            "[('x', '<i4', (1.5,))]",
+            "[('x', '<i4', (True,))]",
+            "[('x', '<i4', ('2',))]",
+            "[('x', '<i4'), ('x', '<f8')]",
+            "[(('t', 'x'), '<i4'), (('t', 'y'), '<i4')]",
+            "[('x', '<i4'), (('x', 'y'), '<i4')]",
+            "[('x', [('bad', '|O')], (0,))]",
+            "[(('title',), '<i4')]",
+            "[('x', __import__('os'))]",
+        ] {
+            assert!(parse_structured_descr(literal).is_err(), "{literal}");
+        }
+        let overflow = format!("[('x', '<c16', ({}, 2))]", isize::MAX);
+        assert!(parse_structured_descr(&overflow).is_err());
+        let rank = std::iter::repeat_n("1", super::MAX_STRUCTURED_SUBARRAY_NDIM + 1)
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(parse_structured_descr(&format!("[('x', '|u1', ({rank}))]")).is_err());
+        let mut nested = "'|u1'".to_string();
+        for _ in 0..super::MAX_STRUCTURED_DTYPE_DEPTH + 1 {
+            nested = format!("[('x', {nested})]");
+        }
+        assert!(parse_structured_descr(&nested).is_err());
+        assert!(parse_structured_descr(&" ".repeat(MAX_HEADER_BYTES + 1)).is_err());
+
+        let valid = parse_structured_descr(
+            "[('x', ('>i2', (2, 3))), ('y', '<f8', 2), ('z', '<i4', ()), ('', '|V1'), ('', '|V2')]",
+        )
+        .unwrap();
+        assert_eq!(valid.record_size().unwrap(), 35);
+        assert_eq!(
+            parse_structured_descr(&valid.to_descr_string()).unwrap(),
+            valid
+        );
+        let mut dtype = StructuredIOType::Scalar(IOSupportedDType::U8);
+        for _ in 0..super::MAX_STRUCTURED_DTYPE_DEPTH + 1 {
+            dtype = StructuredIOType::Subarray {
+                base: Box::new(dtype),
+                shape: vec![1],
+            };
+        }
+        let invalid = StructuredIODescriptor {
+            fields: vec![StructuredIOField::new("deep", dtype)],
+        };
+        assert!(invalid.record_size().is_err());
+        assert!(invalid.field_offsets().is_err());
+        assert!(save_structured(&[0], &invalid, &[vec![]]).is_err());
+        let overflow = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField::new("a", StructuredIOType::Void(isize::MAX as usize)),
+                StructuredIOField::new("b", IOSupportedDType::U8),
+            ],
+        };
+        assert!(overflow.record_size().is_err());
     }
 
     // ── Memmap (file-backed array) tests ──

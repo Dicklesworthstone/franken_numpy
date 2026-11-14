@@ -7056,14 +7056,8 @@ fn hessenberg_reduce_values(a: &[f64], n: usize) -> Vec<f64> {
 /// If `z` is `Some`, accumulate every similarity transform into its columns.
 /// A bounded single-shift recovery handles blocks on which Francis QR stalls;
 /// exhausting both budgets is an error, never a partially extracted spectrum.
-fn hessenberg_qr_iter(
-    h: &mut [f64],
-    z: Option<&mut [f64]>,
-    n: usize,
-) -> Result<(), LinAlgError> {
-    let max_iter = EIGEN_QR_ITERATION_COEFF
-        .saturating_mul(n)
-        .saturating_mul(n);
+fn hessenberg_qr_iter(h: &mut [f64], z: Option<&mut [f64]>, n: usize) -> Result<(), LinAlgError> {
+    let max_iter = EIGEN_QR_ITERATION_COEFF.saturating_mul(n).saturating_mul(n);
     hessenberg_qr_iter_with_budget(h, z, n, max_iter, max_iter)
 }
 
@@ -7119,9 +7113,7 @@ fn hessenberg_has_finite_band(h: &[f64], n: usize) -> bool {
 
 fn hessenberg_has_schur_blocks(h: &[f64], n: usize) -> bool {
     hessenberg_has_finite_band(h, n)
-        && (2..n).all(|row| {
-            h[row * n + row - 1] == 0.0 || h[(row - 1) * n + row - 2] == 0.0
-        })
+        && (2..n).all(|row| h[row * n + row - 1] == 0.0 || h[(row - 1) * n + row - 2] == 0.0)
 }
 
 /// Preserve the ordinary deflation arithmetic, but do not turn two large finite
@@ -7182,10 +7174,7 @@ fn hessenberg_single_shift_recovery(
         }
         while p > 1
             && h[(p - 1) * n + p - 2].abs()
-                <= hessenberg_deflation_threshold(
-                    h[(p - 2) * n + p - 2],
-                    h[(p - 1) * n + p - 1],
-                )
+                <= hessenberg_deflation_threshold(h[(p - 2) * n + p - 2], h[(p - 1) * n + p - 1])
         {
             h[(p - 1) * n + p - 2] = 0.0;
             p -= 1;
@@ -7196,10 +7185,7 @@ fn hessenberg_single_shift_recovery(
         let mut lo = p - 1;
         while lo > 0
             && h[lo * n + lo - 1].abs()
-                > hessenberg_deflation_threshold(
-                    h[(lo - 1) * n + lo - 1],
-                    h[lo * n + lo],
-                )
+                > hessenberg_deflation_threshold(h[(lo - 1) * n + lo - 1], h[lo * n + lo])
         {
             lo -= 1;
         }
@@ -7226,9 +7212,7 @@ fn hessenberg_single_shift_recovery(
             h[(p - 1) * n + p - 2],
             bottom,
         );
-        let mut shift = if pair[1] != 0.0
-            || (pair[0] - bottom).abs() < (pair[2] - bottom).abs()
-        {
+        let mut shift = if pair[1] != 0.0 || (pair[0] - bottom).abs() < (pair[2] - bottom).abs() {
             pair[0]
         } else {
             pair[2]
@@ -7292,12 +7276,7 @@ fn hessenberg_single_shift_recovery(
     }
 }
 
-fn hessenberg_francis_qr_iter(
-    h: &mut [f64],
-    mut z: Option<&mut [f64]>,
-    n: usize,
-    max_iter: usize,
-) {
+fn hessenberg_francis_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize, max_iter: usize) {
     let mut p = n; // active upper bound (exclusive of converged tail)
     // Stagnation tracking: force an exceptional shift if the active block has not
     // deflated for several iterations (guards rare double-shift cycling).
@@ -7328,10 +7307,7 @@ fn hessenberg_francis_qr_iter(
         let mut lo = p - 1;
         while lo > 0
             && h[lo * n + (lo - 1)].abs()
-                > hessenberg_deflation_threshold(
-                    h[(lo - 1) * n + (lo - 1)],
-                    h[lo * n + lo],
-                )
+                > hessenberg_deflation_threshold(h[(lo - 1) * n + (lo - 1)], h[lo * n + lo])
         {
             lo -= 1;
         }
@@ -14707,17 +14683,15 @@ mod tests {
     fn complex_hermitian_pinv_preserves_negative_and_null_eigenspaces() {
         for scale in [1e-150, 1.0, 1e150] {
             let a: Vec<f64> = [
-                1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-                0.0, -1.0, 1.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0, -4.0, 0.0,
+                1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                -4.0, 0.0,
             ]
             .iter()
             .map(|value| value * scale)
             .collect();
             let expected = [
-                0.25, 0.0, 0.0, 0.25, 0.0, 0.0,
-                0.0, -0.25, 0.25, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0, -0.25, 0.0,
+                0.25, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, -0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, -0.25, 0.0,
             ];
             let inverse = super::complex_pinv_hermitian_nxn(&a, 3, 1e-12).unwrap();
             for (actual, expected) in inverse.iter().zip(expected) {
@@ -18696,8 +18670,7 @@ for col in range(n):
     fn general_schur_iteration_budget_rejects_unreduced_blocks() {
         // Companion of (lambda^2 + 1)(lambda - 2)(lambda + 3).
         let companion = [
-            0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0,
-            0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, -1.0,
+            0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, -1.0,
         ];
         for recovery_budget in [0, 1] {
             let mut h = companion;
@@ -18721,8 +18694,15 @@ for col in range(n):
     fn general_schur_structure_gate_distinguishes_roundoff_from_a_real_bulge() {
         for scale in [1e-100_f64, 1.0, 1e100] {
             let mut roundoff = [
-                scale, 0.0, 0.0, 0.0, 2.0 * scale, 0.0,
-                f64::EPSILON * scale, 0.0, 3.0 * scale,
+                scale,
+                0.0,
+                0.0,
+                0.0,
+                2.0 * scale,
+                0.0,
+                f64::EPSILON * scale,
+                0.0,
+                3.0 * scale,
             ];
             let saved = roundoff;
             super::hessenberg_qr_iter_with_budget(&mut roundoff, None, 3, 0, 0)
@@ -18770,19 +18750,16 @@ for col in range(n):
             (
                 4,
                 vec![
-                    0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0,
-                    0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, -1.0,
+                    0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0,
+                    -1.0,
                 ],
                 vec![(-3.0, 0.0), (2.0, 0.0), (0.0, 1.0), (0.0, -1.0)],
             ),
             (
                 5,
                 vec![
-                    0.0, 0.0, 0.0, 6.0, 0.5,
-                    1.0, 0.0, 0.0, -1.0, 1.0,
-                    0.0, 1.0, 0.0, 5.0, 2.0,
-                    0.0, 0.0, 1.0, -1.0, -1.0,
-                    0.0, 0.0, 0.0, 0.0, 7.0,
+                    0.0, 0.0, 0.0, 6.0, 0.5, 1.0, 0.0, 0.0, -1.0, 1.0, 0.0, 1.0, 0.0, 5.0, 2.0,
+                    0.0, 0.0, 1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 7.0,
                 ],
                 vec![(-3.0, 0.0), (2.0, 0.0), (0.0, 1.0), (0.0, -1.0), (7.0, 0.0)],
             ),
@@ -18801,8 +18778,7 @@ for col in range(n):
                     .expect("bounded recovery of analytic spectrum");
                 for row in 2..n {
                     assert!(
-                        h[row * n + row - 1] == 0.0
-                            || h[(row - 1) * n + row - 2] == 0.0,
+                        h[row * n + row - 1] == 0.0 || h[(row - 1) * n + row - 2] == 0.0,
                         "unreduced block at row {row}, n={n}, scale={scale}"
                     );
                 }
@@ -23571,7 +23547,10 @@ for value in actual / scale:
                 };
             }
         }
-        let scale = matrix.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = matrix
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
         let scale = if scale == 0.0 { 1.0 } else { scale };
         let tolerance = 128.0 * f64::EPSILON * n.max(1) as f64;
         for row in 0..n {
@@ -23633,7 +23612,11 @@ for value in actual / scale:
         let a = [2.0, f64::NAN, 3.0, -4.0, 1.0, 2.0, 3.0, f64::NEG_INFINITY];
         for uplo in ["L", "l", "U", "u"] {
             let values = assert_complex_hermitian_eigenpairs(&a, 2, uplo);
-            let discriminant = if uplo.eq_ignore_ascii_case("L") { 21.0_f64 } else { 101.0 };
+            let discriminant = if uplo.eq_ignore_ascii_case("L") {
+                21.0_f64
+            } else {
+                101.0
+            };
             let expected = [
                 (5.0 - discriminant.sqrt()) / 2.0,
                 (5.0 + discriminant.sqrt()) / 2.0,
@@ -23642,9 +23625,27 @@ for value in actual / scale:
                 assert!((actual - expected).abs() < 4e-15);
             }
         }
-        let ignored_upper = [2.0, f64::NAN, f64::NAN, f64::INFINITY, 1.0, 2.0, 3.0, f64::NAN];
+        let ignored_upper = [
+            2.0,
+            f64::NAN,
+            f64::NAN,
+            f64::INFINITY,
+            1.0,
+            2.0,
+            3.0,
+            f64::NAN,
+        ];
         assert_complex_hermitian_eigenpairs(&ignored_upper, 2, "L");
-        let ignored_lower = [2.0, f64::NAN, 1.0, -2.0, f64::NAN, f64::INFINITY, 3.0, f64::NAN];
+        let ignored_lower = [
+            2.0,
+            f64::NAN,
+            1.0,
+            -2.0,
+            f64::NAN,
+            f64::INFINITY,
+            3.0,
+            f64::NAN,
+        ];
         assert_complex_hermitian_eigenpairs(&ignored_lower, 2, "U");
     }
 
@@ -23806,7 +23807,11 @@ np.testing.assert_allclose(actual / scale, values_only / scale, rtol=2e-12, atol
                 for uplo in ["L", "U"] {
                     let values = super::complex_eigh_nxn(&a, n, uplo).unwrap().0;
                     let encode = |values: &[f64]| {
-                        values.iter().map(f64::to_string).collect::<Vec<_>>().join(",")
+                        values
+                            .iter()
+                            .map(f64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
                     };
                     let output = Command::new(oracle_python_bin())
                         .env("OPENBLAS_NUM_THREADS", "1")

@@ -1,8 +1,8 @@
 use fnp_io::{
-    IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, load_strings,
-    load_structured, parse_structured_descr, read_npy_bytes, read_npy_header_framing,
-    read_npz_member_framings, save_strings, save_structured, savez, savez_compressed,
-    write_npy_bytes,
+    IOSupportedDType, LoadBytes, fromfile_structured, load, load_auto, load_complex, load_npz,
+    load_strings, load_structured, parse_structured_descr, read_npy_bytes, read_npy_header_framing,
+    read_npz_member_framings, save_strings, save_structured, save_structured_with_order, savez,
+    savez_compressed, tofile_structured, write_npy_bytes,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -91,6 +91,120 @@ def emit_structured_summary(arr):
         print(f"field_{i}_dtype=" + arr.dtype.fields[name][0].str)
         print(f"field_{i}_bytes=" + arr[name].tobytes(order="C").hex())
 
+def fill_recursive_fields(arr):
+    if arr.dtype.names is not None:
+        for name in arr.dtype.names:
+            fill_recursive_fields(arr[name])
+        return
+    if arr.size == 0 or arr.dtype.itemsize == 0:
+        return
+    ramp = np.arange(arr.size).reshape(arr.shape)
+    kind = arr.dtype.kind
+    if kind == "u":
+        arr[...] = (ramp.astype("u8") + np.uint64(2**63 + 3)).astype(arr.dtype)
+    elif kind == "i":
+        arr[...] = (ramp.astype("i8") - (2**53 + 3)).astype(arr.dtype)
+    elif kind == "b":
+        arr[...] = (ramp % 2) != 0
+    elif kind in "fc":
+        if kind == "c":
+            arr.real = ramp * .25
+            arr.imag = -ramp - .5
+        else:
+            arr[...] = ramp * .25
+        arr.flat[0] = -0.0
+        if arr.size > 1:
+            arr.flat[1] = np.inf
+        if arr.size > 2:
+            nan = np.array([0x7ff8000000001234], dtype="u8").view("f8")[0]
+            arr.flat[2] = nan
+    elif kind == "S":
+        arr[...] = b"a\x00b"
+    elif kind == "U":
+        arr[...] = "a\x00β"
+    elif kind == "V":
+        arr[...] = np.void(bytes((i * 17 + 3) % 256 for i in range(arr.dtype.itemsize)))
+    else:
+        raise AssertionError(arr.dtype)
+
+def recursive_fixture(kind):
+    shape = (2, 3)
+    inner = np.dtype([("id", "<u8"), ("pair", ">c16", (2,)), ("label", "S4"), ("raw", "V5")])
+    dtype = np.dtype([
+        (("position units", "position"), ">f8", (3,)),
+        ("meta", inner),
+        ("history", [("flag", "u1"), ("z", "<c8")], (2, 2)),
+        ("grid", ">i2", (2, 3)),
+        ("unicode", ">U3"),
+    ])
+    if kind == "utf8_v3":
+        dtype = np.dtype([(("温度 β", "temperature"), inner), ("位置", ">f8", (3,))])
+    elif kind.startswith("aligned_"):
+        nested = np.dtype([("id", ">u2"), ("z", "<c16"), ("opaque", "V3")], align=True)
+        dtype = np.dtype([("tag", "u1"), ("value", ">f8"), ("nested", nested), ("v", "<i2", (3,))], align=True)
+    elif kind == "zero_mixed":
+        dtype = np.dtype([("empty", ">f8", (0, 3)), ("s", "S0"), ("u", ">U0"), ("record", []), ("id", ">u8"), ("tail", "V0")])
+    elif kind.startswith("all_zero"):
+        dtype = np.dtype([("empty", "<f8", (0,)), ("s", "S0"), ("u", ">U0"), ("record", [])])
+    elif kind == "empty_record":
+        dtype = np.dtype([])
+    if kind.endswith("_scalar"):
+        shape = ()
+    elif kind.endswith("_empty"):
+        shape = (2, 0, 3)
+    arr = np.zeros(shape, dtype=dtype)
+    if arr.size and dtype.itemsize:
+        raw = arr.reshape(-1).view("u1").reshape(-1)
+        raw[:] = np.arange(raw.size, dtype="u8").astype("u1")
+    fill_recursive_fields(arr)
+    if kind.endswith("_f"):
+        arr = np.asfortranarray(arr)
+    return arr
+
+def emit_recursive_leaves(arr, prefix=""):
+    if arr.dtype.names is not None:
+        for index, name in enumerate(arr.dtype.names):
+            emit_recursive_leaves(arr[name], f"{prefix}{index}_")
+    else:
+        print(f"leaf_{prefix}dtype=" + arr.dtype.str)
+        print(f"leaf_{prefix}shape=" + ",".join(str(dim) for dim in arr.shape))
+        print(f"leaf_{prefix}bytes=" + arr.tobytes(order="C").hex())
+
+def emit_recursive_summary(arr, payload):
+    import numpy.lib.format as fmt
+    fortran = arr.flags.f_contiguous and not arr.flags.c_contiguous
+    # NumPy's BytesIO reader assigns structured records into an allocated array;
+    # that assignment does not define anonymous alignment-padding bytes. Check
+    # every serialized byte separately, then the dtype, shape, and value bytes of
+    # every decoded named leaf, including nested named void fields.
+    assert len(payload) == arr.size * arr.dtype.itemsize
+    print("shape=" + ",".join(str(dim) for dim in arr.shape))
+    print("fortran=" + ("1" if fortran else "0"))
+    print("record_size=" + str(arr.dtype.itemsize))
+    print("descr_hex=" + repr(arr.dtype.descr).encode("utf-8").hex())
+    print("payload_hex=" + payload.hex())
+    print("entry_count=" + str(len(arr.dtype.descr)))
+    offset = 0
+    for index, entry in enumerate(arr.dtype.descr):
+        key, base, *shape = entry
+        if isinstance(key, tuple):
+            title, name = key
+        else:
+            title, name = None, key
+        field_dtype = fmt.descr_to_dtype(base)
+        if shape:
+            field_dtype = np.dtype((field_dtype, shape[0]))
+        size = field_dtype.itemsize
+        column = b"".join(payload[record * arr.dtype.itemsize + offset:record * arr.dtype.itemsize + offset + size] for record in range(arr.size))
+        print(f"entry_{index}_name=" + name.encode("utf-8").hex())
+        print(f"entry_{index}_title=" + ("-" if title is None else title.encode("utf-8").hex()))
+        print(f"entry_{index}_offset=" + str(offset))
+        print(f"entry_{index}_size=" + str(size))
+        print(f"entry_{index}_bytes=" + column.hex())
+        offset += size
+    assert offset == arr.dtype.itemsize
+    emit_recursive_leaves(arr)
+
 def emit_unicode_summary(arr):
     print("dtype=" + arr.dtype.str)
     print("shape=" + ",".join(str(dim) for dim in arr.shape))
@@ -174,6 +288,19 @@ elif case == "npz_deflate_streaming":
     emit_npz(True, streaming=True)
 elif case == "load_npz_hex":
     emit_loaded_npz(sys.argv[2])
+elif case == "recursive_readback":
+    npy = bytes.fromhex(sys.argv[2])
+    emit_recursive_summary(np.load(io.BytesIO(npy), allow_pickle=False), raw_payload(npy))
+elif case.startswith("recursive_"):
+    import numpy.lib.format as fmt
+    kind = case.removeprefix("recursive_")
+    arr = recursive_fixture(kind)
+    buf = io.BytesIO()
+    version = (2, 0) if kind == "nested_v2" else (3, 0) if kind == "utf8_v3" else None
+    fmt.write_array(buf, arr, version=version, allow_pickle=False)
+    npy = buf.getvalue()
+    print("npy_hex=" + npy.hex())
+    emit_recursive_summary(arr, raw_payload(npy))
 elif case.startswith("structured_"):
     import numpy.lib.format as fmt
     major = int(case.rsplit("_", 1)[1])
@@ -626,6 +753,146 @@ fn structured_npy_headers_preserve_numpy_field_names_across_format_versions() ->
         for (key, value) in &numpy_read {
             ensure_eq(
                 value,
+                require_line(&oracle, key)?,
+                format!("{case}: NumPy reads Rust output: {key}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn recursive_structured_npy_interoperates_with_numpy_in_both_directions() -> Result<(), String> {
+    for kind in [
+        "nested_c",
+        "nested_f",
+        "nested_scalar",
+        "nested_empty",
+        "nested_v2",
+        "utf8_v3",
+        "aligned_c",
+        "aligned_f",
+        "zero_mixed",
+        "all_zero_c",
+        "all_zero_scalar",
+        "empty_record",
+    ] {
+        let case = format!("recursive_{kind}");
+        let oracle = run_numpy_case(&case)?;
+        let bytes = hex_to_bytes(require_line(&oracle, "npy_hex")?)?;
+        let framing =
+            read_npy_header_framing(&bytes).map_err(|error| format!("{case}: framing: {error}"))?;
+        let loaded = load_structured(&bytes)
+            .map_err(|error| format!("{case}: native structured load: {error}"))?;
+        let record_size: usize = require_line(&oracle, "record_size")?
+            .parse()
+            .map_err(|error| format!("{case}: size: {error}"))?;
+        let entry_count: usize = require_line(&oracle, "entry_count")?
+            .parse()
+            .map_err(|error| format!("{case}: entry count: {error}"))?;
+        ensure_eq(
+            loaded.shape.clone(),
+            parse_shape(require_line(&oracle, "shape")?)?,
+            format!("{case}: shape"),
+        )?;
+        ensure_eq(
+            loaded.fortran_order,
+            require_line(&oracle, "fortran")? == "1",
+            format!("{case}: order"),
+        )?;
+        ensure_eq(
+            loaded
+                .descriptor
+                .record_size()
+                .map_err(|error| error.to_string())?,
+            record_size,
+            format!("{case}: record size"),
+        )?;
+        ensure_eq(
+            loaded.descriptor.fields.len(),
+            entry_count,
+            format!("{case}: field and padding count"),
+        )?;
+        ensure_eq(
+            parse_structured_descr(&framing.descr_literal).map_err(|error| error.to_string())?,
+            loaded.descriptor.clone(),
+            format!("{case}: framing descriptor"),
+        )?;
+        ensure_eq(
+            parse_structured_descr(&loaded.descriptor.to_descr_string())
+                .map_err(|error| error.to_string())?,
+            loaded.descriptor.clone(),
+            format!("{case}: recursive descriptor roundtrip"),
+        )?;
+        let offsets = loaded
+            .descriptor
+            .field_offsets()
+            .map_err(|error| error.to_string())?;
+        for (index, field) in loaded.descriptor.fields.iter().enumerate() {
+            ensure_eq(
+                bytes_to_hex(field.name.as_bytes()),
+                require_line(&oracle, &format!("entry_{index}_name"))?.clone(),
+                format!("{case}: field {index} name"),
+            )?;
+            let title = field
+                .title
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |title| bytes_to_hex(title.as_bytes()));
+            ensure_eq(
+                title,
+                require_line(&oracle, &format!("entry_{index}_title"))?.clone(),
+                format!("{case}: field {index} title"),
+            )?;
+            ensure_eq(
+                offsets[index].to_string(),
+                require_line(&oracle, &format!("entry_{index}_offset"))?.clone(),
+                format!("{case}: field {index} offset"),
+            )?;
+            ensure_eq(
+                field.dtype.item_size().unwrap().to_string(),
+                require_line(&oracle, &format!("entry_{index}_size"))?.clone(),
+                format!("{case}: field {index} size"),
+            )?;
+            ensure_eq(
+                bytes_to_hex(&loaded.columns[index]),
+                require_line(&oracle, &format!("entry_{index}_bytes"))?.clone(),
+                format!("{case}: field {index} bytes"),
+            )?;
+        }
+        let payload = hex_to_bytes(require_line(&oracle, "payload_hex")?)?;
+        ensure_eq(
+            tofile_structured(&loaded.descriptor, &loaded.columns)
+                .map_err(|error| error.to_string())?,
+            payload.clone(),
+            format!("{case}: byte-exact packed records"),
+        )?;
+        let records: usize = loaded.shape.iter().product();
+        let raw = fromfile_structured(&payload, &loaded.descriptor, Some(records))
+            .map_err(|error| format!("{case}: raw field load: {error}"))?;
+        ensure_eq(
+            raw.columns,
+            loaded.columns.clone(),
+            format!("{case}: raw columns"),
+        )?;
+        let rewritten = save_structured_with_order(
+            &loaded.shape,
+            &loaded.descriptor,
+            &loaded.columns,
+            loaded.fortran_order,
+        )
+        .map_err(|error| format!("{case}: native structured save: {error}"))?;
+        let rewritten_framing = read_npy_header_framing(&rewritten)
+            .map_err(|error| format!("{case}: rewritten framing: {error}"))?;
+        ensure_eq(
+            rewritten[rewritten_framing.header_end..].to_vec(),
+            payload,
+            format!("{case}: serialized payload preserves every padding byte"),
+        )?;
+        let readback =
+            run_numpy_case_with_extra_arg("recursive_readback", Some(&bytes_to_hex(&rewritten)))?;
+        for (key, actual) in &readback {
+            ensure_eq(
+                actual,
                 require_line(&oracle, key)?,
                 format!("{case}: NumPy reads Rust output: {key}"),
             )?;
