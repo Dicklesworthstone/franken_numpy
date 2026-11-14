@@ -155,6 +155,31 @@ impl OracleBatch {
         self.actual.push(array.astype_with_casting(dtype, "unsafe"));
     }
 
+    fn push_raw_source_cast(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        dtype: DType,
+        checked: bool,
+    ) {
+        self.cases.push(json!({
+            "input": input,
+            "op": "astype",
+            "source_dtype": numpy_dtype(array.dtype()),
+            "dtype": numpy_dtype(dtype),
+            "api": if checked { "astype_with_casting" } else { "astype" },
+            "axis": null,
+            "keepdims": false,
+            "ddof": 0,
+        }));
+        let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        self.actual.push(if checked {
+            array.astype_with_casting(dtype, "unsafe")
+        } else {
+            Ok(array.astype(dtype))
+        });
+    }
+
     fn push_average(
         &mut self,
         array: &UFuncArray,
@@ -221,7 +246,10 @@ for case in payload['cases']:
         kw['ddof'] = case['ddof']
     try:
         if case['op'] == 'astype':
-            result = inputs[case['input']].astype(case['dtype'], casting='unsafe')
+            source = inputs[case['input']]
+            if 'source_dtype' in case:
+                source = source.astype(case['source_dtype'], casting='unsafe')
+            result = source.astype(case['dtype'], casting='unsafe')
         elif case['op'] == 'average':
             weights = None if case['weights'] is None else inputs[case['weights']]
             result = np.asarray(np.average(inputs[case['input']], weights=weights, **kw))
@@ -2420,6 +2448,169 @@ fn complex_unary_rejects_real_only_operations_but_retains_rint() {
 }
 
 #[test]
+fn raw_boolean_and_narrow_integer_casts_match_numpy_in_both_apis() {
+    let mut fixtures = vec![(
+        DType::Bool,
+        vec![
+            0.0,
+            -0.0,
+            0.25,
+            -0.25,
+            1.0,
+            -1.0,
+            2.0,
+            -3.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            65_536.0,
+            -65_536.0,
+            0.5,
+        ],
+    )];
+    for (dtype, bits, signed) in [
+        (DType::I8, 8, true),
+        (DType::U8, 8, false),
+        (DType::I16, 16, true),
+        (DType::U16, 16, false),
+        (DType::I32, 32, true),
+        (DType::U32, 32, false),
+    ] {
+        let modulus = 2.0_f64.powi(bits);
+        let upper = if signed { modulus * 0.5 } else { modulus };
+        fixtures.push((
+            dtype,
+            vec![
+                0.0,
+                -0.0,
+                0.25,
+                -0.25,
+                1.9,
+                -1.9,
+                upper - 1.0,
+                upper,
+                upper + 1.0,
+                -upper - 1.0,
+                modulus - 1.0,
+                modulus,
+                modulus + 1.0,
+                -modulus - 1.0,
+                f64::INFINITY,
+                f64::NAN,
+            ],
+        ));
+    }
+    let targets = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let mut batch = OracleBatch::default();
+    for (source_dtype, values) in fixtures {
+        for shape in [vec![], vec![16], vec![4, 4], vec![2, 0, 3]] {
+            let raw = match shape.as_slice() {
+                [] => vec![values[8]],
+                [2, 0, 3] => Vec::new(),
+                _ => values.clone(),
+            };
+            let array = UFuncArray::new(shape.clone(), raw.clone(), source_dtype).unwrap();
+            // Send the raw cells as float64 so NumPy independently applies the
+            // declared source conversion before the destination conversion.
+            let input = batch.add_input(&UFuncArray::new(shape, raw, DType::F64).unwrap());
+            for target in targets {
+                if target != source_dtype {
+                    for checked in [false, true] {
+                        batch.push_raw_source_cast(input, &array, target, checked);
+                    }
+                }
+            }
+            // An unchanged dtype preserves working cells by contract, even
+            // when exporting those cells would quantize or wrap them.
+            let source_bits = array
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>();
+            for same in [
+                array.astype(source_dtype),
+                array.astype_with_casting(source_dtype, "no").unwrap(),
+            ] {
+                assert_eq!(same.shape(), array.shape());
+                assert_eq!(same.dtype(), source_dtype);
+                assert_eq!(
+                    same.values()
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    source_bits
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn checked_narrow_integer_cast_status_uses_declared_source_values() {
+    take_float_error_events();
+    let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    for dtype in [DType::I8, DType::U8, DType::I16, DType::U16] {
+        let array = UFuncArray::new(vec![3], vec![65_536.0, 65_537.0, -65_536.0], dtype).unwrap();
+        let output = array.astype_with_casting(DType::F16, "unsafe").unwrap();
+        assert_eq!(output.values(), &[0.0, 1.0, 0.0]);
+    }
+    let boolean = UFuncArray::new(
+        vec![7],
+        vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.25,
+            -0.25,
+            0.0,
+            -0.0,
+        ],
+        DType::Bool,
+    )
+    .unwrap();
+    assert_eq!(
+        boolean
+            .astype_with_casting(DType::F16, "safe")
+            .unwrap()
+            .values(),
+        &[1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    );
+    let overflowing = UFuncArray::new(vec![1], vec![65_535.0], DType::U16).unwrap();
+    for policy in ["safe", "no", "equiv", "unknown"] {
+        assert!(matches!(
+            overflowing.astype_with_casting(DType::F16, policy),
+            Err(UFuncError::Msg(_))
+        ));
+    }
+    assert!(matches!(
+        overflowing.astype_with_casting(DType::F16, "unsafe"),
+        Err(UFuncError::FloatingPoint {
+            kind: FloatErrorKind::Over,
+            ..
+        })
+    ));
+    assert!(take_float_error_events().is_empty());
+}
+
+#[test]
 fn complex_same_dtype_casts_preserve_values_after_policy_and_layout_validation() {
     take_float_error_events();
     let _guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
@@ -3381,7 +3572,7 @@ fn nan_reductions_skip_unused_extents_for_empty_outputs() {
                                         "{source_dtype:?} {operation} {dtype:?} {shape:?}: {error}"
                                     )
                                 });
-                        let expected_dtype = dtype.unwrap_or_else(|| {
+                        let expected_dtype = dtype.unwrap_or({
                             if matches!(operation, "nanvar" | "nanstd") {
                                 match source_dtype {
                                     DType::Complex64 => DType::F32,

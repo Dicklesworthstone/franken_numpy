@@ -1411,6 +1411,34 @@ fn covariance_widens_source_precision_before_means_and_products() {
 }
 
 #[test]
+fn covariance_and_correlation_accept_raw_wide_integer_working_values() {
+    let offset = 2.0_f64.powi(54);
+    for dtype in [DType::I64, DType::U64] {
+        let input = UFuncArray::new(
+            vec![2, 2],
+            vec![offset - 8.0, offset + 8.0, offset - 16.0, offset + 16.0],
+            dtype,
+        )
+        .unwrap();
+        assert!(!input.has_integer_sidecar());
+        // These raw cells are exact integers despite exceeding the storage
+        // export bridge's conservative 2^53 bound. Centering produces rows
+        // [-8, 8] and [-16, 16], with an exact sample covariance.
+        let covariance = input.cov().unwrap();
+        assert_eq!(covariance.shape(), &[2, 2]);
+        assert_eq!(covariance.dtype(), DType::F64);
+        assert_eq!(covariance.values(), &[128.0, 256.0, 256.0, 512.0]);
+        let correlation = input.corrcoef().unwrap();
+        assert_eq!(correlation.shape(), &[2, 2]);
+        assert_eq!(correlation.dtype(), DType::F64);
+        for &value in correlation.values() {
+            assert!(value.is_finite());
+            assert!((value - 1.0).abs() <= 4.0 * f64::EPSILON);
+        }
+    }
+}
+
+#[test]
 fn correlation_avoids_overflow_and_underflow_in_variance_products() {
     let mut batch = OracleBatch::default();
     for scale in [1.0e-150, 1.0, 1.0e150] {

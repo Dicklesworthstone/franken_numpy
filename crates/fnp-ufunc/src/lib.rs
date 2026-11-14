@@ -16140,7 +16140,7 @@ impl UFuncArray {
                 if self.dtype.is_complex() {
                     // Reversing all physical cells also reverses each pair.
                     // Restore real/imaginary order within every logical element.
-                    for pair in values.chunks_exact_mut(2) {
+                    for pair in values.as_chunks_mut::<2>().0 {
                         pair.swap(0, 1);
                     }
                 }
@@ -16885,7 +16885,7 @@ impl UFuncArray {
         if count != 0 {
             let lhs = self.complex_reduction_values(dtype)?;
             let rhs = rhs.complex_reduction_values(dtype)?;
-            for (flat, parts) in values.chunks_exact_mut(2).enumerate() {
+            for (flat, parts) in values.as_chunks_mut::<2>().0.iter_mut().enumerate() {
                 let (a, b) = indices(flat);
                 let product = Self::complex_reduction_multiply(lhs[a], rhs[b], dtype);
                 parts.copy_from_slice(&[product.0, product.1]);
@@ -19462,7 +19462,7 @@ impl UFuncArray {
     fn complex_componentwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
         let _ = self.complex_logical_shape(op.name())?;
         let mut values = try_zeroed_f64(self.values.len(), op.name())?;
-        for (index, output) in values.chunks_exact_mut(2).enumerate() {
+        for (index, output) in values.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let (real, imag) = self.complex_extrema_value(index);
             let result = match op {
                 UnaryOp::Positive => (real, imag),
@@ -23515,14 +23515,20 @@ impl UFuncArray {
             // Reuse typed storage's conversion rules. Converting the f64 working
             // buffer loses low bits of large integers, saturates negative values
             // cast to unsigned, and double-rounds integer-to-f32 conversions.
-            // Narrow inputs are exact in the working buffer; wide inputs retain
-            // their originals in the sidecar.
-            let source = match self
-                .promoting_reduction_sidecar()
-                .expect("integer input has an exact typed representation")
-            {
-                IntegerSidecar::I64(values) => ArrayStorage::I64(values),
-                IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+            // Normalize Boolean truth and narrow integer source widths before
+            // the destination conversion. Wide inputs retain their exact
+            // sidecars and the existing raw working-cell conversion behavior.
+            let source = if matches!(self.dtype, DType::I64 | DType::U64) {
+                match self
+                    .promoting_reduction_sidecar()
+                    .expect("integer input has an exact typed representation")
+                {
+                    IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+                    IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+                }
+            } else {
+                self.to_storage()
+                    .expect("Boolean and narrow integer inputs have typed storage")
             };
             let converted = source
                 .cast_to(dtype)
@@ -27791,7 +27797,9 @@ impl UFuncArray {
         {
             // NumPy widens the declared source storage before centering. A
             // constructor's working f64 cells need not yet have that precision.
-            return self.cast_numeric_storage(DType::F64, false)?.cov();
+            // The public cast also preserves wide integer sidecars and raw
+            // wide working values beyond the storage-export bridge's limit.
+            return self.astype_with_casting(DType::F64, "unsafe")?.cov();
         }
         let (nvars, nobs) = match self.shape.len() {
             0 => (1, 1),
@@ -33468,11 +33476,11 @@ impl UFuncArray {
             output_shape.push(2);
         }
         // The selected output cannot contain more components than the input.
-        let output_count = if axis_len == 0 {
-            0
-        } else {
-            self.values.len() / axis_len * unique_count
-        };
+        let output_count = self
+            .values
+            .len()
+            .checked_div(axis_len)
+            .map_or(0, |count| count * unique_count);
         let mut values = try_zeroed_f64(output_count, "unique")?;
         for outer_index in 0..outer {
             for (new_index, &original_index) in first_indices.iter().enumerate() {
