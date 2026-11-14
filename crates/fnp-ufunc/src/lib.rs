@@ -24314,6 +24314,9 @@ impl UFuncArray {
 
     /// Compute the median along the given axis (or all elements if None).
     pub fn median(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_median(axis, false);
+        }
         let out_dtype = promote_for_mean_reduction(self.dtype);
         match axis {
             None => {
@@ -24410,6 +24413,246 @@ impl UFuncArray {
                     integer_sidecar: None,
                 })
             }
+        }
+    }
+
+    /// Select complete complex elements in NumPy's lexicographic order. The
+    /// middle element(s) are averaged in the declared component precision,
+    /// including complex division's nonfinite and signed-zero behavior.
+    fn reduce_complex_median(
+        &self,
+        axis: Option<isize>,
+        ignore_nan: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if ignore_nan { "nanmedian" } else { "median" };
+        let shape = self.complex_logical_shape(operation)?;
+        // Unlike sum, median does not accept axis=0/-1 on a scalar.
+        let axis = axis
+            .map(|axis| normalize_axis(axis, shape.len()))
+            .transpose()?;
+        let mut output_shape =
+            axis.map_or_else(Vec::new, |axis| reduced_shape(&shape, axis, false));
+        let output_count = if output_shape.contains(&0) {
+            0
+        } else {
+            element_count(&output_shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = output_count
+            .checked_mul(2)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut values = try_zeroed_f64(physical_count, operation)?;
+        output_shape.push(2);
+        // Huge unused extents in an empty result require neither strides nor a
+        // lane buffer. Check the output capacity before either allocation.
+        if output_count == 0 {
+            return Self::new(output_shape, values, self.dtype);
+        }
+        let axis_len = axis.map_or(self.values.len() / 2, |axis| shape[axis]);
+        if axis_len == 0 {
+            values.fill(empty_reduction_nan());
+            return Self::new(output_shape, values, self.dtype);
+        }
+        let inner = match axis {
+            Some(axis) => element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+            None => 1,
+        };
+        // NumPy uses a masked-array median for short explicit axes of N-D
+        // inputs. It averages two copies of an odd middle value and fills an
+        // all-masked lane with a real NaN. Its flattened/long-axis path instead
+        // averages one odd middle and retains the last all-NaN input pair.
+        // These routes differ observably for overflow and NaN companions.
+        let masked_median = ignore_nan && axis.is_some() && shape.len() > 1 && axis_len < 600;
+        let mut lane: Vec<(f64, f64)> = Vec::new();
+        lane.try_reserve_exact(axis_len).map_err(|_| {
+            UFuncError::Msg(format!("{operation}: unable to allocate reduction lane"))
+        })?;
+        for (output, parts) in values.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            lane.clear();
+            let base = (output / inner) * axis_len * inner + output % inner;
+            let mut nan_value: Option<(f64, f64)> = None;
+            let mut last_value = (0.0, 0.0);
+            let mut valid_count = 0;
+            for offset in 0..axis_len {
+                let value = self.complex_extrema_value(base + offset * inner);
+                last_value = value;
+                if value.0.is_nan() || value.1.is_nan() {
+                    // Ordinary median restores the final ordered NaN after
+                    // averaging, preserving its non-NaN component verbatim.
+                    if nan_value
+                        .is_none_or(|current| !Self::complex_order_cmp(value, current).is_lt())
+                    {
+                        nan_value = Some(value);
+                    }
+                    if ignore_nan && !masked_median {
+                        continue;
+                    }
+                } else {
+                    valid_count += 1;
+                }
+                lane.push(value);
+            }
+            let result = if !ignore_nan && let Some(value) = nan_value {
+                value
+            } else if ignore_nan && valid_count == 0 {
+                if masked_median {
+                    (f64::NAN, 0.0)
+                } else {
+                    last_value
+                }
+            } else {
+                let count = if ignore_nan { valid_count } else { lane.len() };
+                let middle = count / 2;
+                let (lower, upper, divisor) = if masked_median {
+                    // Masked slots sort as inf+0j. Valid complex infinities
+                    // may therefore lie after a mask, unlike finite values.
+                    // NumPy replaces a selected mask with inf+infj before
+                    // taking the mean; dropping masks changes these results.
+                    Self::sort_complex_masked_median(&mut lane);
+                    let selected_value = |value: (f64, f64)| {
+                        if value.0.is_nan() || value.1.is_nan() {
+                            (f64::INFINITY, f64::INFINITY)
+                        } else {
+                            value
+                        }
+                    };
+                    let lower = if count.is_multiple_of(2) {
+                        middle - 1
+                    } else {
+                        middle
+                    };
+                    (selected_value(lane[lower]), selected_value(lane[middle]), 2)
+                } else {
+                    let (lower, selected, _) = lane.select_nth_unstable_by(middle, |lhs, rhs| {
+                        Self::complex_order_cmp(*lhs, *rhs)
+                    });
+                    let upper = *selected;
+                    if count.is_multiple_of(2) {
+                        let lower = lower
+                            .iter()
+                            .copied()
+                            .max_by(|lhs, rhs| Self::complex_order_cmp(*lhs, *rhs))
+                            .expect("an even nonempty median has a lower middle");
+                        (lower, upper, 2)
+                    } else {
+                        ((0.0, 0.0), upper, 1)
+                    }
+                };
+                let sum = Self::complex_reduction_add((0.0, 0.0), lower, self.dtype);
+                let sum = Self::complex_reduction_add(sum, upper, self.dtype);
+                Self::divide_complex_value_by_count(sum, divisor, self.dtype)
+            };
+            *parts = [result.0, result.1];
+        }
+        Self::new(output_shape, values, self.dtype)
+    }
+
+    /// Sort the short masked-median lane, retaining the mask identities when
+    /// their inf+0j ordering key ties a valid infinity. NumPy's masked median
+    /// uses a median-of-three quicksort with insertion runs of at most 16
+    /// elements. Its tie permutation matters: selecting a mask fills both
+    /// components with infinity, changing the result's NaN/Inf categories.
+    fn sort_complex_masked_median(lane: &mut [(f64, f64)]) {
+        if lane.len() < 2 {
+            return;
+        }
+        let key = |value: (f64, f64)| {
+            if value.0.is_nan() || value.1.is_nan() {
+                (f64::INFINITY, 0.0)
+            } else {
+                value
+            }
+        };
+        let less = |lhs, rhs| Self::complex_order_cmp(key(lhs), key(rhs)).is_lt();
+        let sift = |values: &mut [(f64, f64)], mut root: usize, end: usize, value| {
+            let mut child = 2 * root + 1;
+            while child < end {
+                if child + 1 < end && less(values[child], values[child + 1]) {
+                    child += 1;
+                }
+                if !less(value, values[child]) {
+                    break;
+                }
+                values[root] = values[child];
+                root = child;
+                child = 2 * root + 1;
+            }
+            values[root] = value;
+        };
+        // Processing the smaller partition first bounds the pending stack by
+        // log2(lane.len()); the masked route itself is limited to 599 values.
+        let mut pending = [(0_usize, 0_usize, 0_i32); usize::BITS as usize];
+        let mut pending_count = 0;
+        let (mut low, mut high) = (0, lane.len() - 1);
+        let mut depth = 2 * (usize::BITS - lane.len().leading_zeros() - 1) as i32;
+        loop {
+            if depth < 0 {
+                let values = &mut lane[low..=high];
+                let end = values.len();
+                for root in (0..end / 2).rev() {
+                    let value = values[root];
+                    sift(values, root, end, value);
+                }
+                for end in (1..values.len()).rev() {
+                    let value = values[end];
+                    values[end] = values[0];
+                    sift(values, 0, end, value);
+                }
+            } else {
+                while high - low > 15 {
+                    let middle = low + (high - low) / 2;
+                    if less(lane[middle], lane[low]) {
+                        lane.swap(middle, low);
+                    }
+                    if less(lane[high], lane[middle]) {
+                        lane.swap(high, middle);
+                    }
+                    if less(lane[middle], lane[low]) {
+                        lane.swap(middle, low);
+                    }
+                    let pivot = lane[middle];
+                    lane.swap(middle, high - 1);
+                    let (mut left, mut right) = (low, high - 1);
+                    loop {
+                        left += 1;
+                        while less(lane[left], pivot) {
+                            left += 1;
+                        }
+                        right -= 1;
+                        while less(pivot, lane[right]) {
+                            right -= 1;
+                        }
+                        if left >= right {
+                            break;
+                        }
+                        lane.swap(left, right);
+                    }
+                    lane.swap(left, high - 1);
+                    depth -= 1;
+                    if left - low < high - left {
+                        pending[pending_count] = (left + 1, high, depth);
+                        high = left - 1;
+                    } else {
+                        pending[pending_count] = (low, left - 1, depth);
+                        low = left + 1;
+                    }
+                    pending_count += 1;
+                }
+                for index in low + 1..=high {
+                    let value = lane[index];
+                    let mut destination = index;
+                    while destination > low && less(value, lane[destination - 1]) {
+                        lane[destination] = lane[destination - 1];
+                        destination -= 1;
+                    }
+                    lane[destination] = value;
+                }
+            }
+            if pending_count == 0 {
+                break;
+            }
+            pending_count -= 1;
+            (low, high, depth) = pending[pending_count];
         }
     }
 
@@ -27535,28 +27778,53 @@ impl UFuncArray {
 
     /// Estimate the covariance matrix.
     ///
-    /// Mimics `np.cov(m)` where m is 2-D with each row as a variable.
-    /// Returns the sample covariance matrix (ddof=1).
+    /// Mimics `np.cov(m)` with each logical row as a variable and ddof=1.
+    /// Scalars and vectors describe one variable, whose result is a scalar.
+    /// Complex inputs are centered in complex128 and use conjugate products.
     pub fn cov(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.cov_complex();
+        }
+        if self.dtype != DType::F64
+            && (self.dtype.is_integer()
+                || matches!(self.dtype, DType::Bool | DType::F16 | DType::F32))
+        {
+            // NumPy widens the declared source storage before centering. A
+            // constructor's working f64 cells need not yet have that precision.
+            return self.cast_numeric_storage(DType::F64, false)?.cov();
+        }
         let (nvars, nobs) = match self.shape.len() {
+            0 => (1, 1),
             1 => (1, self.shape[0]),
             2 => (self.shape[0], self.shape[1]),
-            _ => return Err(UFuncError::Msg("cov: input must be 1-D or 2-D".to_string())),
+            _ => {
+                return Err(UFuncError::Msg(
+                    "cov: input has more than 2 dimensions".to_string(),
+                ));
+            }
         };
+        if nvars == 0 {
+            return Self::new(vec![0, 0], Vec::new(), DType::F64);
+        }
+        let out_count = nvars
+            .checked_mul(nvars)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
 
         let fact = if nobs < 2 { 0.0 } else { (nobs - 1) as f64 };
 
         // Compute means per row
-        let means: Vec<f64> = (0..nvars)
-            .map(|r| {
+        let means = try_collect_f64(
+            (0..nvars).map(|r| {
                 let row = &self.values[r * nobs..(r + 1) * nobs];
                 if nobs == 0 {
                     f64::NAN
                 } else {
                     row.iter().sum::<f64>() / nobs as f64
                 }
-            })
-            .collect();
+            }),
+            "cov",
+        )?;
 
         // Compute covariance matrix. Each entry cov[i,j] = sum_k (x_ik-mean_i)
         // (x_jk-mean_j) / fact is independent, and the inner k-sum runs in fixed
@@ -27566,7 +27834,7 @@ impl UFuncArray {
         // each from scratch) is bit-for-bit identical to the mirrored fill. Output
         // rows are contiguous and disjoint, so par_chunks_mut over rows is bit-exact
         // for any thread count. Compute-bound at O(nvars^2 * nobs) (not GEMM).
-        let mut cov_values = vec![0.0; nvars * nvars];
+        let mut cov_values = try_zeroed_f64(out_count, "cov")?;
         // The GEMM path (C·Cᵀ) wins once nvars is large enough that the cache
         // blocking pays for its centering+transpose setup; below that the
         // entry-by-entry parallel loop is faster. Both are bit-identical. Measured
@@ -27683,7 +27951,7 @@ impl UFuncArray {
             // result is BIT-FOR-BIT identical — but routes the O(nvars²·nobs) work
             // through the cache-blocked, register-tiled, parallel GEMM (numpy uses
             // BLAS here). Centering and the Cᵀ transpose are O(nvars·nobs).
-            let mut centered = vec![0.0f64; nvars * nobs];
+            let mut centered = try_zeroed_f64(self.values.len(), "cov")?;
             for i in 0..nvars {
                 let mi = means[i];
                 let dst = &mut centered[i * nobs..i * nobs + nobs];
@@ -27691,20 +27959,20 @@ impl UFuncArray {
                     *d = s - mi;
                 }
             }
-            let mut ct = vec![0.0f64; nobs * nvars];
+            let mut ct = try_zeroed_f64(self.values.len(), "cov")?;
             for i in 0..nvars {
                 for k in 0..nobs {
                     ct[k * nvars + i] = centered[i * nobs + k];
                 }
             }
-            let mut g = vec![0.0f64; nvars * nvars];
+            let mut g = try_zeroed_f64(out_count, "cov")?;
             matmul_accumulate(&centered, &ct, nvars, nobs, nvars, &mut g);
             for (c, &gij) in cov_values.iter_mut().zip(g.iter()) {
                 *c = gij / fact;
             }
         }
 
-        let out_shape = if self.shape.len() == 1 {
+        let out_shape = if nvars == 1 {
             vec![]
         } else {
             vec![nvars, nvars]
@@ -27718,15 +27986,134 @@ impl UFuncArray {
         })
     }
 
+    fn cov_complex(&self) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("cov")?;
+        let (nvars, nobs) = match shape.as_slice() {
+            [] => (1, 1),
+            [nobs] => (1, *nobs),
+            [nvars, nobs] => (*nvars, *nobs),
+            _ => {
+                return Err(UFuncError::Msg(
+                    "cov: input has more than 2 dimensions".to_string(),
+                ));
+            }
+        };
+        if nvars == 0 {
+            // NumPy's zero-variable early return is real even for complex input.
+            return Self::new(vec![0, 0], Vec::new(), DType::F64);
+        }
+        let output_count = nvars
+            .checked_mul(nvars)
+            .and_then(|count| count.checked_mul(2))
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let output_shape = if nvars == 1 {
+            vec![2]
+        } else {
+            vec![nvars, nvars, 2]
+        };
+        if nobs < 2 {
+            return Self::new(
+                output_shape,
+                try_filled_f64(output_count, f64::NAN, "cov")?,
+                DType::Complex128,
+            );
+        }
+
+        let count = self.values.len() / 2;
+        let mut centered = Vec::new();
+        centered.try_reserve_exact(count).map_err(|_| {
+            UFuncError::Msg("cov: unable to allocate centered input (out of memory)".to_string())
+        })?;
+        centered.extend((0..count).map(|index| self.complex_extrema_value(index)));
+        for row in centered.chunks_exact_mut(nobs) {
+            // The source has already been widened, so NumPy's ordinary complex
+            // pairwise tree applies without dtype-conversion buffer boundaries.
+            let sum = Self::complex_reduction_add(
+                (0.0, 0.0),
+                Self::complex_pairwise_sum(row, DType::Complex128),
+                DType::Complex128,
+            );
+            let mean = Self::divide_complex_value_by_count(sum, nobs, DType::Complex128);
+            for value in row {
+                value.0 -= mean.0;
+                value.1 -= mean.1;
+            }
+        }
+
+        let mut values = try_zeroed_f64(output_count, "cov")?;
+        let normalization = 1.0 / (nobs - 1) as f64;
+        for (i, left) in centered.chunks_exact(nobs).enumerate() {
+            for (j, right) in centered.chunks_exact(nobs).enumerate() {
+                let mut sum = (0.0, 0.0);
+                for (&lhs, &rhs) in left.iter().zip(right) {
+                    let product =
+                        Self::complex_reduction_multiply(lhs, (rhs.0, -rhs.1), DType::Complex128);
+                    sum = Self::complex_reduction_add(sum, product, DType::Complex128);
+                }
+                // Multiplication by a real scalar still uses NumPy's complex
+                // arithmetic, including cross-component NaNs for infinities.
+                let covariance =
+                    Self::complex_reduction_multiply(sum, (normalization, 0.0), DType::Complex128);
+                let index = (i * nvars + j) * 2;
+                values[index] = covariance.0;
+                values[index + 1] = covariance.1;
+            }
+        }
+        Self::new(output_shape, values, DType::Complex128)
+    }
+
+    fn covariance_divide_complex_by_real((real, imag): (f64, f64), divisor: f64) -> (f64, f64) {
+        if divisor == 0.0 {
+            return (real / divisor, imag / divisor);
+        }
+        let reciprocal = 1.0 / divisor;
+        (
+            (real + imag * 0.0) * reciprocal,
+            (imag - real * 0.0) * reciprocal,
+        )
+    }
+
     /// Compute the Pearson correlation coefficient matrix.
     ///
-    /// Mimics `np.corrcoef(x)` where x is 1-D or 2-D.
+    /// Mimics `np.corrcoef(x)` with logical rows as variables.
     pub fn corrcoef(&self) -> Result<Self, UFuncError> {
-        let c = self.cov()?;
+        let mut c = self.cov()?;
+
+        if c.dtype.is_complex() {
+            let shape = c.complex_logical_shape("corrcoef")?;
+            if shape.is_empty() {
+                let value = Self::covariance_divide_complex_by_real(
+                    (c.values[0], c.values[1]),
+                    c.values[0],
+                );
+                c.values[0] = value.0;
+                c.values[1] = value.1;
+                return Ok(c);
+            }
+            let nvars = shape[0];
+            let deviations = try_collect_f64(
+                (0..nvars).map(|index| c.values[(index * nvars + index) * 2].sqrt()),
+                "corrcoef",
+            )?;
+            for i in 0..nvars {
+                for j in 0..nvars {
+                    let index = (i * nvars + j) * 2;
+                    let row_scaled = Self::covariance_divide_complex_by_real(
+                        (c.values[index], c.values[index + 1]),
+                        deviations[i],
+                    );
+                    let value = Self::covariance_divide_complex_by_real(row_scaled, deviations[j]);
+                    c.values[index] = value.0.clamp(-1.0, 1.0);
+                    c.values[index + 1] = value.1.clamp(-1.0, 1.0);
+                }
+            }
+            return Ok(c);
+        }
 
         if c.shape.is_empty() {
             let cov_val = c.values[0];
-            let corr = if cov_val.is_nan() || cov_val == 0.0 {
+            let corr = if !cov_val.is_finite() || cov_val == 0.0 {
                 f64::NAN
             } else {
                 1.0
@@ -27740,32 +28127,21 @@ impl UFuncArray {
         }
 
         let nvars = c.shape[0];
-        let mut values = c.values.clone();
-        // Normalize: corrcoef[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
+        let deviations = try_collect_f64(
+            (0..nvars).map(|index| c.values[index * nvars + index].sqrt()),
+            "corrcoef",
+        )?;
+        // NumPy divides by each standard deviation in turn. Forming the product
+        // of two variances first can overflow or underflow even when the
+        // correlation itself is finite. Do not force diagonal entries to one:
+        // the same normalization and clipping apply to every entry.
         for i in 0..nvars {
             for j in 0..nvars {
-                let denom = (c.values[i * nvars + i] * c.values[j * nvars + j]).sqrt();
-                values[i * nvars + j] = if denom > 0.0 {
-                    let mut val = c.values[i * nvars + j] / denom;
-                    if i == j {
-                        if !val.is_nan() {
-                            val = 1.0;
-                        }
-                    } else {
-                        val = val.clamp(-1.0, 1.0);
-                    }
-                    val
-                } else {
-                    f64::NAN
-                };
+                c.values[i * nvars + j] =
+                    (c.values[i * nvars + j] / deviations[i] / deviations[j]).clamp(-1.0, 1.0);
             }
         }
-        Ok(Self {
-            shape: vec![nvars, nvars],
-            values,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        Ok(c)
     }
 
     /// Return the indices of the bins to which each value in the input belongs.
@@ -35222,6 +35598,9 @@ impl UFuncArray {
 
     /// `np.nanmedian` — median ignoring NaN values.
     pub fn nanmedian(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.reduce_complex_median(axis, true);
+        }
         if self.dtype.is_integer() || self.dtype == DType::Bool {
             return self.median(axis);
         }

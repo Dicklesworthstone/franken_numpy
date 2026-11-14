@@ -39,6 +39,8 @@ fn reduce(
         ("nanmean", None) => array.nanmean(axis, keepdims),
         ("nanvar", None) => array.nanvar(axis, keepdims, ddof),
         ("nanstd", None) => array.nanstd(axis, keepdims, ddof),
+        ("median", None) => array.median(axis),
+        ("nanmedian", None) => array.nanmedian(axis),
         ("cumsum", None) => array.cumsum(axis),
         ("cumprod", None) => array.cumprod(axis),
         ("nancumsum", None) => array.nancumsum(axis),
@@ -320,6 +322,296 @@ print(json.dumps(rows))
                     expected.to_bits(),
                     "{case}: component {index}, actual={value:?}, expected={expected:?}"
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn complex_median_preserves_lexicographic_pairs_and_source_precision() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(&[3], &[(1.0, 9.0), (3.0, 1.0), (2.0, 7.0)], dtype);
+        for operation in ["median", "nanmedian"] {
+            let median = reduce(&array, operation, None, None, false, 0).unwrap();
+            assert_eq!(median.shape(), &[2]);
+            assert_eq!(median.dtype(), dtype);
+            assert_eq!(median.values(), &[2.0, 7.0]);
+        }
+
+        let pattern = [
+            (3.0, -17.0),
+            (1.0, 9.0),
+            (3.0, 1.0),
+            (2.0, 7.0),
+            (1.0 + f64::from(f32::EPSILON) / 4.0, -11.0),
+            (1.0, 3.0),
+            (16_777_217.0, -0.0),
+            (-16_777_216.0, 13.0),
+            (0.0, -0.0),
+        ];
+        for shape in [
+            vec![],
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![8],
+            vec![17],
+            vec![2, 3],
+            vec![3, 2],
+            vec![2, 3, 4],
+        ] {
+            let count = shape.iter().product();
+            let values = (0..count)
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            let array = complex_array(&shape, &values, dtype);
+            let input = batch.add_input(&array);
+            for axis in [None, Some(0), Some(1), Some(-1), Some(-2), Some(3)] {
+                for operation in ["median", "nanmedian"] {
+                    batch.push(input, &array, operation, None, axis, false, 0);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_median_nan_elements_and_empty_lanes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for shape in [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![3],
+            vec![2, 3],
+            vec![3, 2],
+            vec![2, 0, 3],
+            vec![0, 2],
+            vec![2, 0],
+        ] {
+            let count = shape.iter().product();
+            for all_nan in [false, true] {
+                let values = (0..count)
+                    .map(|index| match index % 4 {
+                        0 => (f64::NAN, index as f64),
+                        1 => (index as f64, f64::NAN),
+                        2 if all_nan => (f64::NAN, -0.0),
+                        2 => (5.0, -17.0),
+                        _ if all_nan => (-0.0, f64::NAN),
+                        _ => (-3.0, 9.0),
+                    })
+                    .collect::<Vec<_>>();
+                let array = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&array);
+                for axis in [None, Some(0), Some(1), Some(-1), Some(-2), Some(3)] {
+                    for operation in ["median", "nanmedian"] {
+                        batch.push(input, &array, operation, None, axis, false, 0);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_median_extreme_components_and_masked_axis_boundary_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let maximum = if dtype == DType::Complex64 {
+            f64::from(f32::MAX)
+        } else {
+            f64::MAX
+        };
+        let smallest = if dtype == DType::Complex64 {
+            f64::from(f32::from_bits(1))
+        } else {
+            f64::from_bits(1)
+        };
+        for value in [
+            (-0.0, -0.0),
+            (maximum * 0.75, maximum * 0.75),
+            (smallest, -smallest),
+            (f64::INFINITY, 3.0),
+            (7.0, f64::NEG_INFINITY),
+            (f64::NAN, -0.0),
+        ] {
+            for count in [1, 2, 3, 599, 600, 601] {
+                let values = vec![value; count];
+                for shape in [vec![count], vec![1, count], vec![count, 1]] {
+                    let array = complex_array(&shape, &values, dtype);
+                    let input = batch.add_input(&array);
+                    for axis in [None, Some(0), Some(-1)] {
+                        for operation in ["median", "nanmedian"] {
+                            batch.push(input, &array, operation, None, axis, false, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_median_masked_infinity_ordering_matches_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for values in [
+            vec![(f64::NAN, 0.0), (f64::INFINITY, 3.0)],
+            vec![(f64::INFINITY, 3.0), (f64::NAN, 0.0)],
+            vec![(f64::NAN, 0.0), (f64::INFINITY, -3.0)],
+            vec![(f64::NAN, 0.0), (f64::INFINITY, 0.0)],
+            vec![(f64::NEG_INFINITY, 3.0), (0.0, 0.0), (f64::NAN, 0.0)],
+            vec![(3.0, f64::INFINITY), (0.0, 0.0), (f64::NAN, 0.0)],
+            vec![
+                (f64::NAN, 1.0),
+                (f64::NAN, 2.0),
+                (f64::INFINITY, 3.0),
+                (f64::INFINITY, 4.0),
+            ],
+        ] {
+            for shape in [
+                vec![values.len()],
+                vec![1, values.len()],
+                vec![values.len(), 1],
+            ] {
+                let array = complex_array(&shape, &values, dtype);
+                let input = batch.add_input(&array);
+                for axis in [None, Some(0), Some(-1)] {
+                    for operation in ["median", "nanmedian"] {
+                        batch.push(input, &array, operation, None, axis, false, 0);
+                    }
+                }
+            }
+        }
+        // A masked slot and a valid inf+0j have equal sorting keys. Above
+        // NumPy's insertion-sort cutoff their tie permutation determines
+        // whether the selected middle is an infinity or a filled mask.
+        for len in [16, 17, 31, 32, 63, 129, 599, 600] {
+            for mask_index in [0, len / 2 - 1, len / 2, len - 2, len - 1] {
+                let mut values = vec![(f64::INFINITY, 0.0); len];
+                values[mask_index] = (f64::NAN, 0.0);
+                for (shape, axis) in [(vec![1, len], 1), (vec![len, 1], 0)] {
+                    let array = complex_array(&shape, &values, dtype);
+                    let input = batch.add_input(&array);
+                    batch.push(input, &array, "nanmedian", None, Some(axis), false, 0);
+                }
+            }
+        }
+        let values = [
+            (0.0, 0.0),
+            (0.0, f64::NAN),
+            (0.0, f64::NAN),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (f64::INFINITY, 0.0),
+            (1.0, 0.0),
+            (f64::INFINITY, -0.0),
+            (f64::NAN, f64::NAN),
+            (f64::INFINITY, 0.0),
+            (0.0, f64::NAN),
+            (0.0, f64::NAN),
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 0.0),
+            (f64::INFINITY, 0.0),
+            (f64::NAN, 0.0),
+            (f64::INFINITY, -0.0),
+        ];
+        let array = complex_array(&[1, values.len()], &values, dtype);
+        let input = batch.add_input(&array);
+        batch.push(input, &array, "nanmedian", None, Some(1), false, 0);
+        let result = array.nanmedian(Some(1)).unwrap();
+        assert_eq!(result.values()[0], f64::INFINITY);
+        assert!(result.values()[1].is_nan());
+        for (mask_index, real_is_nan) in [(7, false), (15, true)] {
+            let mut values = [(f64::INFINITY, 0.0); 17];
+            values[mask_index] = (f64::NAN, 0.0);
+            let array = complex_array(&[1, 17], &values, dtype);
+            let result = array.nanmedian(Some(1)).unwrap();
+            if real_is_nan {
+                assert!(result.values()[0].is_nan());
+            } else {
+                assert_eq!(result.values()[0], f64::INFINITY);
+            }
+            assert!(result.values()[1].is_nan());
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_median_keeps_complete_nan_representatives_and_positive_mean_zeros() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let array = complex_array(&[3], &[(f64::NAN, 2.0), (3.0, f64::NAN), (1.0, 9.0)], dtype);
+        let median = array.median(None).unwrap();
+        assert!(median.values()[0].is_nan());
+        assert_eq!(median.values()[1], 2.0);
+        assert_eq!(array.nanmedian(None).unwrap().values(), &[1.0, 9.0]);
+
+        let all_nan = complex_array(&[2], &[(f64::NAN, 2.0), (-0.0, f64::NAN)], dtype);
+        let nanmedian = all_nan.nanmedian(None).unwrap();
+        assert_eq!(nanmedian.values()[0].to_bits(), (-0.0f64).to_bits());
+        assert!(nanmedian.values()[1].is_nan());
+        let matrix = all_nan.reshape(&[1, 2]).unwrap();
+        let nanmedian = matrix.nanmedian(Some(-1)).unwrap();
+        assert_eq!(nanmedian.shape(), &[1, 2]);
+        assert!(nanmedian.values()[0].is_nan());
+        assert_eq!(nanmedian.values()[1].to_bits(), 0.0f64.to_bits());
+
+        for count in [1, 2, 3] {
+            let zeros = complex_array(&[count], &vec![(-0.0, -0.0); count], dtype);
+            for operation in ["median", "nanmedian"] {
+                let median = reduce(&zeros, operation, None, None, false, 0).unwrap();
+                assert!(median.values().iter().all(|value| value.to_bits() == 0));
+            }
+        }
+    }
+}
+
+#[test]
+fn complex_median_rejects_malformed_layouts_and_impossible_outputs() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for malformed in [
+            UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], dtype).unwrap(),
+            UFuncArray::new(vec![], vec![1.0], dtype).unwrap(),
+            UFuncArray::new(vec![2, 0], vec![], dtype).unwrap(),
+        ] {
+            for axis in [None, Some(0), Some(-1)] {
+                assert!(malformed.median(axis).is_err());
+                assert!(malformed.nanmedian(axis).is_err());
+            }
+        }
+        let complex_limit = isize::MAX as usize / std::mem::size_of::<(f64, f64)>();
+        for columns in [usize::MAX, complex_limit + 1] {
+            let empty = complex_array(&[0, columns], &[], dtype);
+            for result in [empty.median(Some(0)), empty.nanmedian(Some(0))] {
+                assert!(matches!(
+                    result,
+                    Err(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+                ));
+            }
+        }
+        for (shape, axis) in [
+            (vec![0, usize::MAX], 1usize),
+            (vec![0, 1, usize::MAX, 2], 1),
+            (vec![0, usize::MAX, 2], 2),
+        ] {
+            let empty = complex_array(&shape, &[], dtype);
+            let mut expected_shape = shape.clone();
+            expected_shape.remove(axis);
+            expected_shape.push(2);
+            for result in [
+                empty.median(Some(axis as isize)),
+                empty.nanmedian(Some(axis as isize)),
+            ] {
+                let result = result.unwrap();
+                assert_eq!(result.shape(), expected_shape.as_slice());
+                assert_eq!(result.dtype(), dtype);
+                assert!(result.values().is_empty());
             }
         }
     }

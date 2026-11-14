@@ -1,4 +1,4 @@
-//! Logical complex matrix contractions, typed promotion, and vector conventions.
+//! Logical complex matrix contractions, covariance, and vector conventions.
 //!
 //! Numerical checks use componentwise forward-error bounds: portable typed
 //! accumulation and vendor BLAS may use different reduction orders or FMA.
@@ -133,6 +133,16 @@ impl OracleBatch {
         self.actual.push(UFuncArray::multi_dot(arrays));
     }
 
+    fn statistics_case(&mut self, op: &str, array: &UFuncArray) {
+        self.cases
+            .push(json!({"op": op, "lhs": oracle_input(array)}));
+        self.actual.push(match op {
+            "cov" => array.cov(),
+            "corrcoef" => array.corrcoef(),
+            _ => panic!("unsupported matrix statistic"),
+        });
+    }
+
     fn finish(self) {
         let script = r#"
 import json, sys, warnings
@@ -185,6 +195,36 @@ def chain_bounds(arrays):
 rows = []
 for case in json.load(sys.stdin):
     try:
+        if case['op'] in ('cov', 'corrcoef'):
+            source = load(case['lhs'])
+            result = np.asarray(getattr(np, case['op'])(source))
+            # Widen source storage before centering, as np.cov does. A bound
+            # based on original magnitudes includes rounding in both the means
+            # and the centered products, even for nearly constant rows.
+            matrix = np.atleast_2d(source.astype(np.result_type(source.dtype, np.float64)))
+            nvars, nobs = matrix.shape
+            bounds = np.zeros((nvars, nvars), dtype=np.float64)
+            if nvars and nobs > 1:
+                mean = matrix.mean(axis=1, keepdims=True)
+                scale = (np.abs(matrix.real) + np.abs(matrix.imag)
+                         + np.abs(mean.real) + np.abs(mean.imag))
+                bounds = scale @ scale.T / (nobs - 1)
+                if case['op'] == 'corrcoef':
+                    covariance = np.atleast_2d(np.cov(source))
+                    deviation = np.sqrt(np.diag(covariance).real)
+                    # Account for rounding in both variance-derived divisors.
+                    bounds = 4.0 * bounds / deviation[:, None] / deviation[None, :]
+            bounds = np.nan_to_num(bounds, nan=0.0, posinf=np.finfo(np.float64).max,
+                                   neginf=np.finfo(np.float64).max)
+            parts = np.empty(result.size * 2, dtype=np.float64)
+            parts[0::2] = result.real.ravel()
+            parts[1::2] = result.imag.ravel()
+            component_bounds = np.repeat(bounds.ravel(), 2)
+            rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                             bits=parts.view(np.uint64).tolist(),
+                             bounds=component_bounds.tolist(), contracted=2*nobs+8,
+                             epsilon=float(np.finfo(np.float64).eps), integers=None))
+            continue
         if case['op'] == 'multi_dot':
             arrays = [load(item) for item in case['arrays']]
             result = np.asarray(np.linalg.multi_dot(arrays))
@@ -1164,8 +1204,7 @@ fn complex_multi_dot_preserves_pairwise_promotion_and_exact_integer_sources() {
 #[test]
 fn complex_multi_dot_does_not_conjugate_vector_endpoints() {
     let left =
-        UFuncArray::new(vec![1, 2, 2], vec![1.0, 2.0, 3.0, -1.0], DType::Complex128)
-            .unwrap();
+        UFuncArray::new(vec![1, 2, 2], vec![1.0, 2.0, 3.0, -1.0], DType::Complex128).unwrap();
     let middle = UFuncArray::new(
         vec![2, 2, 2],
         vec![2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
@@ -1173,8 +1212,7 @@ fn complex_multi_dot_does_not_conjugate_vector_endpoints() {
     )
     .unwrap();
     let right =
-        UFuncArray::new(vec![2, 1, 2], vec![1.0, -1.0, 2.0, 1.0], DType::Complex128)
-            .unwrap();
+        UFuncArray::new(vec![2, 1, 2], vec![1.0, -1.0, 2.0, 1.0], DType::Complex128).unwrap();
     let matrix = UFuncArray::multi_dot(&[&left, &middle, &right]).unwrap();
     assert_eq!(matrix.shape(), &[1, 1, 2]);
     assert_eq!(matrix.values(), &[5.0, 9.0]);
@@ -1233,6 +1271,270 @@ fn complex_multi_dot_validates_layouts_and_checked_empty_output_capacity() {
         UFuncArray::multi_dot(&[&tall, &wide, &tall, &wide]),
         Err(UFuncError::Shape(ShapeError::Overflow))
     ));
+}
+
+#[test]
+fn covariance_and_correlation_logical_shapes_and_source_dtypes_match_numpy() {
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[17],
+        &[129],
+        &[8193],
+        &[0, 0],
+        &[0, 3],
+        &[1, 0],
+        &[1, 1],
+        &[1, 7],
+        &[2, 0],
+        &[2, 1],
+        &[2, 3],
+        &[3, 17],
+        &[4, 129],
+        &[2, 3, 4],
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for &shape in shapes {
+            let input = source(shape, dtype, 2);
+            for op in ["cov", "corrcoef"] {
+                batch.statistics_case(op, &input);
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn complex_covariance_centers_rows_and_conjugates_the_second_operand() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 1.0, 3.0, 3.0, 1.0, -1.0, 3.0, -3.0],
+            dtype,
+        )
+        .unwrap();
+        let covariance = input.cov().unwrap();
+        assert_eq!(covariance.shape(), &[2, 2, 2]);
+        assert_eq!(covariance.dtype(), DType::Complex128);
+        assert_eq!(
+            covariance.values(),
+            &[4.0, 0.0, 0.0, 4.0, 0.0, -4.0, 4.0, 0.0]
+        );
+        let correlation = input.corrcoef().unwrap();
+        assert_eq!(correlation.shape(), &[2, 2, 2]);
+        assert_eq!(correlation.dtype(), DType::Complex128);
+        assert_eq!(
+            correlation.values(),
+            &[1.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0]
+        );
+    }
+
+    // Direct centering must retain small variation around a large offset;
+    // subtracting products of uncentered means would lose these variances.
+    let offset = 2.0_f64.powi(40);
+    let input = UFuncArray::from_storage(
+        vec![4],
+        ArrayStorage::Complex128(vec![
+            (offset - 2.0, offset - 4.0),
+            (offset - 1.0, offset - 2.0),
+            (offset + 1.0, offset + 2.0),
+            (offset + 2.0, offset + 4.0),
+        ]),
+    )
+    .unwrap();
+    let covariance = input.cov().unwrap();
+    assert_eq!(covariance.shape(), &[2]);
+    assert!((covariance.values()[0] - 50.0 / 3.0).abs() <= 4.0 * f64::EPSILON * 50.0);
+    assert_eq!(covariance.values()[1], 0.0);
+}
+
+#[test]
+fn covariance_widens_source_precision_before_means_and_products() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = UFuncArray::new(
+            vec![2, 3, 2],
+            vec![
+                16_777_216.0,
+                1.0e-50,
+                16_777_217.0,
+                -1.0e-50,
+                16_777_218.0,
+                0.0,
+                1.0 + 2.0_f64.powi(-24),
+                3.0,
+                1.0 - 2.0_f64.powi(-25),
+                -4.0,
+                1.0,
+                5.0,
+            ],
+            dtype,
+        )
+        .unwrap();
+        for op in ["cov", "corrcoef"] {
+            batch.statistics_case(op, &input);
+        }
+    }
+    for dtype in [DType::F16, DType::F32, DType::Bool, DType::I8] {
+        let input = UFuncArray::new(
+            vec![2, 3],
+            vec![1.0004, 1.0005, 1.0015, -1.5, 3.125, 0.0],
+            dtype,
+        )
+        .unwrap();
+        for op in ["cov", "corrcoef"] {
+            batch.statistics_case(op, &input);
+        }
+    }
+    for storage in [
+        ArrayStorage::I64(vec![i64::MAX, i64::MAX - 1024, i64::MAX - 2048]),
+        ArrayStorage::U64(vec![u64::MAX, u64::MAX - 2048, u64::MAX - 4096]),
+    ] {
+        let input = UFuncArray::from_storage(vec![3], storage).unwrap();
+        for op in ["cov", "corrcoef"] {
+            batch.statistics_case(op, &input);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn correlation_avoids_overflow_and_underflow_in_variance_products() {
+    let mut batch = OracleBatch::default();
+    for scale in [1.0e-150, 1.0, 1.0e150] {
+        let real_values = [-3.0, -1.0, 1.0, 3.0, 6.0, 2.0, -2.0, -6.0]
+            .into_iter()
+            .map(|value| value * scale)
+            .collect::<Vec<_>>();
+        let real = UFuncArray::new(vec![2, 4], real_values.clone(), DType::F64).unwrap();
+        let complex_values = real_values
+            .iter()
+            .flat_map(|&value| [value, 0.5 * value])
+            .collect();
+        let complex = UFuncArray::new(vec![2, 4, 2], complex_values, DType::Complex128).unwrap();
+        for input in [&real, &complex] {
+            for op in ["cov", "corrcoef"] {
+                batch.statistics_case(op, input);
+            }
+            let correlation = input.corrcoef().unwrap();
+            let step = if input.dtype().is_complex() { 2 } else { 1 };
+            for (index, expected) in [1.0, -1.0, -1.0, 1.0].into_iter().enumerate() {
+                let actual = correlation.values()[index * step];
+                assert!((actual - expected).abs() < 8.0 * f64::EPSILON);
+            }
+        }
+    }
+    // NumPy uses c/c for a scalar covariance, whose complex reciprocal can
+    // overflow for a subnormal variance. Matrix normalization takes two finite
+    // square-root divisors instead, so retain this observable distinction.
+    let scalar = UFuncArray::from_storage(
+        vec![2],
+        ArrayStorage::Complex128(vec![(1.0e-160, 0.0), (-1.0e-160, 0.0)]),
+    )
+    .unwrap();
+    let matrix = UFuncArray::from_storage(
+        vec![2, 2],
+        ArrayStorage::Complex128(vec![
+            (1.0e-160, 0.0),
+            (-1.0e-160, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+        ]),
+    )
+    .unwrap();
+    for input in [&scalar, &matrix] {
+        for op in ["cov", "corrcoef"] {
+            batch.statistics_case(op, input);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn covariance_and_correlation_match_numpy_for_constant_and_nonfinite_rows() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for exceptional in [
+            (0.0, -0.0),
+            (3.0, -4.0),
+            (f64::NAN, 0.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 0.0),
+            (0.0, f64::NEG_INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+        ] {
+            let constant =
+                UFuncArray::new(vec![4, 2], [exceptional.0, exceptional.1].repeat(4), dtype)
+                    .unwrap();
+            let mut values = vec![exceptional.0, exceptional.1];
+            values.extend([1.0, 0.0, 2.0, 1.0, 3.0, -1.0]);
+            values.extend([1.0, 1.0, 2.0, -1.0, 3.0, 2.0, 4.0, -2.0]);
+            let mixed = UFuncArray::new(vec![2, 4, 2], values, dtype).unwrap();
+            for input in [&constant, &mixed] {
+                for op in ["cov", "corrcoef"] {
+                    batch.statistics_case(op, input);
+                }
+            }
+        }
+    }
+    let overflowed_variance =
+        UFuncArray::new(vec![2], vec![1.0e200, -1.0e200], DType::F64).unwrap();
+    batch.statistics_case("cov", &overflowed_variance);
+    batch.statistics_case("corrcoef", &overflowed_variance);
+    batch.finish();
+}
+
+#[test]
+fn covariance_rejects_malformed_complex_layouts_and_impossible_square_outputs() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for malformed in [
+            UFuncArray::new(vec![], vec![1.0], dtype).unwrap(),
+            UFuncArray::new(vec![2, 3], vec![1.0; 6], dtype).unwrap(),
+            UFuncArray::new(vec![0, 3], Vec::new(), dtype).unwrap(),
+        ] {
+            assert!(malformed.cov().is_err());
+            assert!(malformed.corrcoef().is_err());
+        }
+    }
+    for dtype in [DType::F64, DType::Complex64, DType::Complex128] {
+        for nvars in [usize::MAX, 1_usize << (usize::BITS / 2 - 1)] {
+            let mut shape = vec![nvars, 0];
+            if dtype.is_complex() {
+                shape.push(2);
+            }
+            let input = UFuncArray::new(shape, Vec::new(), dtype).unwrap();
+            assert!(matches!(
+                input.cov(),
+                Err(UFuncError::Shape(ShapeError::Overflow))
+            ));
+            assert!(matches!(
+                input.corrcoef(),
+                Err(UFuncError::Shape(ShapeError::Overflow))
+            ));
+        }
+        let mut shape = vec![0, usize::MAX];
+        if dtype.is_complex() {
+            shape.push(2);
+        }
+        let input = UFuncArray::new(shape, Vec::new(), dtype).unwrap();
+        for output in [input.cov().unwrap(), input.corrcoef().unwrap()] {
+            assert_eq!(output.shape(), &[0, 0]);
+            assert_eq!(output.dtype(), DType::F64);
+            assert!(output.values().is_empty());
+        }
+    }
 }
 
 #[test]
