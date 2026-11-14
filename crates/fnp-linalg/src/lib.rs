@@ -8946,6 +8946,49 @@ pub fn pinv_hermitian_nxn_with_tolerance_aliases(
     pinv_hermitian_nxn(a, n, resolved_rcond)
 }
 
+/// Pseudoinverse of a complex Hermitian matrix, using its lower triangle.
+///
+/// Input and output contain interleaved real/imaginary components in row-major
+/// order. The upper triangle and imaginary diagonal are ignored, as in NumPy's
+/// Hermitian path. Negative eigenvalues retain their sign when inverted.
+///
+/// As in the real Rust-core pseudoinverse functions, a negative `rcond` selects
+/// machine epsilon times the matrix dimension; a nonnegative value is an
+/// explicit relative singular-value cutoff.
+pub fn complex_pinv_hermitian_nxn(
+    a: &[f64],
+    n: usize,
+    rcond: f64,
+) -> Result<Vec<f64>, LinAlgError> {
+    let (values, vectors) = complex_eigh_nxn(a, n, "L")?;
+    let largest = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let cutoff = pinv_singular_value_cutoff(largest, n, n, rcond);
+    let mut result = vec![0.0; a.len()];
+    for row in 0..n {
+        for col in 0..n {
+            let mut real = 0.0;
+            let mut imag = 0.0;
+            for (k, &value) in values.iter().enumerate() {
+                if value.abs() > cutoff {
+                    let row_at = 2 * (row * n + k);
+                    let col_at = 2 * (col * n + k);
+                    let (product_real, product_imag) = cmul_conj_a(
+                        vectors[col_at],
+                        vectors[col_at + 1],
+                        vectors[row_at],
+                        vectors[row_at + 1],
+                    );
+                    real += product_real / value;
+                    imag += product_imag / value;
+                }
+            }
+            result[2 * (row * n + col)] = real;
+            result[2 * (row * n + col) + 1] = imag;
+        }
+    }
+    Ok(result)
+}
+
 /// Helper: flat NxN matrix multiply C = A * B (row-major).
 /// Minimum dimension at which the square GEMM parallelizes across the rayon
 /// pool. Below this the O(n³) work is too small to amortize thread dispatch, so
@@ -12390,6 +12433,262 @@ pub fn complex_cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError
     Ok(l)
 }
 
+/// Apply a unitary Jacobi rotation to two complex row entries. Extended
+/// exponents keep a finite three-term result from overflowing in an intermediate
+/// product or sum when unrelated matrix entries have very different scales.
+fn complex_jacobi_rotate(
+    x: (f64, f64),
+    y: (f64, f64),
+    cosine: f64,
+    sine: (f64, f64),
+) -> ((f64, f64), (f64, f64)) {
+    fn sum_products(a: f64, x: f64, b: f64, y: f64, c: f64, z: f64) -> f64 {
+        ScaledReal::new(a)
+            .multiply(ScaledReal::new(x))
+            .sum(ScaledReal::new(b).multiply(ScaledReal::new(y)))
+            .sum(ScaledReal::new(c).multiply(ScaledReal::new(z)))
+            .value()
+    }
+
+    (
+        (
+            sum_products(cosine, x.0, -sine.0, y.0, -sine.1, y.1),
+            sum_products(cosine, x.1, -sine.0, y.1, sine.1, y.0),
+        ),
+        (
+            sum_products(sine.0, x.0, -sine.1, x.1, cosine, y.0),
+            sum_products(sine.0, x.1, sine.1, x.0, cosine, y.1),
+        ),
+    )
+}
+
+/// Complex Hermitian eigendecomposition by cyclic unitary Jacobi rotations.
+/// Only the selected triangle and real diagonal participate in the problem.
+/// Each pair is scaled locally: a matrix-wide normalization would erase small
+/// independent eigenvalues beside a much larger block.
+fn complex_hermitian_jacobi(
+    a: &[f64],
+    n: usize,
+    uplo: &str,
+    compute_vectors: bool,
+    max_sweeps: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n).and_then(|count| count.checked_mul(2)) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_eigh: input must contain 2*n*n interleaved components",
+        ));
+    }
+    let lower = match uplo {
+        "L" | "l" => true,
+        "U" | "u" => false,
+        _ => {
+            return Err(LinAlgError::ShapeContractViolation(
+                "complex_eigh: UPLO must be L or U",
+            ));
+        }
+    };
+
+    let mut h = Vec::new();
+    h.try_reserve_exact(a.len()).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_eigh: unable to allocate matrix")
+    })?;
+    h.resize(a.len(), 0.0);
+    let mut vectors = Vec::new();
+    if compute_vectors {
+        vectors.try_reserve_exact(a.len()).map_err(|_| {
+            LinAlgError::ShapeContractViolation("complex_eigh: unable to allocate eigenvectors")
+        })?;
+        vectors.resize(a.len(), 0.0);
+    }
+    for row in 0..n {
+        let diagonal = 2 * (row * n + row);
+        if !a[diagonal].is_finite() {
+            return Err(spectral_non_finite_input_error());
+        }
+        h[diagonal] = a[diagonal];
+        if compute_vectors {
+            vectors[diagonal] = 1.0;
+        }
+        for col in 0..row {
+            let source = if lower {
+                2 * (row * n + col)
+            } else {
+                2 * (col * n + row)
+            };
+            let re = a[source];
+            let im = if lower { a[source + 1] } else { -a[source + 1] };
+            if !re.is_finite() || !im.is_finite() {
+                return Err(spectral_non_finite_input_error());
+            }
+            let below = 2 * (row * n + col);
+            let above = 2 * (col * n + row);
+            h[below] = re;
+            h[below + 1] = im;
+            h[above] = re;
+            h[above + 1] = -im;
+        }
+    }
+
+    // The final pass checks convergence without modifying the matrix. Exhausting
+    // the rotation budget must report an error rather than return an unfinished
+    // diagonalization. A diagonal or empty input also succeeds with a zero budget.
+    for sweep in 0..=max_sweeps {
+        let mut changed = false;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let off_diagonal = 2 * (p * n + q);
+                let re = h[off_diagonal];
+                let im = h[off_diagonal + 1];
+                if re == 0.0 && im == 0.0 {
+                    continue;
+                }
+                let pp = 2 * (p * n + p);
+                let qq = 2 * (q * n + q);
+                let a_pp = h[pp];
+                let a_qq = h[qq];
+                let radius = complex_norm_squared_scaled(re, im).sqrt_abs();
+                let diagonal_scale = ScaledReal::new(a_pp)
+                    .multiply(ScaledReal::new(a_qq))
+                    .sqrt_abs();
+                if radius.divide(diagonal_scale) <= f64::EPSILON {
+                    continue;
+                }
+                if sweep == max_sweeps {
+                    return Err(LinAlgError::SpectralConvergenceFailed);
+                }
+                changed = true;
+
+                // The small root for tan(theta) avoids both a squared large
+                // diagonal gap and division by an underflowed offdiagonal.
+                let gap = ScaledReal::new(a_qq)
+                    .sum(ScaledReal::new(a_pp).negated())
+                    .multiply(ScaledReal::new(0.5));
+                let gap_abs = ScaledReal {
+                    significand: gap.significand.abs(),
+                    ..gap
+                };
+                let denominator =
+                    gap_abs.sum(gap.multiply(gap).sum(radius.multiply(radius)).sqrt_abs());
+                let tangent = radius.divide(denominator);
+                let tangent = if gap.significand < 0.0 {
+                    -tangent
+                } else {
+                    tangent
+                };
+                let cosine = 1.0 / 1.0_f64.hypot(tangent);
+                let sine_magnitude = cosine * tangent;
+                let phase_scale = re.abs().max(im.abs());
+                let phase_re = re / phase_scale;
+                let phase_im = im / phase_scale;
+                let phase_norm = phase_re.hypot(phase_im);
+                let sine = (
+                    sine_magnitude * (phase_re / phase_norm),
+                    sine_magnitude * (phase_im / phase_norm),
+                );
+
+                let correction = radius.multiply(ScaledReal::new(tangent));
+                h[pp] = ScaledReal::new(a_pp).sum(correction.negated()).value();
+                h[qq] = ScaledReal::new(a_qq).sum(correction).value();
+                h[off_diagonal] = 0.0;
+                h[off_diagonal + 1] = 0.0;
+                h[2 * (q * n + p)] = 0.0;
+                h[2 * (q * n + p) + 1] = 0.0;
+                for row in 0..n {
+                    let rp = 2 * (row * n + p);
+                    let rq = 2 * (row * n + q);
+                    if row != p && row != q {
+                        let (x, y) = complex_jacobi_rotate(
+                            (h[rp], h[rp + 1]),
+                            (h[rq], h[rq + 1]),
+                            cosine,
+                            sine,
+                        );
+                        h[rp] = x.0;
+                        h[rp + 1] = x.1;
+                        h[rq] = y.0;
+                        h[rq + 1] = y.1;
+                        h[2 * (p * n + row)] = x.0;
+                        h[2 * (p * n + row) + 1] = -x.1;
+                        h[2 * (q * n + row)] = y.0;
+                        h[2 * (q * n + row) + 1] = -y.1;
+                    }
+                    if compute_vectors {
+                        let (x, y) = complex_jacobi_rotate(
+                            (vectors[rp], vectors[rp + 1]),
+                            (vectors[rq], vectors[rq + 1]),
+                            cosine,
+                            sine,
+                        );
+                        vectors[rp] = x.0;
+                        vectors[rp + 1] = x.1;
+                        vectors[rq] = y.0;
+                        vectors[rq + 1] = y.1;
+                    }
+                }
+            }
+        }
+        if h.iter().any(|value| !value.is_finite()) {
+            return Err(LinAlgError::SpectralConvergenceFailed);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by(|&p, &q| h[2 * (p * n + p)].total_cmp(&h[2 * (q * n + q)]));
+    let values = indices.iter().map(|&col| h[2 * (col * n + col)]).collect();
+    if !compute_vectors {
+        return Ok((values, Vec::new()));
+    }
+
+    let mut sorted = Vec::new();
+    sorted.try_reserve_exact(a.len()).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_eigh: unable to sort eigenvectors")
+    })?;
+    sorted.resize(a.len(), 0.0);
+    for (col, &source_col) in indices.iter().enumerate() {
+        let mut norm = 0.0_f64;
+        for row in 0..n {
+            let source = 2 * (row * n + source_col);
+            norm = norm.hypot(vectors[source]).hypot(vectors[source + 1]);
+        }
+        if !norm.is_finite() || norm == 0.0 {
+            return Err(LinAlgError::SpectralConvergenceFailed);
+        }
+        for row in 0..n {
+            let source = 2 * (row * n + source_col);
+            let target = 2 * (row * n + col);
+            sorted[target] = vectors[source] / norm;
+            sorted[target + 1] = vectors[source + 1] / norm;
+        }
+    }
+    Ok((values, sorted))
+}
+
+/// Eigenvalues and eigenvectors of a complex Hermitian n-by-n matrix.
+///
+/// The input and eigenvectors use row-major interleaved real/imaginary storage.
+/// Eigenvectors occupy columns, and their real eigenvalues are sorted ascending.
+/// UPLO selects the lower (L) or upper (U) triangle, case-insensitively; the
+/// opposite triangle and every imaginary diagonal component are ignored.
+/// Selected entries must be finite. Empty matrices return two empty vectors.
+/// An iteration limit or a nonfinite result reports SpectralConvergenceFailed.
+pub fn complex_eigh_nxn(
+    a: &[f64],
+    n: usize,
+    uplo: &str,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    complex_hermitian_jacobi(a, n, uplo, true, 64)
+}
+
+/// Sorted real eigenvalues of a complex Hermitian matrix, without accumulating
+/// eigenvectors. Storage, UPLO, finite-input and empty-input contracts match
+/// complex_eigh_nxn.
+pub fn complex_eigvalsh_nxn(a: &[f64], n: usize, uplo: &str) -> Result<Vec<f64>, LinAlgError> {
+    complex_hermitian_jacobi(a, n, uplo, false, 64).map(|(values, _)| values)
+}
+
 /// QR decomposition for complex m×n matrix (m ≥ 1, n ≥ 1) using Householder.
 /// Input: 2·m·n interleaved. Returns (Q: 2·m·m, R: 2·m·n).
 pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
@@ -14150,6 +14449,145 @@ mod tests {
                 .expect("mxn default");
         assert!(approx_equal(mxn_default[0], 1.0, 1e-12));
         assert!(approx_equal(mxn_default[3], 1e12, 1.0));
+    }
+
+    #[test]
+    fn complex_hermitian_pinv_preserves_negative_and_null_eigenspaces() {
+        for scale in [1e-150, 1.0, 1e150] {
+            let a: Vec<f64> = [
+                1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, -1.0, 1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, -4.0, 0.0,
+            ]
+            .iter()
+            .map(|value| value * scale)
+            .collect();
+            let expected = [
+                0.25, 0.0, 0.0, 0.25, 0.0, 0.0,
+                0.0, -0.25, 0.25, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, -0.25, 0.0,
+            ];
+            let inverse = super::complex_pinv_hermitian_nxn(&a, 3, 1e-12).unwrap();
+            for (actual, expected) in inverse.iter().zip(expected) {
+                assert!((actual * scale - expected).abs() < 1e-12);
+            }
+            let filtered = super::complex_pinv_hermitian_nxn(&a, 3, 0.6).unwrap();
+            for (index, actual) in filtered.iter().enumerate() {
+                let expected = if index == 16 { -0.25 } else { 0.0 };
+                assert!((actual * scale - expected).abs() < 1e-12);
+            }
+            let ap = complex_matmul(&a, &inverse, 3, 3, 3);
+            let apa = complex_matmul(&ap, &a, 3, 3, 3);
+            let pap = complex_matmul(&inverse, &ap, 3, 3, 3);
+            for (actual, expected) in apa.iter().zip(&a) {
+                assert!((actual / scale - expected / scale).abs() < 1e-11);
+            }
+            for (actual, expected) in pap.iter().zip(&inverse) {
+                assert!((actual * scale - expected * scale).abs() < 1e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn complex_hermitian_pinv_observes_triangle_and_shape_contracts() {
+        // Only the real diagonal and lower triangle contribute.
+        let a = [
+            2.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NAN,
+            0.0,
+            -1.0,
+            2.0,
+            f64::INFINITY,
+        ];
+        let result = super::complex_pinv_hermitian_nxn(&a, 2, 1e-15).unwrap();
+        let expected = [
+            2.0 / 3.0,
+            0.0,
+            0.0,
+            -1.0 / 3.0,
+            0.0,
+            1.0 / 3.0,
+            2.0 / 3.0,
+            0.0,
+        ];
+        for (actual, expected) in result.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+        assert!(
+            super::complex_pinv_hermitian_nxn(&[], 0, 1e-15)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::complex_pinv_hermitian_nxn(&[], usize::MAX, 1e-15).is_err());
+        assert!(super::complex_pinv_hermitian_nxn(&[1.0], 1, 1e-15).is_err());
+        assert!(super::complex_pinv_hermitian_nxn(&[f64::NAN, 0.0], 1, 1e-15).is_err());
+        assert_eq!(
+            super::complex_pinv_hermitian_nxn(&[2.0, 7.0], 1, f64::NAN).unwrap(),
+            vec![0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn complex_hermitian_pinv_matches_numpy_lower_triangle() {
+        assert!(
+            numpy_oracle_available(),
+            "complex Hermitian pinv parity requires NumPy; set FNP_ORACLE_PYTHON"
+        );
+        let script = r#"
+import json, sys
+import numpy as np
+data = np.array(json.loads(sys.argv[1]), dtype=np.float64)
+a = data.view(np.complex128).reshape(int(sys.argv[2]), -1)
+p = np.linalg.pinv(a, rcond=float(sys.argv[3]), hermitian=True)
+print(",".join(repr(float(v)) for v in p.ravel().view(np.float64)))
+"#;
+        for n in [2, 3, 5] {
+            for scale in [1e-150, 1.0, 1e150] {
+                let mut a = vec![0.0; 2 * n * n];
+                for row in 0..n {
+                    for col in 0..n {
+                        let at = 2 * (row * n + col);
+                        a[at] = if row == col {
+                            (2 * n + row) as f64
+                        } else {
+                            ((row * 7 + col * 3) % 11) as f64 - 5.0
+                        } * scale;
+                        a[at + 1] = (((row * 13 + col * 5) % 7) as f64 - 3.0) * scale;
+                    }
+                }
+                let data = format!("{a:?}");
+                for rcond in [1e-12, 0.4, 1.0] {
+                    let output = Command::new(oracle_python_bin())
+                        .env("OPENBLAS_NUM_THREADS", "1")
+                        .env("OMP_NUM_THREADS", "1")
+                        .args(["-c", script, &data, &n.to_string(), &rcond.to_string()])
+                        .output()
+                        .expect("NumPy pinv oracle should run");
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let expected: Vec<f64> = String::from_utf8(output.stdout)
+                        .unwrap()
+                        .trim()
+                        .split(',')
+                        .map(|value| value.parse().unwrap())
+                        .collect();
+                    let result = super::complex_pinv_hermitian_nxn(&a, n, rcond).unwrap();
+                    assert_eq!(result.len(), expected.len());
+                    let reference_scale = expected.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                    for (actual, expected) in result.iter().zip(&expected) {
+                        assert!(
+                            (actual - expected).abs() <= 2e-10 * reference_scale,
+                            "n={n} scale={scale} rcond={rcond}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -22607,6 +23045,317 @@ for value in actual / scale:
         // Not positive-definite: [[1, 2+i], [2-i, 1]]
         let a = [1.0, 0.0, 2.0, 1.0, 2.0, -1.0, 1.0, 0.0];
         assert!(complex_cholesky_nxn(&a, 2).is_err());
+    }
+
+    fn complex_hermitian_fourier_matrix(spectrum: &[f64]) -> Vec<f64> {
+        let n = spectrum.len();
+        let mut a = vec![0.0; 2 * n * n];
+        for row in 0..n {
+            for col in 0..=row {
+                let mut re = 0.0;
+                let mut im = 0.0;
+                for (k, &value) in spectrum.iter().enumerate() {
+                    let phase = std::f64::consts::TAU * (row - col) as f64 * k as f64 / n as f64;
+                    re += value * phase.cos() / n as f64;
+                    im += value * phase.sin() / n as f64;
+                }
+                a[2 * (row * n + col)] = re;
+                a[2 * (row * n + col) + 1] = im;
+                a[2 * (col * n + row)] = re;
+                a[2 * (col * n + row) + 1] = -im;
+            }
+        }
+        a
+    }
+
+    fn assert_complex_hermitian_eigenpairs(a: &[f64], n: usize, uplo: &str) -> Vec<f64> {
+        let (values, vectors) = super::complex_eigh_nxn(a, n, uplo).expect("complex eigh");
+        assert_eq!(values.len(), n);
+        assert_eq!(vectors.len(), 2 * n * n);
+        assert_eq!(
+            values,
+            super::complex_eigvalsh_nxn(a, n, uplo).expect("complex eigvalsh")
+        );
+        assert!(values.iter().chain(&vectors).all(|value| value.is_finite()));
+        assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
+
+        // Reconstruct the mathematical input independently from the selected
+        // triangle. The unused triangle and imaginary diagonal may contain NaN.
+        let mut matrix = vec![0.0; a.len()];
+        for row in 0..n {
+            for col in 0..n {
+                let direct = if uplo.eq_ignore_ascii_case("L") {
+                    row >= col
+                } else {
+                    row <= col
+                };
+                let source = if direct { row * n + col } else { col * n + row };
+                matrix[2 * (row * n + col)] = a[2 * source];
+                matrix[2 * (row * n + col) + 1] = if row == col {
+                    0.0
+                } else if direct {
+                    a[2 * source + 1]
+                } else {
+                    -a[2 * source + 1]
+                };
+            }
+        }
+        let scale = matrix.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        let tolerance = 128.0 * f64::EPSILON * n.max(1) as f64;
+        for row in 0..n {
+            for col in 0..n {
+                let mut av = (0.0, 0.0);
+                let mut inner = (0.0, 0.0);
+                let mut reconstructed = (0.0, 0.0);
+                for k in 0..n {
+                    let (re, im) = super::cmul(
+                        matrix[2 * (row * n + k)] / scale,
+                        matrix[2 * (row * n + k) + 1] / scale,
+                        vectors[2 * (k * n + col)],
+                        vectors[2 * (k * n + col) + 1],
+                    );
+                    av.0 += re;
+                    av.1 += im;
+                    let (re, im) = super::cmul(
+                        vectors[2 * (k * n + row)],
+                        -vectors[2 * (k * n + row) + 1],
+                        vectors[2 * (k * n + col)],
+                        vectors[2 * (k * n + col) + 1],
+                    );
+                    inner.0 += re;
+                    inner.1 += im;
+                    let (re, im) = super::cmul(
+                        vectors[2 * (row * n + k)],
+                        vectors[2 * (row * n + k) + 1],
+                        vectors[2 * (col * n + k)],
+                        -vectors[2 * (col * n + k) + 1],
+                    );
+                    reconstructed.0 += (values[k] / scale) * re;
+                    reconstructed.1 += (values[k] / scale) * im;
+                }
+                let lambda = values[col] / scale;
+                let vr = vectors[2 * (row * n + col)];
+                let vi = vectors[2 * (row * n + col) + 1];
+                assert!(
+                    (av.0 - lambda * vr).hypot(av.1 - lambda * vi) <= tolerance,
+                    "eigenpair residual at ({row},{col}), n={n}, UPLO={uplo}"
+                );
+                let diagonal = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (inner.0 - diagonal).hypot(inner.1) <= tolerance,
+                    "unitarity at ({row},{col}), n={n}, UPLO={uplo}"
+                );
+                assert!(
+                    (reconstructed.0 - matrix[2 * (row * n + col)] / scale)
+                        .hypot(reconstructed.1 - matrix[2 * (row * n + col) + 1] / scale)
+                        <= tolerance,
+                    "reconstruction at ({row},{col}), n={n}, UPLO={uplo}"
+                );
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn complex_hermitian_eigh_selects_triangle_and_ignores_imaginary_diagonal() {
+        let a = [2.0, f64::NAN, 3.0, -4.0, 1.0, 2.0, 3.0, f64::NEG_INFINITY];
+        for uplo in ["L", "l", "U", "u"] {
+            let values = assert_complex_hermitian_eigenpairs(&a, 2, uplo);
+            let discriminant = if uplo.eq_ignore_ascii_case("L") { 21.0_f64 } else { 101.0 };
+            let expected = [
+                (5.0 - discriminant.sqrt()) / 2.0,
+                (5.0 + discriminant.sqrt()) / 2.0,
+            ];
+            for (&actual, expected) in values.iter().zip(expected) {
+                assert!((actual - expected).abs() < 4e-15);
+            }
+        }
+        let ignored_upper = [2.0, f64::NAN, f64::NAN, f64::INFINITY, 1.0, 2.0, 3.0, f64::NAN];
+        assert_complex_hermitian_eigenpairs(&ignored_upper, 2, "L");
+        let ignored_lower = [2.0, f64::NAN, 1.0, -2.0, f64::NAN, f64::INFINITY, 3.0, f64::NAN];
+        assert_complex_hermitian_eigenpairs(&ignored_lower, 2, "U");
+    }
+
+    #[test]
+    fn complex_hermitian_eigh_dense_and_repeated_spectra_have_unitary_eigenvectors() {
+        let spectrum = [-3.0, -3.0, 0.0, 1.0, 1.0, 7.0];
+        let a = complex_hermitian_fourier_matrix(&spectrum);
+        let values = assert_complex_hermitian_eigenpairs(&a, spectrum.len(), "L");
+        for (&actual, expected) in values.iter().zip(spectrum) {
+            assert!((actual - expected).abs() < 1e-13);
+        }
+
+        let mut state = 7_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 11) as f64 / (1_u64 << 53) as f64) * 2.0 - 1.0
+        };
+        for n in [1, 2, 3, 5, 8, 16, 24] {
+            let mut base = vec![0.0; 2 * n * n];
+            for row in 0..n {
+                base[2 * (row * n + row)] = next() * n as f64;
+                for col in 0..row {
+                    let re = next();
+                    let im = next();
+                    base[2 * (row * n + col)] = re;
+                    base[2 * (row * n + col) + 1] = im;
+                    base[2 * (col * n + row)] = re;
+                    base[2 * (col * n + row) + 1] = -im;
+                }
+            }
+            for scale in [1e-300, 1e-150, 1e-20, 1.0, 1e150, 1e300] {
+                let a: Vec<f64> = base.iter().map(|value| value * scale).collect();
+                for uplo in ["L", "U"] {
+                    assert_complex_hermitian_eigenpairs(&a, n, uplo);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complex_hermitian_eigh_preserves_independent_tiny_blocks_and_subnormals() {
+        for small in [1.0, 1e-100, 1e-200, 1e-300] {
+            let mut a = vec![0.0; 32];
+            a[0] = 1e300;
+            a[10] = -1e300;
+            a[20] = 3.0 * small;
+            a[30] = 2.0 * small;
+            a[22] = small;
+            a[23] = small;
+            a[28] = small;
+            a[29] = -small;
+            let (values, vectors) = super::complex_eigh_nxn(&a, 4, "L").unwrap();
+            assert_eq!(values[0], -1e300);
+            assert_eq!(values[3], 1e300);
+            assert!((values[1] / small - 1.0).abs() < 1e-14);
+            assert!((values[2] / small - 4.0).abs() < 1e-14);
+            for col in 1..3 {
+                assert_eq!(vectors[2 * col], 0.0);
+                assert_eq!(vectors[2 * col + 1], 0.0);
+                assert_eq!(vectors[2 * (4 + col)], 0.0);
+                assert_eq!(vectors[2 * (4 + col) + 1], 0.0);
+                let x = (vectors[2 * (8 + col)], vectors[2 * (8 + col) + 1]);
+                let y = (vectors[2 * (12 + col)], vectors[2 * (12 + col) + 1]);
+                let lambda = values[col] / small;
+                // Local residuals cannot be hidden by the unrelated 1e300 roots.
+                assert!(
+                    (3.0 * x.0 + y.0 - y.1 - lambda * x.0)
+                        .hypot(3.0 * x.1 + y.0 + y.1 - lambda * x.1)
+                        < 1e-13
+                );
+                assert!(
+                    (x.0 + x.1 + 2.0 * y.0 - lambda * y.0)
+                        .hypot(x.1 - x.0 + 2.0 * y.1 - lambda * y.1)
+                        < 1e-13
+                );
+            }
+            assert_complex_hermitian_eigenpairs(&a, 4, "U");
+        }
+
+        for small in [f64::from_bits(1), 1e-320, 1e-300] {
+            let a = [0.0, 0.0, 0.0, small, 0.0, -small, 0.0, 0.0];
+            let values = assert_complex_hermitian_eigenpairs(&a, 2, "L");
+            assert_eq!(values, [-small, small]);
+        }
+        let diagonal = [1e300, 0.0, 0.0, 0.0, 0.0, 0.0, 1e-300, 0.0];
+        assert_eq!(
+            super::complex_eigvalsh_nxn(&diagonal, 2, "L").unwrap(),
+            [1e-300, 1e300]
+        );
+    }
+
+    #[test]
+    fn complex_hermitian_eigh_validates_shape_triangle_and_convergence() {
+        assert_eq!(
+            super::complex_eigh_nxn(&[], 0, "L").unwrap(),
+            (Vec::<f64>::new(), Vec::<f64>::new())
+        );
+        assert!(super::complex_eigvalsh_nxn(&[], 0, "U").unwrap().is_empty());
+        assert_eq!(
+            super::complex_eigh_nxn(&[-7.0, f64::NAN], 1, "U").unwrap(),
+            (vec![-7.0], vec![1.0, 0.0])
+        );
+        assert!(super::complex_eigh_nxn(&[0.0; 7], 2, "L").is_err());
+        assert!(super::complex_eigh_nxn(&[], usize::MAX, "L").is_err());
+        assert!(super::complex_eigvalsh_nxn(&[], usize::MAX, "U").is_err());
+        assert!(super::complex_eigh_nxn(&[], 0, "X").is_err());
+        assert!(super::complex_eigh_nxn(&[f64::NAN, 0.0], 1, "L").is_err());
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let a = [1.0, 0.0, 0.0, 0.0, bad, 0.0, 2.0, 0.0];
+            assert!(super::complex_eigh_nxn(&a, 2, "L").is_err());
+            assert!(super::complex_eigvalsh_nxn(&a, 2, "L").is_err());
+        }
+        let dense = [1.0, 0.0, 1.0, -1.0, 1.0, 1.0, 2.0, 0.0];
+        assert_eq!(
+            super::complex_hermitian_jacobi(&dense, 2, "L", true, 0),
+            Err(LinAlgError::SpectralConvergenceFailed)
+        );
+        let diagonal = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        assert!(super::complex_hermitian_jacobi(&diagonal, 2, "L", true, 0).is_ok());
+        let overflow = [f64::MAX, 0.0, f64::MAX, 0.0, f64::MAX, 0.0, f64::MAX, 0.0];
+        assert_eq!(
+            super::complex_eigh_nxn(&overflow, 2, "L"),
+            Err(LinAlgError::SpectralConvergenceFailed)
+        );
+    }
+
+    #[test]
+    fn complex_hermitian_eigh_spectra_match_numpy() {
+        let script = r#"
+import sys
+import numpy as np
+n, uplo = int(sys.argv[1]), sys.argv[2]
+parts = np.fromstring(sys.argv[3], sep=',').reshape(n, n, 2)
+a = np.empty((n, n), dtype=np.complex128)
+a.real = parts[:, :, 0]
+a.imag = parts[:, :, 1]
+actual = np.fromstring(sys.argv[4], sep=',')
+reference = np.linalg.eigh(a, UPLO=uplo).eigenvalues
+values_only = np.linalg.eigvalsh(a, UPLO=uplo)
+scale = float(np.max(np.abs(reference), initial=0.0)) or 1.0
+np.testing.assert_allclose(actual / scale, reference / scale, rtol=2e-12, atol=2e-12)
+np.testing.assert_allclose(actual / scale, values_only / scale, rtol=2e-12, atol=2e-12)
+"#;
+        let cases = [
+            (0, vec![]),
+            (1, vec![-7.0, f64::NAN]),
+            (
+                2,
+                vec![2.0, f64::NAN, 3.0, -4.0, 1.0, 2.0, 3.0, f64::NEG_INFINITY],
+            ),
+            (
+                6,
+                complex_hermitian_fourier_matrix(&[-3.0, -3.0, 0.0, 1.0, 1.0, 7.0]),
+            ),
+        ];
+        for (n, base) in cases {
+            for scale in [1e-100, 1.0, 1e100] {
+                let a: Vec<f64> = base.iter().map(|value| value * scale).collect();
+                for uplo in ["L", "U"] {
+                    let values = super::complex_eigh_nxn(&a, n, uplo).unwrap().0;
+                    let encode = |values: &[f64]| {
+                        values.iter().map(f64::to_string).collect::<Vec<_>>().join(",")
+                    };
+                    let output = Command::new(oracle_python_bin())
+                        .env("OPENBLAS_NUM_THREADS", "1")
+                        .env("OMP_NUM_THREADS", "1")
+                        .arg("-c")
+                        .arg(script)
+                        .arg(n.to_string())
+                        .arg(uplo)
+                        .arg(encode(&a))
+                        .arg(encode(&values))
+                        .output()
+                        .expect("NumPy Hermitian eigenvalue oracle should run");
+                    assert!(
+                        output.status.success(),
+                        "n={n}, scale={scale}, UPLO={uplo}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
