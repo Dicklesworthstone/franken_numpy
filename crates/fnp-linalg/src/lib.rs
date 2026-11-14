@@ -9174,6 +9174,206 @@ pub fn pinv_hermitian_nxn_with_tolerance_aliases(
     pinv_hermitian_nxn(a, n, resolved_rcond)
 }
 
+/// Pseudoinverse of a complex m-by-n matrix using its reduced SVD.
+///
+/// Matrices use row-major interleaved real/imaginary storage; the result has
+/// shape n-by-m. Negative rcond selects the existing Rust-core default of
+/// machine epsilon times max(m, n). A nonnegative value is an explicit cutoff.
+pub fn complex_pinv_mxn(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    rcond: f64,
+) -> Result<Vec<f64>, LinAlgError> {
+    let (u, values, vh) = complex_svd_mxn_reduced(a, m, n)?;
+    if a.is_empty() {
+        return Ok(Vec::new());
+    }
+    let k = values.len();
+    let cutoff = pinv_singular_value_cutoff(values.first().copied().unwrap_or(0.0), m, n, rcond);
+    let mut result = Vec::new();
+    result.try_reserve_exact(a.len()).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_pinv: unable to allocate result")
+    })?;
+    result.resize(a.len(), 0.0);
+    for row in 0..n {
+        for col in 0..m {
+            let mut real = ScaledReal::new(0.0);
+            let mut imag = ScaledReal::new(0.0);
+            for (index, &value) in values.iter().enumerate() {
+                if value > cutoff {
+                    let right = 2 * (index * n + row);
+                    let left = 2 * (col * k + index);
+                    let (re, im) =
+                        complex_product_scaled(vh[right], -vh[right + 1], u[left], -u[left + 1]);
+                    let divisor = ScaledReal::new(value);
+                    real = real.sum(re.quotient(divisor));
+                    imag = imag.sum(im.quotient(divisor));
+                }
+            }
+            result[2 * (row * m + col)] = real.value();
+            result[2 * (row * m + col) + 1] = imag.value();
+        }
+    }
+    Ok(result)
+}
+
+/// Minimum-norm complex least squares for one or more right-hand sides.
+///
+/// A is m-by-n, B is m-by-nrhs, and X is n-by-nrhs in row-major interleaved
+/// storage. Passing nrhs=1 gives the vector problem without a separate wrapper.
+/// Returns (X, residual sums of squares, rank, singular values). Residuals have
+/// one real entry per right-hand side only when m > n and rank == n.
+///
+/// None selects epsilon*max(m,n). Explicit cutoffs outside (0,1) follow LAPACK's
+/// machine-precision convention (epsilon/2 for its rounding-unit definition).
+/// NaN cutoffs are rejected; they do not define a meaningful rank threshold.
+/// Reduced singular factors avoid a full m-by-m allocation for tall matrices.
+pub fn complex_lstsq_mxn(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    nrhs: usize,
+    rcond: Option<f64>,
+) -> Result<LstsqResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n).and_then(|count| count.checked_mul(2))
+        || Some(b.len()) != m.checked_mul(nrhs).and_then(|count| count.checked_mul(2))
+    {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_lstsq: A and B must contain 2*m*n and 2*m*nrhs components",
+        ));
+    }
+    if b.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex_lstsq: right-hand sides must be finite",
+        ));
+    }
+    if rcond.is_some_and(f64::is_nan) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex_lstsq: rcond must not be NaN",
+        ));
+    }
+    let result_len = n
+        .checked_mul(nrhs)
+        .and_then(|count| count.checked_mul(2))
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "complex_lstsq: output shape overflowed",
+        ))?;
+    let mut x = Vec::new();
+    x.try_reserve_exact(result_len).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_lstsq: unable to allocate result")
+    })?;
+    x.resize(result_len, 0.0);
+    let (u, values, vh) = complex_svd_mxn_reduced(a, m, n)?;
+    let k = values.len();
+    let relative_cutoff = match rcond {
+        None => f64::EPSILON * m.max(n) as f64,
+        Some(value) if value <= 0.0 || value >= 1.0 => f64::EPSILON / 2.0,
+        Some(value) => value,
+    };
+    let largest = values.first().copied().unwrap_or(0.0);
+    let cutoff = relative_cutoff * largest;
+    let rank = values.iter().filter(|&&value| value > cutoff).count();
+    if nrhs == 0 || m == 0 {
+        return Ok((x, Vec::new(), rank, values));
+    }
+
+    // Keep coefficients outside the f64 exponent range until the final X entry.
+    // U^H B can overflow even when division by a large singular value makes the
+    // requested solution finite; matrix-wide rescaling can instead erase an
+    // independent tiny right-hand-side component.
+    let coefficient_len = k
+        .checked_mul(nrhs)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "complex_lstsq: coefficient shape overflowed",
+        ))?;
+    let zero = ScaledReal::new(0.0);
+    let mut coefficients = Vec::new();
+    coefficients
+        .try_reserve_exact(coefficient_len)
+        .map_err(|_| {
+            LinAlgError::ShapeContractViolation("complex_lstsq: unable to allocate coefficients")
+        })?;
+    coefficients.resize(coefficient_len, (zero, zero));
+    for (index, &value) in values.iter().enumerate() {
+        if value <= cutoff {
+            continue;
+        }
+        for rhs in 0..nrhs {
+            let mut real = zero;
+            let mut imag = zero;
+            for row in 0..m {
+                let at_u = 2 * (row * k + index);
+                let at_b = 2 * (row * nrhs + rhs);
+                let (re, im) = complex_product_scaled(u[at_u], -u[at_u + 1], b[at_b], b[at_b + 1]);
+                real = real.sum(re);
+                imag = imag.sum(im);
+            }
+            let divisor = ScaledReal::new(value);
+            coefficients[index * nrhs + rhs] = (real.quotient(divisor), imag.quotient(divisor));
+        }
+    }
+    for row in 0..n {
+        for rhs in 0..nrhs {
+            let mut real = zero;
+            let mut imag = zero;
+            for index in 0..k {
+                let at_v = 2 * (index * n + row);
+                let vr = ScaledReal::new(vh[at_v]);
+                let vi = ScaledReal::new(-vh[at_v + 1]);
+                let (cr, ci) = coefficients[index * nrhs + rhs];
+                real = real.sum(vr.multiply(cr)).sum(vi.multiply(ci).negated());
+                imag = imag.sum(vr.multiply(ci)).sum(vi.multiply(cr));
+            }
+            x[2 * (row * nrhs + rhs)] = real.value();
+            x[2 * (row * nrhs + rhs) + 1] = imag.value();
+        }
+    }
+
+    let mut residuals = Vec::new();
+    if m > n && rank == n {
+        residuals.try_reserve_exact(nrhs).map_err(|_| {
+            LinAlgError::ShapeContractViolation("complex_lstsq: unable to allocate residuals")
+        })?;
+        for rhs in 0..nrhs {
+            let mut squared_norm = zero;
+            for row in 0..m {
+                let mut real = zero;
+                let mut imag = zero;
+                for col in 0..n {
+                    let at_a = 2 * (row * n + col);
+                    let at_x = 2 * (col * nrhs + rhs);
+                    let (re, im) =
+                        complex_product_scaled(a[at_a], a[at_a + 1], x[at_x], x[at_x + 1]);
+                    real = real.sum(re);
+                    imag = imag.sum(im);
+                }
+                let at_b = 2 * (row * nrhs + rhs);
+                let real = ScaledReal::new(b[at_b]).sum(real.negated());
+                let imag = ScaledReal::new(b[at_b + 1]).sum(imag.negated());
+                squared_norm = squared_norm
+                    .sum(real.multiply(real))
+                    .sum(imag.multiply(imag));
+            }
+            residuals.push(squared_norm.value());
+        }
+    }
+    Ok((x, residuals, rank, values))
+}
+
+/// Complex multiplication without materializing intermediate exponents.
+fn complex_product_scaled(ar: f64, ai: f64, br: f64, bi: f64) -> (ScaledReal, ScaledReal) {
+    let ar = ScaledReal::new(ar);
+    let ai = ScaledReal::new(ai);
+    let br = ScaledReal::new(br);
+    let bi = ScaledReal::new(bi);
+    (
+        ar.multiply(br).sum(ai.multiply(bi).negated()),
+        ar.multiply(bi).sum(ai.multiply(br)),
+    )
+}
+
 /// Pseudoinverse of a complex Hermitian matrix, using its lower triangle.
 ///
 /// Input and output contain interleaved real/imaginary components in row-major
@@ -12349,10 +12549,14 @@ impl ScaledReal {
         root
     }
 
-    fn divide(self, rhs: Self) -> f64 {
+    fn quotient(self, rhs: Self) -> Self {
         let mut quotient = Self::new(self.significand / rhs.significand);
         quotient.exponent += self.exponent - rhs.exponent;
-        quotient.value()
+        quotient
+    }
+
+    fn divide(self, rhs: Self) -> f64 {
+        self.quotient(rhs).value()
     }
 
     fn value(self) -> f64 {
@@ -13047,6 +13251,384 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
     }
 
     Ok((q, r))
+}
+
+type ScaledComplex = (ScaledReal, ScaledReal);
+
+/// Keep the Jacobi workspace in extended exponent range. This preserves a small
+/// singular direction even when its components share columns with huge entries.
+fn complex_svd_rotate(
+    x: ScaledComplex,
+    y: ScaledComplex,
+    cosine: f64,
+    sine: ScaledComplex,
+) -> (ScaledComplex, ScaledComplex) {
+    let cosine = ScaledReal::new(cosine);
+    (
+        (
+            cosine
+                .multiply(x.0)
+                .sum(sine.0.multiply(y.0).negated())
+                .sum(sine.1.multiply(y.1).negated()),
+            cosine
+                .multiply(x.1)
+                .sum(sine.0.multiply(y.1).negated())
+                .sum(sine.1.multiply(y.0)),
+        ),
+        (
+            sine.0
+                .multiply(x.0)
+                .sum(sine.1.multiply(x.1).negated())
+                .sum(cosine.multiply(y.0)),
+            sine.0
+                .multiply(x.1)
+                .sum(sine.1.multiply(x.0))
+                .sum(cosine.multiply(y.1)),
+        ),
+    )
+}
+
+fn complex_svd_buffer<T: Clone>(length: usize, value: T) -> Result<Vec<T>, LinAlgError> {
+    let mut result = Vec::new();
+    result.try_reserve_exact(length).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_svd: unable to allocate workspace or factors")
+    })?;
+    result.resize(length, value);
+    Ok(result)
+}
+
+fn complex_svd_cell_count(rows: usize, cols: usize) -> Result<usize, LinAlgError> {
+    rows.checked_mul(cols)
+        .and_then(|count| count.checked_mul(2))
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "complex_svd: factor dimensions overflow",
+        ))
+}
+
+fn complex_svd_column_norm(
+    matrix: &[ScaledComplex],
+    rows: usize,
+    cols: usize,
+    col: usize,
+) -> ScaledReal {
+    let mut sum = ScaledReal::new(0.0);
+    for row in 0..rows {
+        let (re, im) = matrix[row * cols + col];
+        sum = sum.sum(re.multiply(re)).sum(im.multiply(im));
+    }
+    sum.sqrt_abs()
+}
+
+fn complex_svd_pair_gram(
+    matrix: &[ScaledComplex],
+    rows: usize,
+    cols: usize,
+    p: usize,
+    q: usize,
+) -> (ScaledReal, ScaledReal, ScaledReal, ScaledReal) {
+    let mut alpha = ScaledReal::new(0.0);
+    let mut beta = ScaledReal::new(0.0);
+    let mut real = ScaledReal::new(0.0);
+    let mut imag = ScaledReal::new(0.0);
+    for row in 0..rows {
+        let x = matrix[row * cols + p];
+        let y = matrix[row * cols + q];
+        alpha = alpha.sum(x.0.multiply(x.0)).sum(x.1.multiply(x.1));
+        beta = beta.sum(y.0.multiply(y.0)).sum(y.1.multiply(y.1));
+        real = real.sum(x.0.multiply(y.0)).sum(x.1.multiply(y.1));
+        imag = imag.sum(x.0.multiply(y.1)).sum(x.1.multiply(y.0).negated());
+    }
+    (alpha, beta, real, imag)
+}
+
+/// Complete a zero-singular-value column, or an extra full-factor column.
+/// Nonzero singular columns have already been stored in descending order.
+/// Two projection passes avoid amplifying overlap when a coordinate vector
+/// lies almost in the span of the preceding columns.
+fn complex_svd_complete_column(
+    u: &mut [f64],
+    rows: usize,
+    cols: usize,
+    col: usize,
+    candidate: &mut [f64],
+) -> Result<(), LinAlgError> {
+    for basis in 0..rows {
+        candidate.fill(0.0);
+        candidate[2 * basis] = 1.0;
+        for _ in 0..2 {
+            for previous in 0..col {
+                let mut dot = (0.0, 0.0);
+                for row in 0..rows {
+                    let at = 2 * (row * cols + previous);
+                    let (re, im) =
+                        cmul_conj_a(u[at], u[at + 1], candidate[2 * row], candidate[2 * row + 1]);
+                    dot.0 += re;
+                    dot.1 += im;
+                }
+                for row in 0..rows {
+                    let at = 2 * (row * cols + previous);
+                    let (re, im) = cmul(u[at], u[at + 1], dot.0, dot.1);
+                    candidate[2 * row] -= re;
+                    candidate[2 * row + 1] -= im;
+                }
+            }
+        }
+        let norm = candidate
+            .iter()
+            .fold(0.0_f64, |norm, value| norm.hypot(*value));
+        if norm > 16.0 * f64::EPSILON * rows as f64 {
+            for row in 0..rows {
+                let at = 2 * (row * cols + col);
+                u[at] = candidate[2 * row] / norm;
+                u[at + 1] = candidate[2 * row + 1] / norm;
+            }
+            return Ok(());
+        }
+    }
+    Err(LinAlgError::SvdNonConvergence)
+}
+
+/// One-sided complex Jacobi SVD. Pair correlations determine unitary column
+/// rotations directly on A, without forming the full normal-equation matrix.
+/// Wide matrices use A^H so the working column count is always min(m, n).
+fn complex_svd_jacobi(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    full_matrices: bool,
+    compute_vectors: bool,
+    max_sweeps: usize,
+) -> Result<SvdFullResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n).and_then(|count| count.checked_mul(2)) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_svd: input must contain 2*m*n interleaved components",
+        ));
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex matrix entries must be finite for SVD",
+        ));
+    }
+
+    let k = m.min(n);
+    let u_cols = if full_matrices { m } else { k };
+    let vh_rows = if full_matrices { n } else { k };
+    let (u_cells, vh_cells) = if compute_vectors {
+        (
+            complex_svd_cell_count(m, u_cols)?,
+            complex_svd_cell_count(vh_rows, n)?,
+        )
+    } else {
+        (0, 0)
+    };
+    if k == 0 {
+        let mut u = complex_svd_buffer(u_cells, 0.0)?;
+        let mut vh = complex_svd_buffer(vh_cells, 0.0)?;
+        // Reduced factors and values-only calls have no dimension-length loops
+        // for empty matrices, including representable huge zero-sized shapes.
+        if compute_vectors && full_matrices {
+            for row in 0..m {
+                u[2 * (row * m + row)] = 1.0;
+            }
+            for row in 0..n {
+                vh[2 * (row * n + row)] = 1.0;
+            }
+        }
+        return Ok((u, Vec::new(), vh));
+    }
+
+    let rows = m.max(n);
+    let wide = m < n;
+    let zero = ScaledReal::new(0.0);
+    let mut matrix = complex_svd_buffer(a.len() / 2, (zero, zero))?;
+    for row in 0..rows {
+        for col in 0..k {
+            let source = 2 * if wide { col * n + row } else { row * n + col };
+            matrix[row * k + col] = (
+                ScaledReal::new(a[source]),
+                ScaledReal::new(if wide { -a[source + 1] } else { a[source + 1] }),
+            );
+        }
+    }
+    let mut right = if compute_vectors {
+        complex_svd_buffer(complex_svd_cell_count(k, k)?, 0.0)?
+    } else {
+        Vec::new()
+    };
+    if compute_vectors {
+        for col in 0..k {
+            right[2 * (col * k + col)] = 1.0;
+        }
+    }
+
+    let tolerance = 4.0 * f64::EPSILON * rows as f64;
+    for sweep in 0..=max_sweeps {
+        let mut changed = false;
+        for p in 0..k {
+            for q in (p + 1)..k {
+                let (alpha, beta, real, imag) = complex_svd_pair_gram(&matrix, rows, k, p, q);
+                // Extended exponents can retain rounding residues smaller than
+                // any representable output singular value. Such columns belong
+                // to the zero singular subspace, whose basis is completed below.
+                if alpha.sqrt_abs().value() == 0.0
+                    || beta.sqrt_abs().value() == 0.0
+                    || (real.significand == 0.0 && imag.significand == 0.0)
+                {
+                    continue;
+                }
+                let radius = real.multiply(real).sum(imag.multiply(imag)).sqrt_abs();
+                if radius.divide(alpha.multiply(beta).sqrt_abs()) <= tolerance {
+                    continue;
+                }
+                if sweep == max_sweeps {
+                    return Err(LinAlgError::SvdNonConvergence);
+                }
+                changed = true;
+
+                let gap = beta.sum(alpha.negated()).multiply(ScaledReal::new(0.5));
+                let gap_abs = ScaledReal {
+                    significand: gap.significand.abs(),
+                    ..gap
+                };
+                let denominator =
+                    gap_abs.sum(gap.multiply(gap).sum(radius.multiply(radius)).sqrt_abs());
+                let tangent = radius.quotient(denominator);
+                let tangent = if gap.significand < 0.0 {
+                    tangent.negated()
+                } else {
+                    tangent
+                };
+                let cosine = 1.0 / 1.0_f64.hypot(tangent.value());
+                let sine = tangent.multiply(ScaledReal::new(cosine));
+                let phase_re = real.divide(radius);
+                let phase_im = imag.divide(radius);
+                let phase_norm = phase_re.hypot(phase_im);
+                let sine = (
+                    sine.multiply(ScaledReal::new(phase_re / phase_norm)),
+                    sine.multiply(ScaledReal::new(phase_im / phase_norm)),
+                );
+                for row in 0..rows {
+                    let rp = row * k + p;
+                    let rq = row * k + q;
+                    let (x, y) = complex_svd_rotate(matrix[rp], matrix[rq], cosine, sine);
+                    matrix[rp] = x;
+                    matrix[rq] = y;
+                }
+                if compute_vectors {
+                    for row in 0..k {
+                        let rp = 2 * (row * k + p);
+                        let rq = 2 * (row * k + q);
+                        let (x, y) = complex_svd_rotate(
+                            (ScaledReal::new(right[rp]), ScaledReal::new(right[rp + 1])),
+                            (ScaledReal::new(right[rq]), ScaledReal::new(right[rq + 1])),
+                            cosine,
+                            sine,
+                        );
+                        right[rp] = x.0.value();
+                        right[rp + 1] = x.1.value();
+                        right[rq] = y.0.value();
+                        right[rq + 1] = y.1.value();
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let norms: Vec<_> = (0..k)
+        .map(|col| complex_svd_column_norm(&matrix, rows, k, col))
+        .collect();
+    if norms.iter().any(|norm| !norm.value().is_finite()) {
+        return Err(LinAlgError::SvdNonConvergence);
+    }
+    let mut indices: Vec<_> = (0..k).collect();
+    indices.sort_by(|&p, &q| norms[q].value().total_cmp(&norms[p].value()));
+    let values: Vec<_> = indices.iter().map(|&col| norms[col].value()).collect();
+    if !compute_vectors {
+        return Ok((Vec::new(), values, Vec::new()));
+    }
+
+    let left_cols = if full_matrices { rows } else { k };
+    let mut left = complex_svd_buffer(complex_svd_cell_count(rows, left_cols)?, 0.0)?;
+    let mut candidate = complex_svd_buffer(2 * rows, 0.0)?;
+    for col in 0..left_cols {
+        if col < k && values[col] != 0.0 {
+            let source_col = indices[col];
+            let norm = norms[source_col];
+            for row in 0..rows {
+                let value = matrix[row * k + source_col];
+                let target = 2 * (row * left_cols + col);
+                left[target] = value.0.divide(norm);
+                left[target + 1] = value.1.divide(norm);
+            }
+        } else {
+            complex_svd_complete_column(&mut left, rows, left_cols, col, &mut candidate)?;
+        }
+    }
+
+    let (u, vh) = if wide {
+        // A^H = U_work S V_work^H, hence A = V_work S U_work^H.
+        let mut u = complex_svd_buffer(u_cells, 0.0)?;
+        let mut vh = complex_svd_buffer(vh_cells, 0.0)?;
+        for row in 0..m {
+            for (col, &source_col) in indices.iter().enumerate() {
+                let source = 2 * (row * k + source_col);
+                let target = 2 * (row * u_cols + col);
+                u[target] = right[source];
+                u[target + 1] = right[source + 1];
+            }
+        }
+        for row in 0..vh_rows {
+            for col in 0..n {
+                let source = 2 * (col * left_cols + row);
+                let target = 2 * (row * n + col);
+                vh[target] = left[source];
+                vh[target + 1] = -left[source + 1];
+            }
+        }
+        (u, vh)
+    } else {
+        let mut vh = complex_svd_buffer(vh_cells, 0.0)?;
+        for (row, &source_col) in indices.iter().enumerate() {
+            for col in 0..n {
+                let source = 2 * (col * k + source_col);
+                let target = 2 * (row * n + col);
+                vh[target] = right[source];
+                vh[target + 1] = -right[source + 1];
+            }
+        }
+        (left, vh)
+    };
+    Ok((u, values, vh))
+}
+
+/// Singular values of a complex m-by-n matrix, sorted in descending order.
+/// Input uses row-major interleaved real/imaginary components. All components
+/// must be finite; empty dimensions return an empty vector.
+pub fn complex_svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    complex_svd_jacobi(a, m, n, false, false, SVD_QR_ITERATION_COEFF).map(|(_, values, _)| values)
+}
+
+/// Reduced complex SVD, returning (U, singular_values, V^H) with k = min(m, n).
+/// U is m-by-k and V^H is k-by-n, both row-major interleaved complex matrices.
+/// The k real singular values are sorted descending. Empty dimensions return
+/// empty factors. This path stores O(m*n) components, including for tall input.
+pub fn complex_svd_mxn_reduced(
+    a: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<SvdFullResult, LinAlgError> {
+    complex_svd_jacobi(a, m, n, false, true, SVD_QR_ITERATION_COEFF)
+}
+
+/// Full complex SVD, returning (U, singular_values, V^H). U is m-by-m and V^H
+/// is n-by-n, both row-major interleaved complex matrices. The min(m,n) real
+/// singular values are sorted descending. Zero singular subspaces are completed
+/// to unitary bases; an empty axis gives an identity on the nonempty full factor.
+pub fn complex_svd_mxn_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
+    complex_svd_jacobi(a, m, n, true, true, SVD_QR_ITERATION_COEFF)
 }
 
 /// Frobenius norm of a complex matrix (2·m·n interleaved).
@@ -14677,6 +15259,223 @@ mod tests {
                 .expect("mxn default");
         assert!(approx_equal(mxn_default[0], 1.0, 1e-12));
         assert!(approx_equal(mxn_default[3], 1e12, 1.0));
+    }
+
+    #[test]
+    fn complex_rectangular_solvers_return_minimum_norm_and_conjugate_inverse() {
+        let a = [1.0, 1.0, 1.0, -1.0];
+        let b = [4.0, 2.0, -2.0, 6.0];
+        let (x, residuals, rank, values) = super::complex_lstsq_mxn(&a, &b, 1, 2, 2, None).unwrap();
+        let expected = [1.5, -0.5, 1.0, 2.0, 0.5, 1.5, -2.0, 1.0];
+        for (actual, expected) in x.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-13);
+        }
+        assert!(residuals.is_empty());
+        assert_eq!(rank, 1);
+        assert!((values[0] - 2.0).abs() < 1e-14);
+        let inverse = super::complex_pinv_mxn(&a, 1, 2, 1e-15).unwrap();
+        for (actual, expected) in inverse.iter().zip([0.25, -0.25, 0.25, 0.25]) {
+            assert!((actual - expected).abs() < 1e-14);
+        }
+        let projection = complex_matmul(&inverse, &a, 2, 1, 2);
+        let reconstructed = complex_matmul(&a, &projection, 1, 2, 2);
+        for (actual, expected) in reconstructed.iter().zip(a) {
+            assert!((actual - expected).abs() < 1e-13);
+        }
+    }
+
+    #[test]
+    fn complex_rectangular_least_squares_preserves_multi_rhs_residuals_and_scale() {
+        let base_a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let base_b = [
+            1.0, -1.0, 1.0, 2.0, 2.0, -1.0, 1.0, -1.0, 5.0, 7.0, -4.0, 6.0,
+        ];
+        let expected = [2.0, 1.0, -1.0, 3.0, 4.0, -2.0, 2.0, 1.0];
+        for scale in [1e-150, 1.0, 1e150] {
+            let a: Vec<f64> = base_a.iter().map(|value| value * scale).collect();
+            let b: Vec<f64> = base_b.iter().map(|value| value * scale).collect();
+            let (x, residuals, rank, _) = super::complex_lstsq_mxn(&a, &b, 3, 2, 2, None).unwrap();
+            assert_eq!(rank, 2);
+            for (actual, expected) in x.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+            assert_eq!(residuals.len(), 2);
+            for actual in residuals {
+                assert!((actual / scale / scale - 15.0).abs() < 1e-11);
+            }
+        }
+
+        // U^H B exceeds f64::MAX, but X remains finite after division by sigma.
+        let a = [1e308, 0.0, 1e308, 0.0];
+        let b = [1.7e308, 0.0, 1.7e308, 0.0];
+        let (x, _, rank, _) = super::complex_lstsq_mxn(&a, &b, 2, 1, 1, None).unwrap();
+        assert_eq!(rank, 1);
+        assert!((x[0] - 1.7).abs() < 1e-14);
+        assert!(x[1].abs() < 1e-14);
+    }
+
+    #[test]
+    fn complex_rectangular_least_squares_cutoffs_and_empty_shapes_match_contracts() {
+        let a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2e-16, 0.0];
+        let b = [1.0, 0.0, 1.0, 0.0];
+        for (cutoff, expected_rank) in [
+            (None, 1),
+            (Some(-1.0), 2),
+            (Some(0.0), 2),
+            (Some(0.1), 1),
+            (Some(1.0), 2),
+            (Some(f64::INFINITY), 2),
+        ] {
+            let (x, residuals, rank, _) =
+                super::complex_lstsq_mxn(&a, &b, 2, 2, 1, cutoff).unwrap();
+            assert_eq!(rank, expected_rank, "cutoff={cutoff:?}");
+            assert!(residuals.is_empty());
+            assert!((x[0] - 1.0).abs() < 1e-14);
+            if rank == 2 {
+                assert!((x[2] / 5e15 - 1.0).abs() < 1e-14);
+            } else {
+                assert_eq!(x[2], 0.0);
+            }
+        }
+        let (x, residuals, rank, s) = super::complex_lstsq_mxn(&[], &[], 0, 3, 2, None).unwrap();
+        assert_eq!(x, vec![0.0; 12]);
+        assert!(residuals.is_empty());
+        assert_eq!(rank, 0);
+        assert!(s.is_empty());
+        let b = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let (x, residuals, rank, s) = super::complex_lstsq_mxn(&[], &b, 3, 0, 2, None).unwrap();
+        assert!(x.is_empty());
+        assert_eq!(residuals, vec![3.0, 3.0]);
+        assert_eq!(rank, 0);
+        assert!(s.is_empty());
+        let (x, residuals, rank, _) =
+            super::complex_lstsq_mxn(&a, &[], 2, 2, 0, Some(-1.0)).unwrap();
+        assert!(x.is_empty());
+        assert!(residuals.is_empty());
+        assert_eq!(rank, 2);
+        assert!(
+            super::complex_pinv_mxn(&[], 0, 3, 1e-15)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::complex_pinv_mxn(&[], 3, 0, 1e-15)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::complex_lstsq_mxn(&a, &[1.0], 2, 2, 1, None).is_err());
+        assert!(super::complex_lstsq_mxn(&[], &[], 0, usize::MAX, 1, None).is_err());
+        assert!(super::complex_lstsq_mxn(&a, &b[..4], 2, 2, 1, Some(f64::NAN)).is_err());
+        assert!(super::complex_lstsq_mxn(&[1.0, 0.0], &[f64::NAN, 0.0], 1, 1, 1, None).is_err());
+    }
+
+    #[test]
+    fn complex_rectangular_pinv_and_lstsq_match_numpy() {
+        assert!(
+            numpy_oracle_available(),
+            "complex rectangular solve parity requires NumPy; set FNP_ORACLE_PYTHON"
+        );
+        let script = r#"
+import json, sys
+import numpy as np
+m, n, nrhs = map(int, sys.argv[1:4])
+decode = lambda value: np.array(json.loads(value), dtype=np.float64)
+a = decode(sys.argv[4]).view(np.complex128).reshape(m, n)
+b = decode(sys.argv[5]).view(np.complex128).reshape(m, nrhs)
+got_x = decode(sys.argv[6]).view(np.complex128).reshape(n, nrhs)
+got_r, got_s = decode(sys.argv[7]), decode(sys.argv[9])
+rcond = None if sys.argv[10] == "none" else float(sys.argv[10])
+ref_x, ref_r, ref_rank, ref_s = np.linalg.lstsq(a, b, rcond=rcond)
+assert int(sys.argv[8]) == ref_rank
+xscale = float(np.max(np.abs(ref_x), initial=0.0)) or 1.0
+sscale = float(np.max(np.abs(ref_s), initial=0.0)) or 1.0
+bscale = float(np.max(np.abs(b), initial=0.0)) or 1.0
+np.testing.assert_allclose(got_x / xscale, ref_x / xscale, rtol=2e-10, atol=2e-11)
+np.testing.assert_allclose(got_s / sscale, ref_s / sscale, rtol=2e-10, atol=2e-11)
+np.testing.assert_allclose(got_r / bscale / bscale, ref_r / bscale / bscale,
+                           rtol=2e-9, atol=2e-20)
+got_p = decode(sys.argv[11]).view(np.complex128).reshape(n, m)
+ref_p = np.linalg.pinv(a, rcond=1e-12)
+pscale = float(np.max(np.abs(ref_p), initial=0.0)) or 1.0
+np.testing.assert_allclose(got_p / pscale, ref_p / pscale, rtol=2e-10, atol=2e-11)
+"#;
+        let cases = [
+            (1, 1, 1, false),
+            (5, 3, 1, false),
+            (5, 3, 2, false),
+            (3, 5, 2, false),
+            (3, 3, 2, false),
+            (6, 3, 2, true),
+            (3, 6, 2, true),
+            (2, 2, 0, false),
+            (0, 3, 2, false),
+            (3, 0, 2, false),
+        ];
+        for (m, n, nrhs, deficient) in cases {
+            let mut base_a = vec![0.0; 2 * m * n];
+            for row in 0..m {
+                for col in 0..n {
+                    let at = 2 * (row * n + col);
+                    base_a[at] = (((row * 7 + col * 5 + 3) % 17) as f64 - 8.0) / 4.0;
+                    base_a[at + 1] = (((row * 11 + col * 3 + 1) % 13) as f64 - 6.0) / 5.0;
+                    if row == col {
+                        base_a[at] += 2.0;
+                    }
+                }
+            }
+            if deficient {
+                if m >= n {
+                    for row in 0..m {
+                        base_a[2 * (row * n + 1)] = base_a[2 * row * n];
+                        base_a[2 * (row * n + 1) + 1] = base_a[2 * row * n + 1];
+                    }
+                } else {
+                    for col in 0..n {
+                        base_a[2 * (n + col)] = base_a[2 * col];
+                        base_a[2 * (n + col) + 1] = base_a[2 * col + 1];
+                    }
+                }
+            }
+            let mut base_b = vec![0.0; 2 * m * nrhs];
+            for row in 0..m {
+                for rhs in 0..nrhs {
+                    base_b[2 * (row * nrhs + rhs)] = ((row + rhs * 3) % 5) as f64 - 2.0;
+                    base_b[2 * (row * nrhs + rhs) + 1] = ((row * 3 + rhs) % 7) as f64 - 3.0;
+                }
+            }
+            for scale in [1e-100, 1.0, 1e100] {
+                let a: Vec<f64> = base_a.iter().map(|value| value * scale).collect();
+                let b: Vec<f64> = base_b.iter().map(|value| value * scale).collect();
+                let inverse = super::complex_pinv_mxn(&a, m, n, 1e-12).unwrap();
+                for cutoff in [None, Some(1e-2)] {
+                    let (x, residuals, rank, values) =
+                        super::complex_lstsq_mxn(&a, &b, m, n, nrhs, cutoff).unwrap();
+                    let output = Command::new(oracle_python_bin())
+                        .env("OPENBLAS_NUM_THREADS", "1")
+                        .env("OMP_NUM_THREADS", "1")
+                        .arg("-c")
+                        .arg(script)
+                        .arg(m.to_string())
+                        .arg(n.to_string())
+                        .arg(nrhs.to_string())
+                        .arg(format!("{a:?}"))
+                        .arg(format!("{b:?}"))
+                        .arg(format!("{x:?}"))
+                        .arg(format!("{residuals:?}"))
+                        .arg(rank.to_string())
+                        .arg(format!("{values:?}"))
+                        .arg(cutoff.map_or_else(|| "none".to_string(), |v| v.to_string()))
+                        .arg(format!("{inverse:?}"))
+                        .output()
+                        .expect("NumPy complex solve oracle should run");
+                    assert!(
+                        output.status.success(),
+                        "m={m} n={n} nrhs={nrhs} deficient={deficient} scale={scale} cutoff={cutoff:?}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -23827,6 +24626,326 @@ np.testing.assert_allclose(actual / scale, values_only / scale, rtol=2e-12, atol
                     assert!(
                         output.status.success(),
                         "n={n}, scale={scale}, UPLO={uplo}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
+    }
+
+    fn complex_svd_known_spectrum_matrix(m: usize, n: usize, spectrum: &[f64]) -> Vec<f64> {
+        let mut a = vec![0.0; 2 * m * n];
+        for row in 0..m {
+            for col in 0..n {
+                for (k, &value) in spectrum.iter().enumerate() {
+                    let phase = std::f64::consts::TAU
+                        * k as f64
+                        * (row as f64 / m as f64 - col as f64 / n as f64);
+                    let amplitude = value / ((m * n) as f64).sqrt();
+                    a[2 * (row * n + col)] += amplitude * phase.cos();
+                    a[2 * (row * n + col) + 1] += amplitude * phase.sin();
+                }
+            }
+        }
+        a
+    }
+
+    fn assert_complex_svd_factors(a: &[f64], m: usize, n: usize, full: bool) -> Vec<f64> {
+        let (u, values, vh) = if full {
+            super::complex_svd_mxn_full(a, m, n)
+        } else {
+            super::complex_svd_mxn_reduced(a, m, n)
+        }
+        .expect("complex SVD");
+        let k = m.min(n);
+        let u_cols = if full { m } else { k };
+        let vh_rows = if full { n } else { k };
+        assert_eq!(u.len(), 2 * m * u_cols);
+        assert_eq!(values.len(), k);
+        assert_eq!(vh.len(), 2 * vh_rows * n);
+        assert_eq!(values, super::complex_svd_mxn(a, m, n).unwrap());
+        assert!(
+            u.iter()
+                .chain(&values)
+                .chain(&vh)
+                .all(|value| value.is_finite())
+        );
+        assert!(values.iter().all(|&value| value >= 0.0));
+        assert!(values.windows(2).all(|pair| pair[0] >= pair[1]));
+        let scale = a.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        let tolerance = 128.0 * f64::EPSILON * m.max(n).max(1) as f64;
+        for row in 0..m {
+            for col in 0..n {
+                let mut reconstructed = (0.0, 0.0);
+                for (mode, &value) in values.iter().enumerate() {
+                    let left = 2 * (row * u_cols + mode);
+                    let right = 2 * (mode * n + col);
+                    let (re, im) = super::cmul(u[left], u[left + 1], vh[right], vh[right + 1]);
+                    reconstructed.0 += (value / scale) * re;
+                    reconstructed.1 += (value / scale) * im;
+                }
+                let expected = 2 * (row * n + col);
+                assert!(
+                    (reconstructed.0 - a[expected] / scale)
+                        .hypot(reconstructed.1 - a[expected + 1] / scale)
+                        <= tolerance,
+                    "SVD reconstruction ({row},{col}), m={m}, n={n}, full={full}"
+                );
+            }
+        }
+        for row in 0..u_cols {
+            for col in 0..u_cols {
+                let mut inner = (0.0, 0.0);
+                for index in 0..m {
+                    let x = 2 * (index * u_cols + row);
+                    let y = 2 * (index * u_cols + col);
+                    let (re, im) = super::cmul(u[x], -u[x + 1], u[y], u[y + 1]);
+                    inner.0 += re;
+                    inner.1 += im;
+                }
+                let diagonal = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (inner.0 - diagonal).hypot(inner.1) <= tolerance,
+                    "left SVD orthogonality ({row},{col}), m={m}, n={n}, full={full}"
+                );
+            }
+        }
+        for row in 0..vh_rows {
+            for col in 0..vh_rows {
+                let mut inner = (0.0, 0.0);
+                for index in 0..n {
+                    let x = 2 * (row * n + index);
+                    let y = 2 * (col * n + index);
+                    let (re, im) = super::cmul(vh[x], vh[x + 1], vh[y], -vh[y + 1]);
+                    inner.0 += re;
+                    inner.1 += im;
+                }
+                let diagonal = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (inner.0 - diagonal).hypot(inner.1) <= tolerance,
+                    "right SVD orthogonality ({row},{col}), m={m}, n={n}, full={full}"
+                );
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn complex_svd_rectangular_full_and_reduced_preserve_unitary_factors() {
+        let mut state = 11_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 11) as f64 / (1_u64 << 53) as f64) * 2.0 - 1.0
+        };
+        for (m, n) in [
+            (1, 1),
+            (1, 4),
+            (4, 1),
+            (2, 2),
+            (5, 3),
+            (3, 5),
+            (8, 8),
+            (12, 7),
+            (7, 12),
+            (16, 16),
+        ] {
+            let base: Vec<_> = (0..2 * m * n).map(|_| next()).collect();
+            for scale in [1e-300, 1.0, 1e300] {
+                let a: Vec<_> = base.iter().map(|value| value * scale).collect();
+                for full in [false, true] {
+                    assert_complex_svd_factors(&a, m, n, full);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complex_svd_repeated_and_zero_singular_subspaces_are_orthonormal() {
+        for (m, n, spectrum) in [
+            (5, 3, vec![7.0, 2.0, 0.0]),
+            (3, 5, vec![7.0, 2.0, 0.0]),
+            (6, 6, vec![7.0, 2.0, 2.0, 0.5, 0.0, 0.0]),
+        ] {
+            let a = complex_svd_known_spectrum_matrix(m, n, &spectrum);
+            for full in [false, true] {
+                let values = assert_complex_svd_factors(&a, m, n, full);
+                for (&actual, &expected) in values.iter().zip(&spectrum) {
+                    assert!((actual - expected).abs() < 1e-13);
+                }
+            }
+        }
+        for (m, n) in [(3, 2), (2, 3), (4, 4)] {
+            let zero = vec![0.0; 2 * m * n];
+            for full in [false, true] {
+                assert_eq!(
+                    assert_complex_svd_factors(&zero, m, n, full),
+                    vec![0.0; m.min(n)]
+                );
+            }
+        }
+        // A rank-one pair whose rounded rotations can leave ever-smaller
+        // parallel residues in the extended workspace.
+        for scale in [1e-300, 1.0, 1e300] {
+            let a: Vec<_> = [1.0, 0.0, 1.1, 0.0, 1.0, 0.0, 1.1, 0.0]
+                .iter()
+                .map(|value| value * scale)
+                .collect();
+            let values = assert_complex_svd_factors(&a, 2, 2, true);
+            assert!((values[0] / scale - 4.42_f64.sqrt()).abs() < 1e-14);
+            assert_eq!(values[1], 0.0);
+        }
+    }
+
+    #[test]
+    fn complex_svd_retains_small_directions_inside_large_columns() {
+        let a = [1e300, 0.0, 1e300, 0.0, 1e-300, 0.0, -1e-300, 0.0];
+        let values = assert_complex_svd_factors(&a, 2, 2, true);
+        assert!((values[0] / 1e300 - 2.0_f64.sqrt()).abs() < 1e-14);
+        assert!((values[1] / 1e-300 - 2.0_f64.sqrt()).abs() < 1e-14);
+        let a = [1e300, 0.0, 1e-300, 0.0, 0.0, 0.0, 1e-300, 0.0];
+        let values = assert_complex_svd_factors(&a, 2, 2, false);
+        assert_eq!(values, [1e300, 1e-300]);
+
+        for small in [f64::from_bits(1), 1e-320, 1e-300] {
+            let a = [
+                3.0 * small,
+                4.0 * small,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                -2.0 * small,
+            ];
+            for full in [false, true] {
+                let values = assert_complex_svd_factors(&a, 2, 2, full);
+                if small < f64::MIN_POSITIVE {
+                    assert_eq!(values, [5.0 * small, 2.0 * small]);
+                } else {
+                    assert!((values[0] / small - 5.0).abs() <= 5.0 * f64::EPSILON);
+                    assert_eq!(values[1], 2.0 * small);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complex_svd_handles_empty_axes_and_rejects_invalid_inputs() {
+        for (m, n) in [(0, 0), (0, 3), (3, 0)] {
+            for full in [false, true] {
+                assert!(assert_complex_svd_factors(&[], m, n, full).is_empty());
+            }
+        }
+        assert!(
+            super::complex_svd_mxn(&[], usize::MAX, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let empty = super::complex_svd_mxn_reduced(&[], 0, usize::MAX).unwrap();
+        assert!(empty.0.is_empty() && empty.1.is_empty() && empty.2.is_empty());
+        let empty = super::complex_svd_mxn_reduced(&[], usize::MAX, 0).unwrap();
+        assert!(empty.0.is_empty() && empty.1.is_empty() && empty.2.is_empty());
+        assert!(super::complex_svd_mxn_full(&[], 0, usize::MAX).is_err());
+        assert!(super::complex_svd_mxn(&[], usize::MAX, 2).is_err());
+        assert!(super::complex_svd_mxn_reduced(&[0.0; 7], 2, 2).is_err());
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(super::complex_svd_mxn(&[1.0, bad], 1, 1).is_err());
+            assert!(super::complex_svd_mxn_full(&[bad, 0.0], 1, 1).is_err());
+        }
+        let dense = [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 1.0];
+        assert_eq!(
+            super::complex_svd_jacobi(&dense, 2, 2, false, true, 0),
+            Err(LinAlgError::SvdNonConvergence)
+        );
+        let diagonal = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        assert!(super::complex_svd_jacobi(&diagonal, 2, 2, false, true, 0).is_ok());
+        assert_eq!(
+            super::complex_svd_mxn(&[f64::MAX, 0.0, f64::MAX, 0.0], 2, 1),
+            Err(LinAlgError::SvdNonConvergence)
+        );
+    }
+
+    #[test]
+    fn complex_svd_full_and_reduced_match_numpy() {
+        let script = r#"
+import sys
+import numpy as np
+m, n, full = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3] == 'true'
+parts = np.fromstring(sys.argv[4], sep=',').reshape(m, n, 2)
+a = np.empty((m, n), dtype=np.complex128)
+a.real = parts[:, :, 0]
+a.imag = parts[:, :, 1]
+reference_u, reference_s, reference_vh = np.linalg.svd(a, full_matrices=full)
+actual_s = np.fromstring(sys.argv[5], sep=',')
+def unpack(argument, shape):
+    parts = np.fromstring(argument, sep=',').reshape(*shape, 2)
+    out = np.empty(shape, dtype=np.complex128)
+    out.real, out.imag = parts[..., 0], parts[..., 1]
+    return out
+u = unpack(sys.argv[6], reference_u.shape)
+vh = unpack(sys.argv[7], reference_vh.shape)
+scale = float(np.max(np.abs(reference_s), initial=0.0)) or 1.0
+np.testing.assert_allclose(actual_s / scale, reference_s / scale, rtol=2e-12, atol=2e-12)
+np.testing.assert_allclose(u.conj().T @ u, np.eye(u.shape[1]), rtol=2e-12, atol=2e-12)
+np.testing.assert_allclose(vh @ vh.conj().T, np.eye(vh.shape[0]), rtol=2e-12, atol=2e-12)
+k = min(m, n)
+np.testing.assert_allclose((u[:, :k] * (actual_s / scale)) @ vh[:k, :],
+                           a / scale, rtol=2e-12, atol=2e-12)
+"#;
+        let cases = [
+            (
+                5,
+                3,
+                complex_svd_known_spectrum_matrix(5, 3, &[7.0, 2.0, 0.0]),
+            ),
+            (
+                3,
+                5,
+                complex_svd_known_spectrum_matrix(3, 5, &[7.0, 2.0, 0.0]),
+            ),
+            (
+                6,
+                6,
+                complex_svd_known_spectrum_matrix(6, 6, &[7.0, 2.0, 2.0, 0.5, 0.0, 0.0]),
+            ),
+            (0, 3, vec![]),
+            (3, 0, vec![]),
+        ];
+        for (m, n, base) in cases {
+            for scale in [1e-100, 1.0, 1e100] {
+                let a: Vec<_> = base.iter().map(|value| value * scale).collect();
+                for full in [false, true] {
+                    let (u, values, vh) = if full {
+                        super::complex_svd_mxn_full(&a, m, n)
+                    } else {
+                        super::complex_svd_mxn_reduced(&a, m, n)
+                    }
+                    .unwrap();
+                    let encode = |values: &[f64]| {
+                        values
+                            .iter()
+                            .map(f64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    let output = Command::new(oracle_python_bin())
+                        .env("OPENBLAS_NUM_THREADS", "1")
+                        .env("OMP_NUM_THREADS", "1")
+                        .arg("-c")
+                        .arg(script)
+                        .arg(m.to_string())
+                        .arg(n.to_string())
+                        .arg(full.to_string())
+                        .arg(encode(&a))
+                        .arg(encode(&values))
+                        .arg(encode(&u))
+                        .arg(encode(&vh))
+                        .output()
+                        .expect("NumPy complex SVD oracle should run");
+                    assert!(
+                        output.status.success(),
+                        "m={m}, n={n}, scale={scale}, full={full}: {}",
                         String::from_utf8_lossy(&output.stderr)
                     );
                 }
