@@ -8879,6 +8879,12 @@ impl UFuncArray {
                         | UnaryOp::Exp2
                         | UnaryOp::Expm1
                         | UnaryOp::Log1p
+                        | UnaryOp::Arcsin
+                        | UnaryOp::Arccos
+                        | UnaryOp::Arctan
+                        | UnaryOp::Arcsinh
+                        | UnaryOp::Arccosh
+                        | UnaryOp::Arctanh
                 )
                 && let Ok((result, _)) = self.complex_unary_values(op)
             {
@@ -19426,7 +19432,13 @@ impl UFuncArray {
             | UnaryOp::Tanh
             | UnaryOp::Exp2
             | UnaryOp::Expm1
-            | UnaryOp::Log1p => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
+            | UnaryOp::Log1p
+            | UnaryOp::Arcsin
+            | UnaryOp::Arccos
+            | UnaryOp::Arctan
+            | UnaryOp::Arcsinh
+            | UnaryOp::Arccosh
+            | UnaryOp::Arctanh => Some(self.complex_unary_values(op).and_then(|(array, flags)| {
                 dispatch_float_error_flags(flags, op.name())?;
                 Ok(array)
             })),
@@ -19443,7 +19455,6 @@ impl UFuncArray {
             | UnaryOp::I0 => Some(Err(UFuncError::TypeResolutionInvalid {
                 detail: format!("ufunc '{}' not supported for complex input", op.name()),
             })),
-            _ => None,
         }
     }
 
@@ -20243,6 +20254,220 @@ impl UFuncArray {
         result
     }
 
+    /// Principal inverse sine/cosine and inverse hyperbolic cosine. With
+    /// r = |z + 1|, s = |z - 1| and a = (r + s)/2, their components are
+    /// asin(x/a), acos(x/a), and acosh(a). Computing either a-1 or 1-x/a
+    /// directly loses the small component near a branch cut. Rationalize the
+    /// two distances instead, retaining square roots before any y*y operation.
+    fn complex_unary_inverse_sine(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        op: UnaryOp,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        let (x, y) = (re.abs(), im.abs());
+        let (sine_angle, cosine_angle, growth) = if y.is_infinite() {
+            if x.is_infinite() {
+                (
+                    std::f64::consts::FRAC_PI_4,
+                    std::f64::consts::FRAC_PI_4,
+                    f64::INFINITY,
+                )
+            } else if x.is_nan() {
+                (f64::NAN, f64::NAN, f64::INFINITY)
+            } else {
+                (0.0, std::f64::consts::FRAC_PI_2, f64::INFINITY)
+            }
+        } else if x.is_infinite() {
+            if y.is_nan() {
+                (f64::NAN, f64::NAN, f64::INFINITY)
+            } else {
+                (std::f64::consts::FRAC_PI_2, 0.0, f64::INFINITY)
+            }
+        } else if x.is_nan() || y.is_nan() {
+            if x == 0.0 {
+                (0.0, std::f64::consts::FRAC_PI_2, f64::NAN)
+            } else {
+                (f64::NAN, f64::NAN, f64::NAN)
+            }
+        } else if x.max(y) > f64::MAX.sqrt() * 0.25 {
+            // At this scale the +/-1 corrections are below one ulp. Scaling
+            // before the norm/log also handles two maximum finite components.
+            let largest = x.max(y);
+            let ratio = x.min(y) / largest;
+            (
+                x.atan2(y),
+                y.atan2(x),
+                largest.ln() + 0.5 * (ratio * ratio).ln_1p() + std::f64::consts::LN_2,
+            )
+        } else if y < f64::MIN_POSITIVE.sqrt() && x != 1.0 {
+            // Here y*y cannot affect either normal component. Evaluate the
+            // linear minor component directly: rounding sqrt(d) to a
+            // subnormal first can turn an eventual zero into one ulp.
+            if x < 1.0 {
+                (x.asin(), x.acos(), y / ((1.0 - x) * (1.0 + x)).sqrt())
+            } else {
+                (
+                    std::f64::consts::FRAC_PI_2,
+                    y / ((x - 1.0) * (x + 1.0)).sqrt(),
+                    x.acosh(),
+                )
+            }
+        } else {
+            let plus = (x + 1.0).hypot(y);
+            let minus = (x - 1.0).hypot(y);
+            let average = 0.5 * plus + 0.5 * minus;
+            // d = a - max(1, x) = y*y/2 * (1/(r+x+1) + 1/(s+|x-1|)).
+            // Keep sqrt(d) factored so a nonzero subnormal y can yield the
+            // normal sqrt(y) component at x=1. Away from x=1, factoring y
+            // outside the root avoids first squaring an underflowing operand.
+            let root_d = if y == 0.0 {
+                0.0
+            } else {
+                let plus_denominator = plus + (x + 1.0);
+                let minus_denominator = minus + (x - 1.0).abs();
+                if minus_denominator < f64::MIN_POSITIVE {
+                    y.sqrt() * (0.5 * (y / plus_denominator + y / minus_denominator)).sqrt()
+                } else {
+                    y * (0.5 / plus_denominator + 0.5 / minus_denominator).sqrt()
+                }
+            };
+            let (root_average_minus_one, root_average_minus_x) = if x >= 1.0 {
+                ((x - 1.0).sqrt().hypot(root_d), root_d)
+            } else {
+                (root_d, (1.0 - x).sqrt().hypot(root_d))
+            };
+            let angular_denominator = root_average_minus_x * (average + x).sqrt();
+            let growth = (root_average_minus_one
+                * (root_average_minus_one + (average + 1.0).sqrt()))
+            .ln_1p();
+            (
+                x.atan2(angular_denominator),
+                angular_denominator.atan2(x),
+                growth,
+            )
+        };
+        let cosine_angle = if re.is_sign_negative() {
+            std::f64::consts::PI - cosine_angle
+        } else {
+            cosine_angle
+        };
+        let result = match op {
+            UnaryOp::Arcsin => (sine_angle.copysign(re), growth.copysign(im)),
+            UnaryOp::Arccos => (cosine_angle, -growth.copysign(im)),
+            UnaryOp::Arccosh => (
+                growth,
+                // NumPy's indeterminate imaginary input at x=0 selects the
+                // positive pi/2 value, independently of the NaN's sign bit.
+                if im.is_nan() && re == 0.0 {
+                    std::f64::consts::FRAC_PI_2
+                } else {
+                    cosine_angle.copysign(im)
+                },
+            ),
+            _ => unreachable!("elliptic complex inverse operation"),
+        };
+        let result = (
+            Self::complex_unary_round(result.0, dtype),
+            Self::complex_unary_round(result.1, dtype),
+        );
+        if re.is_finite() && im.is_finite() {
+            let minimum = Self::complex_unary_min_normal(dtype);
+            let tiny = match op {
+                UnaryOp::Arcsin => {
+                    (re != 0.0 && result.0.abs() < minimum)
+                        || (im != 0.0 && result.1.abs() < minimum)
+                }
+                UnaryOp::Arccos | UnaryOp::Arccosh => {
+                    im != 0.0 && (result.0.abs() < minimum || result.1.abs() < minimum)
+                }
+                _ => false,
+            };
+            if tiny {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        result
+    }
+
+    /// Principal atanh, evaluated without forming a complex quotient. Its real
+    /// component is log1p(4*|x|/|1-z|^2)/4; near the two poles a difference of
+    /// logarithms avoids overflowing that ratio. The argument uses atan2 so
+    /// both sides of the branch cuts and signed imaginary zeros are retained.
+    fn complex_unary_atanh(
+        re: f64,
+        im: f64,
+        dtype: DType,
+        flags: &mut FloatErrorFlags,
+    ) -> (f64, f64) {
+        if im.is_infinite() {
+            return (
+                0.0_f64.copysign(re),
+                Self::complex_unary_round(std::f64::consts::FRAC_PI_2, dtype).copysign(im),
+            );
+        }
+        if re.is_infinite() {
+            return (
+                0.0_f64.copysign(re),
+                if im.is_nan() {
+                    f64::NAN
+                } else {
+                    Self::complex_unary_round(std::f64::consts::FRAC_PI_2, dtype).copysign(im)
+                },
+            );
+        }
+        if re.is_nan() || im.is_nan() {
+            return (if re == 0.0 { re } else { f64::NAN }, f64::NAN);
+        }
+        let (x, y) = (re.abs(), im.abs());
+        if x == 1.0 && y == 0.0 {
+            flags.note(FloatErrorKind::Divide);
+            return (f64::INFINITY.copysign(re), im);
+        }
+        let largest = x.max(y);
+        let (real, imag) = if largest > f64::MAX.sqrt() * 0.25 {
+            // atanh(z) = 1/z +/- i*pi/2 + O(1/z^3). Scale the
+            // reciprocal so even max+max*j keeps its subnormal real part.
+            let scaled_x = x / largest;
+            let scaled_y = y / largest;
+            (
+                (scaled_x / (scaled_x * scaled_x + scaled_y * scaled_y)) / largest,
+                std::f64::consts::FRAC_PI_2,
+            )
+        } else {
+            let distance = (1.0 - x).hypot(y);
+            let real = if distance < f64::MIN_POSITIVE.sqrt() {
+                0.5 * ((1.0 + x).hypot(y).ln() - distance.ln())
+            } else {
+                let ratio = (4.0 * x / distance) / distance;
+                if ratio.is_infinite()
+                    || (dtype == DType::Complex64 && (ratio as f32).is_infinite())
+                {
+                    0.5 * ((1.0 + x).hypot(y).ln() - distance.ln())
+                } else if dtype == DType::Complex64 {
+                    // Preserve the component-typed log1p intermediate before
+                    // scaling. In particular, a ratio rounded to two smallest
+                    // subnormals must become zero after division by four.
+                    f64::from((ratio as f32).ln_1p() * 0.25)
+                } else {
+                    0.25 * ratio.ln_1p()
+                }
+            };
+            let imag = 0.5 * (2.0 * y).atan2((1.0 - x) * (1.0 + x) - y * y);
+            (real, imag)
+        };
+        let result = (
+            Self::complex_unary_round(real, dtype).copysign(re),
+            Self::complex_unary_round(imag, dtype).copysign(im),
+        );
+        let minimum = Self::complex_unary_min_normal(dtype);
+        if (re != 0.0 && result.0.abs() < minimum) || (im != 0.0 && result.1.abs() < minimum) {
+            flags.note(FloatErrorKind::Under);
+        }
+        result
+    }
+
     fn complex_unary_values(&self, op: UnaryOp) -> Result<(Self, FloatErrorFlags), UFuncError> {
         if !matches!(
             op,
@@ -20266,6 +20491,12 @@ impl UFuncArray {
                 | UnaryOp::Exp2
                 | UnaryOp::Expm1
                 | UnaryOp::Log1p
+                | UnaryOp::Arcsin
+                | UnaryOp::Arccos
+                | UnaryOp::Arctan
+                | UnaryOp::Arcsinh
+                | UnaryOp::Arccosh
+                | UnaryOp::Arctanh
         ) {
             return Err(UFuncError::Msg(format!(
                 "unsupported complex unary operation '{}'",
@@ -20318,6 +20549,25 @@ impl UFuncArray {
                 UnaryOp::Exp2 => Self::complex_unary_exp2(re, im, self.dtype, &mut flags),
                 UnaryOp::Expm1 => Self::complex_unary_expm1(re, im, self.dtype, &mut flags),
                 UnaryOp::Log1p => Self::complex_unary_log1p(re, im, self.dtype, &mut flags),
+                UnaryOp::Arcsin | UnaryOp::Arccos | UnaryOp::Arccosh => {
+                    Self::complex_unary_inverse_sine(re, im, self.dtype, op, &mut flags)
+                }
+                UnaryOp::Arcsinh => {
+                    // asinh(z) = -i*asin(i*z), including signed branch-cut zeros.
+                    let value = Self::complex_unary_inverse_sine(
+                        -im,
+                        re,
+                        self.dtype,
+                        UnaryOp::Arcsin,
+                        &mut flags,
+                    );
+                    (value.1, -value.0)
+                }
+                UnaryOp::Arctanh => Self::complex_unary_atanh(re, im, self.dtype, &mut flags),
+                UnaryOp::Arctan => {
+                    let value = Self::complex_unary_atanh(-im, re, self.dtype, &mut flags);
+                    (value.1, -value.0)
+                }
                 UnaryOp::Sinh | UnaryOp::Cosh => Self::complex_unary_hyperbolic(
                     re,
                     im,
@@ -51061,6 +51311,9 @@ pub fn scimath_power(x: &UFuncArray, p: f64) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware arccos: returns complex result for |x| > 1.
 pub fn scimath_arccos(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Arccos);
+    }
     scimath_unary(x, |v| {
         if v.abs() <= 1.0 {
             (v.acos(), 0.0)
@@ -51081,6 +51334,9 @@ pub fn scimath_arccos(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware arcsin: returns complex result for |x| > 1.
 pub fn scimath_arcsin(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Arcsin);
+    }
     scimath_unary(x, |v| {
         if v.abs() <= 1.0 {
             (v.asin(), 0.0)
@@ -51099,6 +51355,9 @@ pub fn scimath_arcsin(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 
 /// Complex-aware arctanh: returns complex result for |x| > 1.
 pub fn scimath_arctanh(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if x.dtype.is_complex() {
+        return x.try_elementwise_unary(UnaryOp::Arctanh);
+    }
     scimath_unary(x, |v| {
         if v.abs() < 1.0 {
             (v.atanh(), 0.0)

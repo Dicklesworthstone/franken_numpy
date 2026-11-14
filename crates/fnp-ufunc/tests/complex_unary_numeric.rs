@@ -3,13 +3,13 @@
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
     FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, UnaryOp, errstate, logical_not,
-    seterrcall, take_float_error_events,
+    scimath_arccos, scimath_arcsin, scimath_arctanh, seterrcall, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-const OPS: [UnaryOp; 19] = [
+const OPS: [UnaryOp; 25] = [
     UnaryOp::Negative,
     UnaryOp::Positive,
     UnaryOp::Square,
@@ -29,6 +29,12 @@ const OPS: [UnaryOp; 19] = [
     UnaryOp::Sinh,
     UnaryOp::Cosh,
     UnaryOp::Tanh,
+    UnaryOp::Arcsin,
+    UnaryOp::Arccos,
+    UnaryOp::Arctan,
+    UnaryOp::Arcsinh,
+    UnaryOp::Arccosh,
+    UnaryOp::Arctanh,
 ];
 
 const TRIG_OPS: [UnaryOp; 6] = [
@@ -38,6 +44,15 @@ const TRIG_OPS: [UnaryOp; 6] = [
     UnaryOp::Sinh,
     UnaryOp::Cosh,
     UnaryOp::Tanh,
+];
+
+const INVERSE_OPS: [UnaryOp; 6] = [
+    UnaryOp::Arcsin,
+    UnaryOp::Arccos,
+    UnaryOp::Arctan,
+    UnaryOp::Arcsinh,
+    UnaryOp::Arccosh,
+    UnaryOp::Arctanh,
 ];
 
 fn complex(shape: &[usize], parts: &[(f64, f64)], dtype: DType) -> UFuncArray {
@@ -68,6 +83,25 @@ struct OracleBatch {
 
 impl OracleBatch {
     fn push(&mut self, input: &UFuncArray, op: UnaryOp) {
+        self.push_call(input, op, "numpy", || input.try_elementwise_unary(op));
+    }
+
+    fn push_scimath(&mut self, input: &UFuncArray, op: UnaryOp) {
+        self.push_call(input, op, "emath", || match op {
+            UnaryOp::Arcsin => scimath_arcsin(input),
+            UnaryOp::Arccos => scimath_arccos(input),
+            UnaryOp::Arctanh => scimath_arctanh(input),
+            _ => panic!("fixture requires a complex-aware inverse function"),
+        });
+    }
+
+    fn push_call(
+        &mut self,
+        input: &UFuncArray,
+        op: UnaryOp,
+        namespace: &str,
+        call: impl FnOnce() -> Result<UFuncArray, UFuncError>,
+    ) {
         let mut shape = input.shape().to_vec();
         assert_eq!(shape.pop(), Some(2));
         self.cases.push(json!({
@@ -77,10 +111,11 @@ impl OracleBatch {
                 .map(|parts| [parts[0].to_string(), parts[1].to_string()])
                 .collect::<Vec<_>>(),
             "op": op.name(),
+            "namespace": namespace,
         }));
         let _errors = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
         take_float_error_events();
-        let output = input.try_elementwise_unary(op).unwrap();
+        let output = call().unwrap();
         let reports = take_float_error_events()
             .into_iter()
             .map(|event| {
@@ -112,7 +147,8 @@ for case in json.load(sys.stdin):
         source = source.reshape(case['shape'])
     with warnings.catch_warnings(record=True) as caught, np.errstate(all='warn'):
         warnings.simplefilter('always')
-        result = np.asarray(getattr(np, case['op'])(source))
+        namespace = np if case['namespace'] == 'numpy' else np.emath
+        result = np.asarray(getattr(namespace, case['op'])(source))
     if result.dtype.kind == 'c':
         values = [repr(float(part)) for value in result.ravel()
                   for part in (value.real, value.imag)]
@@ -760,4 +796,272 @@ fn complex_trigonometric_errors_aggregate_and_infallible_results_keep_pairs() {
             take_float_error_events();
         }
     }
+}
+
+#[test]
+fn complex_inverse_functions_match_numpy_on_both_sides_of_branch_points() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (below_one, above_one, epsilon, tiny) = if dtype == DType::Complex64 {
+            (
+                f64::from(f32::from_bits(1.0_f32.to_bits() - 1)),
+                f64::from(f32::from_bits(1.0_f32.to_bits() + 1)),
+                f64::from(f32::EPSILON),
+                f64::from(f32::from_bits(1)),
+            )
+        } else {
+            (
+                f64::from_bits(1.0_f64.to_bits() - 1),
+                f64::from_bits(1.0_f64.to_bits() + 1),
+                f64::EPSILON,
+                f64::from_bits(1),
+            )
+        };
+        for major in [0.0, 0.5, below_one, 1.0, above_one, 2.0, 2.24, 2.3, 2.4] {
+            for minor in [
+                -epsilon.sqrt(),
+                -epsilon,
+                -tiny,
+                -0.0,
+                0.0,
+                tiny,
+                epsilon,
+                epsilon.sqrt(),
+            ] {
+                // Rotate the same neighborhood onto both the real and imaginary
+                // cuts. Scalar cases keep each lane's error status observable.
+                for pair in [
+                    (major, minor),
+                    (-major, minor),
+                    (minor, major),
+                    (minor, -major),
+                ] {
+                    let input = complex(&[], &[pair], dtype);
+                    for op in INVERSE_OPS {
+                        batch.push(&input, op);
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_inverse_functions_preserve_extreme_and_subnormal_components() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (tiny, normal, largest, epsilon) = if dtype == DType::Complex64 {
+            (
+                f64::from(f32::from_bits(1)),
+                f64::from(f32::MIN_POSITIVE),
+                f64::from(f32::MAX),
+                f64::from(f32::EPSILON),
+            )
+        } else {
+            (f64::from_bits(1), f64::MIN_POSITIVE, f64::MAX, f64::EPSILON)
+        };
+        for magnitude in [
+            tiny,
+            3.0 * tiny,
+            0.5 * normal,
+            normal,
+            normal.sqrt(),
+            epsilon.sqrt(),
+            1.0 / epsilon.sqrt(),
+            0.5 * largest.sqrt(),
+            largest.sqrt(),
+            0.5 * largest,
+            largest,
+        ] {
+            for pair in [
+                (magnitude, 0.0),
+                (-magnitude, -0.0),
+                (0.0, magnitude),
+                (-0.0, -magnitude),
+                (magnitude, magnitude),
+                (-magnitude, magnitude),
+                (magnitude, -magnitude),
+                (-magnitude, -magnitude),
+                (magnitude, tiny),
+                (tiny, -magnitude),
+                (magnitude, 0.5),
+                (0.5, -magnitude),
+            ] {
+                let input = complex(&[], &[pair], dtype);
+                for op in INVERSE_OPS {
+                    batch.push(&input, op);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_inverse_functions_aggregate_underflow_and_preserve_error_mode_results() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let tiny = if dtype == DType::Complex64 {
+            f64::from(f32::from_bits(1))
+        } else {
+            f64::from_bits(1)
+        };
+        let input = complex(
+            &[2, 2],
+            &[(tiny, tiny), (-tiny, -tiny), (0.25, 0.5), (-0.5, 0.25)],
+            dtype,
+        );
+        for op in INVERSE_OPS {
+            let expected = {
+                let _errors = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+                take_float_error_events();
+                let result = input.try_elementwise_unary(op).unwrap();
+                assert!(take_float_error_events().is_empty());
+                result
+            };
+            for mode in [
+                FloatErrorMode::Warn,
+                FloatErrorMode::Print,
+                FloatErrorMode::Log,
+            ] {
+                let _errors = errstate(Some(mode), None, None, None, None);
+                let actual = input.try_elementwise_unary(op).unwrap();
+                assert_eq!(actual, expected, "{dtype:?} {op:?} {mode:?}");
+                let events = take_float_error_events();
+                assert_eq!(events.len(), 1, "{dtype:?} {op:?} {mode:?}");
+                assert_eq!(events[0].kind, FloatErrorKind::Under);
+                assert_eq!(events[0].op, op.name());
+                assert_eq!(events[0].mode, mode);
+            }
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let callback_calls = Arc::clone(&calls);
+            let previous = seterrcall(Some(Arc::new(move |event| {
+                callback_calls.lock().unwrap().push(event);
+            })));
+            let result = {
+                let _errors = errstate(Some(FloatErrorMode::Call), None, None, None, None);
+                input.try_elementwise_unary(op)
+            };
+            let _ = seterrcall(previous);
+            assert_eq!(result.unwrap(), expected);
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "{dtype:?} {op:?}: callback per operation");
+            assert_eq!(calls[0].kind, FloatErrorKind::Under);
+            assert_eq!(calls[0].op, op.name());
+            assert_eq!(calls[0].mode, FloatErrorMode::Call);
+            assert!(take_float_error_events().is_empty());
+
+            let _errors = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            assert!(matches!(
+                input.try_elementwise_unary(op),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Under,
+                    ..
+                })
+            ));
+            let actual = input.elementwise_unary(op);
+            assert_eq!(actual.dtype(), dtype);
+            assert_eq!(actual.shape(), input.shape());
+            assert_eq!(actual, expected, "{dtype:?} {op:?}: infallible values");
+            assert!(take_float_error_events().iter().any(|event| {
+                event.op == op.name()
+                    && event.kind == FloatErrorKind::Under
+                    && event.mode == FloatErrorMode::Raise
+            }));
+        }
+    }
+}
+
+#[test]
+fn complex_inverse_tangent_poles_report_divide_by_zero_once() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for op in [UnaryOp::Arctan, UnaryOp::Arctanh] {
+            let parts = if op == UnaryOp::Arctan {
+                [(0.0, 1.0), (-0.0, -1.0), (0.0, 1.0), (0.25, 0.5)]
+            } else {
+                [(1.0, 0.0), (-1.0, -0.0), (1.0, 0.0), (0.25, 0.5)]
+            };
+            let input = complex(&[4], &parts, dtype);
+            let expected = {
+                let _errors = errstate(Some(FloatErrorMode::Warn), None, None, None, None);
+                take_float_error_events();
+                let result = input.try_elementwise_unary(op).unwrap();
+                let events = take_float_error_events();
+                assert_eq!(
+                    events.len(),
+                    1,
+                    "{dtype:?} {op:?}: aggregate repeated poles"
+                );
+                assert_eq!(events[0].kind, FloatErrorKind::Divide);
+                assert_eq!(events[0].op, op.name());
+                result
+            };
+            let pole_component = usize::from(op == UnaryOp::Arctan);
+            assert_eq!(expected.values()[pole_component], f64::INFINITY);
+            assert_eq!(expected.values()[2 + pole_component], f64::NEG_INFINITY);
+            assert_eq!(expected.values()[4 + pole_component], f64::INFINITY);
+            assert_eq!(
+                expected.values()[3 - pole_component].to_bits(),
+                (-0.0_f64).to_bits(),
+                "{dtype:?} {op:?}: pole retains branch-side zero"
+            );
+            let _errors = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            assert!(matches!(
+                input.try_elementwise_unary(op),
+                Err(UFuncError::FloatingPoint {
+                    kind: FloatErrorKind::Divide,
+                    ..
+                })
+            ));
+            let actual = input.elementwise_unary(op);
+            assert_eq!(actual, expected);
+            take_float_error_events();
+        }
+    }
+}
+
+#[test]
+fn complex_scimath_inverse_functions_match_numpy_with_logical_shapes() {
+    let mut batch = OracleBatch::default();
+    let pattern = [
+        (0.25, -0.5),
+        (-2.0, -0.0),
+        (2.0, 0.0),
+        (-0.0, -2.0),
+        (1.0, -0.0),
+        (-1.0, 0.0),
+        (1.0 + 2.0_f64.powi(-24), -1.0e-50),
+        (f64::INFINITY, f64::NAN),
+    ];
+    let shapes: &[&[usize]] = &[&[], &[8], &[2, 4], &[2, 1, 2, 2], &[0, 3], &[2, 0, 1]];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let count: usize = shape.iter().product();
+            let pairs = (0..count)
+                .map(|index| pattern[index % pattern.len()])
+                .collect::<Vec<_>>();
+            let input = complex(shape, &pairs, dtype);
+            for op in [UnaryOp::Arcsin, UnaryOp::Arccos, UnaryOp::Arctanh] {
+                batch.push_scimath(&input, op);
+            }
+        }
+        for malformed in [
+            UFuncArray::new(vec![4], vec![1.0; 4], dtype).unwrap(),
+            UFuncArray::new(vec![0, 4], vec![], dtype).unwrap(),
+        ] {
+            assert!(scimath_arcsin(&malformed).is_err());
+            assert!(scimath_arccos(&malformed).is_err());
+            assert!(scimath_arctanh(&malformed).is_err());
+        }
+        let poles = complex(&[2], &[(1.0, 0.0), (-1.0, -0.0)], dtype);
+        let _errors = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+        assert!(matches!(
+            scimath_arctanh(&poles),
+            Err(UFuncError::FloatingPoint {
+                kind: FloatErrorKind::Divide,
+                ..
+            })
+        ));
+    }
+    batch.assert_matches_numpy();
 }
