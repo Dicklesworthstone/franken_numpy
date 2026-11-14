@@ -38,7 +38,9 @@ fn input_spec(array: &UFuncArray) -> Value {
         json!(
             array
                 .values()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|parts| [parts[0].to_string(), parts[1].to_string()])
                 .collect::<Vec<_>>()
         )
@@ -215,17 +217,12 @@ json.dump(outputs, sys.stdout)
             let operation = self.cases[case_index]["op"].as_str().unwrap();
             let flags = self.cases[case_index]["flags"].as_u64().unwrap_or(0);
             let has_index = operation == "unique_all" || (operation == "unique" && flags & 1 != 0);
-            let distinct_nan_inverse = if operation == "unique_inverse" {
-                Some(1)
-            } else if operation == "unique"
-                && flags & 2 != 0
-                && !has_index
-                && self.cases[case_index]["equal_nan"] == false
-            {
-                Some(1)
-            } else {
-                None
-            };
+            let distinct_nan_inverse = (operation == "unique_inverse"
+                || (operation == "unique"
+                    && flags & 2 != 0
+                    && !has_index
+                    && self.cases[case_index]["equal_nan"] == false))
+                .then_some(1);
             if let Some(inverse_output) = distinct_nan_inverse {
                 // Unstable sorting may permute identical NaNs. Each NaN is
                 // nevertheless a distinct group with exactly one source entry.

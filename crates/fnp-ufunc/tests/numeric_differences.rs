@@ -913,11 +913,11 @@ fn integer_gradients_convert_declared_storage_before_subtraction() {
         for shape in [vec![6], vec![2, 3]] {
             let array = UFuncArray::from_storage(shape.clone(), storage.clone()).unwrap();
             let input = batch.input(&array);
-            for axis in 0..shape.len() {
-                let uniform = (0..shape[axis])
+            for (axis, &axis_len) in shape.iter().enumerate() {
+                let uniform = (0..axis_len)
                     .map(|index| index as f64 * 0.5)
                     .collect::<Vec<_>>();
-                let nonuniform = (0..shape[axis])
+                let nonuniform = (0..axis_len)
                     .map(|index| (index * index) as f64)
                     .collect::<Vec<_>>();
                 for coordinates in [None, Some(uniform.as_slice()), Some(nonuniform.as_slice())] {
@@ -984,7 +984,8 @@ fn complex_gradients_match_numpy_for_nonfinite_values_and_degenerate_spacing() {
 #[test]
 fn gradient_shape_axis_spacing_and_boolean_validation_match_numpy() {
     let mut batch = OracleBatch::default();
-    let cases: &[(&[usize], Option<isize>, usize, Option<&[f64]>)] = &[
+    type GradientCase<'a> = (&'a [usize], Option<isize>, usize, Option<&'a [f64]>);
+    let cases: &[GradientCase<'_>] = &[
         (&[], None, 1, None),
         (&[], Some(0), 2, Some(&[])),
         (&[0], None, 1, None),

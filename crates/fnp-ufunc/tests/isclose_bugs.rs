@@ -86,7 +86,12 @@ fn complex_isclose_uses_joint_magnitude_and_logical_broadcasting() {
         let zero = complex(&[], &[(0.0, 0.0)], dtype);
         let diagonal = complex(&[], &[(0.08, 0.08)], dtype);
         assert!(!zero.allclose(&diagonal, 0.0, 0.1).unwrap());
-        assert_eq!(zero.isclose(&diagonal, 0.0, 0.1).unwrap().shape(), &[]);
+        assert!(
+            zero.isclose(&diagonal, 0.0, 0.1)
+                .unwrap()
+                .shape()
+                .is_empty()
+        );
 
         let real = UFuncArray::new(vec![3, 1], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
         let scalar = complex(&[], &[(1.0, 0.0)], dtype);
@@ -264,7 +269,9 @@ fn oracle_input(array: &UFuncArray) -> Value {
         json!(
             array
                 .values()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| { [pair[0].to_string(), pair[1].to_string()] })
                 .collect::<Vec<_>>()
         )

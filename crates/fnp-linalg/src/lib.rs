@@ -18074,7 +18074,12 @@ for col in range(n):
             // infinite reciprocal squared norm beside ordinary-sized entries.
             let a = [1.0, 0.0, 0.0, small, 2.0, 0.0, small, 0.0, 3.0];
             let values = eig_nxn(&a, 3).expect("mixed-scale Hessenberg reduction");
-            let mut real: Vec<_> = values.chunks_exact(2).map(|pair| pair[0]).collect();
+            let mut real: Vec<_> = values
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| pair[0])
+                .collect();
             real.sort_by(f64::total_cmp);
             for (&got, expected) in real.iter().zip([1.0, 2.0, 3.0]) {
                 assert!((got - expected).abs() < 1e-12);
@@ -18190,7 +18195,7 @@ for value in actual / scale:
             batch.extend(a);
         }
         let values = batch_eig(&batch, &[scales.len(), 3, 3]).expect("scaled batch eigenvalues");
-        for (lane, input) in batch.chunks_exact(9).enumerate() {
+        for (lane, input) in batch.as_chunks::<9>().0.iter().enumerate() {
             assert_eq!(
                 &values[6 * lane..6 * (lane + 1)],
                 eig_nxn(input, 3).unwrap()

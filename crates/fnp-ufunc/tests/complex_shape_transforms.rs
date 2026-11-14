@@ -372,6 +372,8 @@ fn complex_roll_matches_numpy_logical_axes_and_shift_broadcasting() {
             let multi_cases: &[(&[isize], &[isize])] = &[
                 (&[], &[]),
                 (&[], &[0]),
+                (&[], &[-1]),
+                (&[], &[0, 0]),
                 (&[1], &[]),
                 (&[1, 2], &[]),
                 (&[], &[0, 1]),
@@ -455,6 +457,13 @@ fn repetition_resize_and_roll_preserve_real_and_exact_integer_payloads() {
             );
         }
         for (shifts, axes) in [
+            (&[][..], &[][..]),
+            (&[][..], &[0][..]),
+            (&[][..], &[-1][..]),
+            (&[][..], &[0, 0][..]),
+            (&[][..], &[0, 1][..]),
+            (&[1][..], &[][..]),
+            (&[1, 2][..], &[][..]),
             (&[1][..], &[0, 1][..]),
             (&[1, 2][..], &[-1][..]),
             (&[isize::MIN, isize::MAX][..], &[0, 0][..]),

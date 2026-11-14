@@ -44,7 +44,9 @@ fn input_spec(array: &UFuncArray) -> Value {
         json!(
             array
                 .values()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|parts| [parts[0].to_string(), parts[1].to_string()])
                 .collect::<Vec<_>>()
         )
@@ -668,7 +670,9 @@ fn complex_partition_preserves_nan_payloads_and_validates_empty_and_malformed_la
     );
     let pair_bits = |values: &[f64]| {
         let mut pairs: Vec<_> = values
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|parts| (parts[0].to_bits(), parts[1].to_bits()))
             .collect();
         pairs.sort_unstable();

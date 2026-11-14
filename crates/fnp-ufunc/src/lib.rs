@@ -16060,6 +16060,14 @@ impl UFuncArray {
             )
         });
         let Some((s0, a0)) = pairs.next() else {
+            // NumPy accepts an empty shift/axis broadcast for arrays with
+            // dimensions, but its explicit-axis scalar path raises ValueError.
+            // Axis and broadcasting validation above retain their precedence.
+            if logical_shape.is_empty() {
+                return Err(UFuncError::Msg(
+                    "not enough values to unpack (expected 2, got 0)".into(),
+                ));
+            }
             return Ok(self.copy_with_logical_shape(logical_shape));
         };
         let mut current = self.roll(s0, Some(a0 as isize))?;
