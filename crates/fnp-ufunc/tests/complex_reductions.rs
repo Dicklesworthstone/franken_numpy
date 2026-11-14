@@ -2,9 +2,8 @@
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
-    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, UnaryOp, errstate, invert,
-    scimath_log, scimath_log2, scimath_log10, scimath_sqrt, seterrcall,
-    take_float_error_events,
+    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, UnaryOp, errstate, invert, scimath_log,
+    scimath_log2, scimath_log10, scimath_sqrt, seterrcall, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -154,6 +153,21 @@ impl OracleBatch {
         self.actual.push(array.astype_with_casting(dtype, "unsafe"));
     }
 
+    fn push_average(
+        &mut self,
+        array: &UFuncArray,
+        weights: Option<&UFuncArray>,
+        axis: Option<isize>,
+    ) {
+        let input = self.add_input(array);
+        let weights_index = weights.map(|weights| self.add_input(weights));
+        self.cases.push(json!({
+            "input": input, "weights": weights_index, "op": "average",
+            "dtype": null, "axis": axis, "keepdims": false, "ddof": 0,
+        }));
+        self.actual.push(array.average(weights, axis));
+    }
+
     fn push_storage_cast(
         &mut self,
         input: usize,
@@ -206,6 +220,9 @@ for case in payload['cases']:
     try:
         if case['op'] == 'astype':
             result = inputs[case['input']].astype(case['dtype'], casting='unsafe')
+        elif case['op'] == 'average':
+            weights = None if case['weights'] is None else inputs[case['weights']]
+            result = np.asarray(np.average(inputs[case['input']], weights=weights, **kw))
         else:
             result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
         if result.dtype.kind == 'c':
@@ -219,7 +236,7 @@ for case in payload['cases']:
         if case['op'] == 'astype' and result.dtype.kind in 'iu':
             row['integers'] = [str(int(value)) for value in result.ravel()]
         rows.append(row)
-    except (TypeError, ValueError, IndexError) as error:
+    except (TypeError, ValueError, IndexError, ZeroDivisionError) as error:
         rows.append(dict(error=type(error).__name__))
 print(json.dumps(rows))
 "#;
@@ -279,6 +296,25 @@ print(json.dumps(rows))
                 if value.is_nan() && expected.is_nan() {
                     continue;
                 }
+                if case["op"] == "average"
+                    && value.is_finite()
+                    && expected.is_finite()
+                    && expected != 0.0
+                {
+                    // Complex multiplication/division may differ from the
+                    // oracle's SIMD/FMA evaluation by a few component ulps.
+                    // Shape, dtype, zero signs and nonfinite classes stay exact.
+                    let epsilon = match actual.dtype() {
+                        DType::F16 => 2.0_f64.powi(-10),
+                        DType::F32 | DType::Complex64 => f64::from(f32::EPSILON),
+                        _ => f64::EPSILON,
+                    };
+                    assert!(
+                        (value - expected).abs() <= 16.0 * epsilon * expected.abs().max(1.0),
+                        "{case}: component {index}, actual={value:?}, expected={expected:?}"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     value.to_bits(),
                     expected.to_bits(),
@@ -287,6 +323,177 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn weighted_average_promotes_both_operands_and_preserves_logical_axes() {
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let make = |shape: &[usize], dtype: DType, weights: bool| {
+        let count: usize = shape.iter().product();
+        if dtype.is_complex() {
+            let values: Vec<_> = (0..count)
+                .map(|index| {
+                    if weights {
+                        (1.0 + (index % 3) as f64, (index % 2) as f64 * 0.25)
+                    } else {
+                        (
+                            (index % 7) as f64 * 0.5 + 0.25,
+                            (index % 5) as f64 * 0.25 - 0.5,
+                        )
+                    }
+                })
+                .collect();
+            complex_array(shape, &values, dtype)
+        } else {
+            let values = (0..count)
+                .map(|index| {
+                    if weights {
+                        1.0 + (index % 3) as f64
+                    } else {
+                        (index % 7) as f64 * 0.5 + 0.25
+                    }
+                })
+                .collect();
+            UFuncArray::from_storage(
+                shape.to_vec(),
+                ArrayStorage::F64(values).cast_to(dtype).unwrap(),
+            )
+            .unwrap()
+        }
+    };
+    let mut batch = OracleBatch::default();
+    for dtype in dtypes {
+        let input = make(&[2, 3, 2], dtype, false);
+        for weight_dtype in dtypes {
+            let full_weights = make(&[2, 3, 2], weight_dtype, true);
+            for axis in [None, Some(0), Some(1), Some(-1)] {
+                batch.push_average(&input, Some(&full_weights), axis);
+            }
+            for (axis, length) in [(0, 2), (1, 3), (-1, 2)] {
+                let weights = make(&[length], weight_dtype, true);
+                batch.push_average(&input, Some(&weights), Some(axis));
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn weighted_average_validates_shapes_empty_lanes_and_zero_totals() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        for shape in [vec![], vec![0], vec![1], vec![0, 3], vec![2, 0], vec![2, 3]] {
+            let count: usize = shape.iter().product();
+            let input = if dtype.is_complex() {
+                complex_array(&shape, &vec![(2.0, 1.0); count], dtype)
+            } else {
+                UFuncArray::new(shape.clone(), vec![2.0; count], dtype).unwrap()
+            };
+            let weights = UFuncArray::new(shape.clone(), vec![1.0; count], DType::F64).unwrap();
+            let zeros = UFuncArray::new(shape.clone(), vec![0.0; count], DType::F64).unwrap();
+            for axis in [None, Some(0), Some(1), Some(-1), Some(-3)] {
+                batch.push_average(&input, None, axis);
+                batch.push_average(&input, Some(&weights), axis);
+                batch.push_average(&input, Some(&zeros), axis);
+                let wrong_shape =
+                    UFuncArray::new(vec![count], vec![1.0; count], DType::F64).unwrap();
+                batch.push_average(&input, Some(&wrong_shape), axis);
+            }
+            for (axis, &len) in shape.iter().enumerate() {
+                for weight in [0.0, 1.0] {
+                    let vector = UFuncArray::new(vec![len], vec![weight; len], DType::F64).unwrap();
+                    batch.push_average(&input, Some(&vector), Some(axis as isize));
+                }
+            }
+        }
+        let input = complex_array(&[2], &[(1.0, 2.0), (3.0, 4.0)], DType::Complex128);
+        let weights = if dtype.is_complex() {
+            complex_array(&[2], &[(1.0, -2.0), (-1.0, 2.0)], dtype)
+        } else {
+            UFuncArray::new(vec![2], vec![1.0, -1.0], dtype).unwrap()
+        };
+        batch.push_average(&input, Some(&weights), None);
+    }
+    batch.assert_matches_numpy();
+
+    let malformed = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex128).unwrap();
+    let scalar = UFuncArray::scalar(1.0, DType::F64);
+    assert!(malformed.average(Some(&scalar), None).is_err());
+    assert!(scalar.average(Some(&malformed), None).is_err());
+    let huge_empty = complex_array(&[usize::MAX, 0], &[], DType::Complex128);
+    assert!(huge_empty.average(Some(&huge_empty), Some(1)).is_err());
+}
+
+#[test]
+fn weighted_average_preserves_source_precision_exact_integers_and_scaled_division() {
+    let mut batch = OracleBatch::default();
+    let wide = UFuncArray::from_storage(
+        vec![3],
+        ArrayStorage::U64(vec![(1_u64 << 63) + 1025, u64::MAX - 1, (1_u64 << 53) + 1]),
+    )
+    .unwrap();
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        let weights = if dtype.is_complex() {
+            complex_array(&[3], &[(1.0, 0.5), (2.0, 0.0), (3.0, -0.25)], dtype)
+        } else {
+            UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], dtype).unwrap()
+        };
+        batch.push_average(&wide, Some(&weights), None);
+        batch.push_average(&weights, Some(&wide), None);
+    }
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let data = complex_array(
+            &[2],
+            &[(1.0 + 2.0_f64.powi(-24), 1.0e-50), (3.0, 2.0)],
+            dtype,
+        );
+        for scale in [1.0e-20, 1.0e20] {
+            let weights = complex_array(&[2], &[(scale, scale), (scale, -scale * 0.5)], dtype);
+            batch.push_average(&data, Some(&weights), None);
+        }
+    }
+    for dtype in [DType::F16, DType::F32] {
+        let data = UFuncArray::new(vec![3], vec![1.0001, 1.0e-50, 3.12501], dtype).unwrap();
+        let weights = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        batch.push_average(&data, Some(&weights), None);
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn weighted_average_nonfinite_values_keep_complex_components() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for value in [
+            (f64::NAN, 1.0),
+            (1.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (1.0, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (-0.0, -0.0),
+        ] {
+            let data = complex_array(&[2], &[value, (2.0, 3.0)], dtype);
+            let weights = complex_array(&[2], &[(1.0, 0.25), (2.0, -0.5)], dtype);
+            batch.push_average(&data, Some(&weights), None);
+            batch.push_average(&weights, Some(&data), None);
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]
@@ -2875,17 +3082,13 @@ fn nan_reductions_skip_unused_extents_for_empty_outputs() {
             ] {
                 for operation in ["nansum", "nanprod", "nanmean", "nanvar", "nanstd"] {
                     for keepdims in [false, true] {
-                        let result = reduce(
-                            &array,
-                            operation,
-                            dtype,
-                            Some(axis as isize),
-                            keepdims,
-                            1,
-                        )
-                        .unwrap_or_else(|error| {
-                            panic!("{source_dtype:?} {operation} {dtype:?} {shape:?}: {error}")
-                        });
+                        let result =
+                            reduce(&array, operation, dtype, Some(axis as isize), keepdims, 1)
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "{source_dtype:?} {operation} {dtype:?} {shape:?}: {error}"
+                                    )
+                                });
                         let expected_dtype = dtype.unwrap_or_else(|| {
                             if matches!(operation, "nanvar" | "nanstd") {
                                 match source_dtype {

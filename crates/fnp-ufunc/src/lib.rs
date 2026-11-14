@@ -27360,68 +27360,176 @@ impl UFuncArray {
 
     /// Weighted average of array elements.
     ///
-    /// Mimics `np.average(a, weights=w)`. If `weights` is None, returns the mean.
+    /// Weights may have the same logical shape as the input, or be a vector
+    /// along the selected axis. The result dtype accounts for both operands,
+    /// with at least float64 precision for integral inputs. Complex weights
+    /// multiply complete elements without conjugation. A zero weight total in
+    /// any output lane is an error, even when its weighted numerator is zero.
     pub fn average(&self, weights: Option<&Self>, axis: Option<isize>) -> Result<Self, UFuncError> {
-        match weights {
-            None => self.reduce_mean(axis, false),
-            Some(w) => {
-                match axis {
-                    None => {
-                        if w.values.len() != self.values.len() {
-                            return Err(UFuncError::InvalidInputLength {
-                                expected: self.values.len(),
-                                actual: w.values.len(),
-                            });
-                        }
-                        let wsum: f64 = self
-                            .values
-                            .iter()
-                            .zip(w.values.iter())
-                            .map(|(&a, &b)| a * b)
-                            .sum();
-                        let wtot: f64 = w.values.iter().sum();
-                        Ok(Self::scalar(
-                            wsum / wtot,
-                            promote_for_mean_reduction(self.dtype),
-                        ))
-                    }
-                    Some(ax) => {
-                        let ax = normalize_axis(ax, self.shape.len())?;
-                        let axis_len = self.shape[ax];
-                        if w.values.len() != axis_len {
-                            return Err(UFuncError::InvalidInputLength {
-                                expected: axis_len,
-                                actual: w.values.len(),
-                            });
-                        }
-                        // Multiply each lane element by its weight, sum, divide by weight total
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..])
-                            .map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax])
-                            .map_err(UFuncError::Shape)?;
-                        let wtot: f64 = w.values.iter().sum();
-                        let out_shape = reduced_shape(&self.shape, ax, false);
-                        let mut values = Vec::with_capacity(outer * inner);
-
-                        for o in 0..outer {
-                            for i in 0..inner {
-                                let mut wsum = 0.0;
-                                for k in 0..axis_len {
-                                    let idx = o * axis_len * inner + k * inner + i;
-                                    wsum += self.values[idx] * w.values[k];
-                                }
-                                values.push(wsum / wtot);
-                            }
-                        }
-                        Ok(Self {
-                            shape: out_shape,
-                            values,
-                            dtype: promote_for_mean_reduction(self.dtype),
-                            integer_sidecar: None,
-                        })
-                    }
-                }
+        let shape = self.complex_logical_shape("average")?;
+        // Unlike mean's scalar ufunc shortcut, average normalizes its axis
+        // before doing either the weighted or unweighted calculation.
+        let normalized_axis = axis
+            .map(|axis| normalize_axis(axis, shape.len()))
+            .transpose()?;
+        let axes: Vec<isize> = normalized_axis.map_or_else(
+            || (0..shape.len()).map(|axis| axis as isize).collect(),
+            |axis| vec![axis as isize],
+        );
+        let Some(weights) = weights else {
+            let mean = self.reduce_mean(axis, false)?;
+            // NumPy also constructs the (possibly unreturned) weight count.
+            // Its input-size/output-size division fails for an empty output.
+            if mean.values.is_empty() {
+                return Err(UFuncError::Msg("average: division by zero".to_string()));
             }
+            return Ok(mean);
+        };
+        let weight_shape = weights.complex_logical_shape("average")?;
+        let same_shape = weight_shape == shape;
+        if !same_shape {
+            let Some(axis) = normalized_axis else {
+                return Err(UFuncError::Msg(
+                    "average: axis must be specified when shapes of input and weights differ"
+                        .to_string(),
+                ));
+            };
+            if weight_shape != [shape[axis]] {
+                return Err(UFuncError::Msg(
+                    "average: shape of weights must match the selected axis".to_string(),
+                ));
+            }
+        }
+        for operand in [self, weights] {
+            if !(operand.dtype.is_numeric() || operand.dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "average: unsupported input dtype {:?}",
+                    operand.dtype
+                )));
+            }
+        }
+        let mut dtype = promote(self.dtype, weights.dtype);
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            dtype = promote(dtype, DType::F64);
+        }
+        // Check the reduction's output capacity before constructing any
+        // intermediates, including enormous shapes containing an empty axis.
+        let plan = AxesReductionPlan::new(&shape, &axes, false)?;
+        plan.output_count
+            .checked_mul(if dtype.is_complex() { 2 } else { 1 })
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+
+        // The original typed source is converted directly: an exact uint64
+        // sidecar or a source-rounded complex64 must not pass through raw f64
+        // working cells before multiplication or weight accumulation.
+        let totals = if same_shape {
+            weights.reduce_sum_axes_with_dtype(&axes, false, dtype)?
+        } else {
+            weights.reduce_sum_with_dtype(None, false, dtype)?
+        };
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        if totals
+            .values
+            .chunks_exact(components)
+            .any(|value| value[0] == 0.0 && (components == 1 || value[1] == 0.0))
+        {
+            return Err(UFuncError::Msg(
+                "average: weights sum to zero, cannot be normalized".to_string(),
+            ));
+        }
+
+        let data = self.cast_numeric_storage(dtype, false)?;
+        let weights = weights.cast_numeric_storage(dtype, false)?;
+        let inner = if same_shape || data.values.is_empty() {
+            1
+        } else {
+            element_count(&shape[normalized_axis.expect("vector weights have an axis") + 1..])
+                .map_err(UFuncError::Shape)?
+        };
+        let mut products = try_zeroed_f64(data.values.len(), "average")?;
+        for (index, output) in products.chunks_exact_mut(components).enumerate() {
+            let weight_index = if same_shape {
+                index
+            } else {
+                (index / inner) % weight_shape[0]
+            };
+            if dtype.is_complex() {
+                let value = Self::complex_reduction_multiply(
+                    data.logical_complex_value(index),
+                    weights.logical_complex_value(weight_index),
+                    dtype,
+                );
+                output.copy_from_slice(&[value.0, value.1]);
+            } else {
+                let (a, w) = (data.values[index], weights.values[weight_index]);
+                output[0] = match dtype {
+                    DType::F16 => f16::from_f32((a as f32) * (w as f32)).to_f64(),
+                    DType::F32 => f64::from((a as f32) * (w as f32)),
+                    _ => a * w,
+                };
+            }
+        }
+        let products = Self::new(data.shape, products, dtype)?;
+        let mut numerator = products.reduce_sum_axes_with_dtype(&axes, false, dtype)?;
+        for (index, value) in numerator.values.chunks_exact_mut(components).enumerate() {
+            let total_index = if same_shape { index } else { 0 };
+            if dtype.is_complex() {
+                let quotient = Self::complex_average_quotient(
+                    (value[0], value[1]),
+                    totals.logical_complex_value(total_index),
+                    dtype,
+                );
+                value.copy_from_slice(&[quotient.0, quotient.1]);
+            } else {
+                let total = totals.values[total_index];
+                value[0] = match dtype {
+                    DType::F16 => f16::from_f32((value[0] as f32) / (total as f32)).to_f64(),
+                    DType::F32 => f64::from((value[0] as f32) / (total as f32)),
+                    _ => value[0] / total,
+                };
+            }
+        }
+        Ok(numerator)
+    }
+
+    /// Ratio scaling avoids squaring the complex denominator, which would
+    /// overflow or underflow for otherwise ordinary weighted averages.
+    fn complex_average_quotient(
+        numerator: (f64, f64),
+        denominator: (f64, f64),
+        dtype: DType,
+    ) -> (f64, f64) {
+        macro_rules! divide {
+            ($numerator:expr, $denominator:expr) => {{
+                let (ar, ai) = $numerator;
+                let (br, bi) = $denominator;
+                let (real, imaginary) = if br.abs() >= bi.abs() {
+                    let ratio = bi / br;
+                    let reciprocal = 1.0 / (br + bi * ratio);
+                    (
+                        (ar + ai * ratio) * reciprocal,
+                        (ai - ar * ratio) * reciprocal,
+                    )
+                } else {
+                    let ratio = br / bi;
+                    let reciprocal = 1.0 / (bi + br * ratio);
+                    (
+                        (ar * ratio + ai) * reciprocal,
+                        (ai * ratio - ar) * reciprocal,
+                    )
+                };
+                (real, imaginary)
+            }};
+        }
+        if dtype == DType::Complex64 {
+            let (real, imaginary) = divide!(
+                (numerator.0 as f32, numerator.1 as f32),
+                (denominator.0 as f32, denominator.1 as f32)
+            );
+            (f64::from(real), f64::from(imaginary))
+        } else {
+            divide!(numerator, denominator)
         }
     }
 
