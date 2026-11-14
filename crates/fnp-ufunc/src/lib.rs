@@ -24233,7 +24233,10 @@ impl UFuncArray {
 
     /// `np.isclose` with explicit `equal_nan` parameter.
     ///
-    /// When `equal_nan` is true, NaN values in the same position are considered close.
+    /// Complex inputs are compared by the magnitude of their difference, with
+    /// one Boolean per logical element. A NaN in either component makes the
+    /// whole element a NaN for `equal_nan`. The reference operand determines
+    /// the precision of the tolerance calculation, as in NumPy.
     pub fn isclose_equal_nan(
         &self,
         other: &Self,
@@ -24241,34 +24244,118 @@ impl UFuncArray {
         atol: f64,
         equal_nan: bool,
     ) -> Result<Self, UFuncError> {
-        let out_shape = broadcast_shape(&self.shape, &other.shape).map_err(UFuncError::Shape)?;
-        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let lhs_shape = self.complex_logical_shape("isclose")?;
+        let rhs_shape = other.complex_logical_shape("isclose")?;
+        if !(self.dtype.is_numeric() || self.dtype == DType::Bool)
+            || !(other.dtype.is_numeric() || other.dtype == DType::Bool)
+        {
+            return Err(UFuncError::Msg("isclose: inputs must be numeric".into()));
+        }
+        let out_shape = broadcast_shape(&lhs_shape, &rhs_shape).map_err(UFuncError::Shape)?;
+        let out_count = if out_shape.contains(&0) {
+            0
+        } else {
+            element_count(&out_shape).map_err(UFuncError::Shape)?
+        };
+        let mut out_values = try_zeroed_f64(out_count, "isclose")?;
+        if out_count == 0 {
+            return Ok(Self {
+                shape: out_shape,
+                values: out_values,
+                dtype: DType::Bool,
+                integer_sidecar: None,
+            });
+        }
 
-        let lhs_strides = contiguous_strides_elems(&self.shape);
-        let rhs_strides = contiguous_strides_elems(&other.shape);
+        // NumPy first converts an integral reference operand to float64, then
+        // promotes subtraction/equality against that inexact dtype. Preserve
+        // the source's typed values before promotion, including wide-integer
+        // sidecars and raw working cells declared as float16/32 or complex64.
+        let reference_dtype = if other.dtype.is_float() {
+            other.dtype
+        } else {
+            DType::F64
+        };
+        let calculation_dtype = promote(self.dtype, reference_dtype);
+        let lhs = if self.dtype == calculation_dtype
+            && matches!(calculation_dtype, DType::F64 | DType::Complex128)
+        {
+            std::borrow::Cow::Borrowed(self)
+        } else {
+            std::borrow::Cow::Owned(self.cast_numeric_storage(calculation_dtype, false)?)
+        };
+        let rhs = if other.dtype == calculation_dtype
+            && matches!(calculation_dtype, DType::F64 | DType::Complex128)
+        {
+            std::borrow::Cow::Borrowed(other)
+        } else {
+            std::borrow::Cow::Owned(other.cast_numeric_storage(calculation_dtype, false)?)
+        };
+        let lhs_strides = contiguous_strides_elems(&lhs_shape);
+        let rhs_strides = contiguous_strides_elems(&rhs_shape);
         let lhs_axis_steps =
-            aligned_broadcast_axis_steps(out_shape.len(), &self.shape, &lhs_strides);
+            aligned_broadcast_axis_steps(out_shape.len(), &lhs_shape, &lhs_strides);
         let rhs_axis_steps =
-            aligned_broadcast_axis_steps(out_shape.len(), &other.shape, &rhs_strides);
+            aligned_broadcast_axis_steps(out_shape.len(), &rhs_shape, &rhs_strides);
 
         let mut out_multi = vec![0usize; out_shape.len()];
         let mut lhs_flat = 0usize;
         let mut rhs_flat = 0usize;
-        let mut out_values = Vec::with_capacity(out_count);
-
-        for flat in 0..out_count {
-            let a = self.values[lhs_flat];
-            let b = other.values[rhs_flat];
-
-            let is_close = if a.is_nan() || b.is_nan() {
-                equal_nan && a.is_nan() && b.is_nan()
-            } else if a.is_infinite() || b.is_infinite() {
-                a == b
-            } else {
-                (a - b).abs() <= (atol + rtol * b.abs())
+        for (flat, output) in out_values.iter_mut().enumerate() {
+            let a = lhs.logical_complex_value(lhs_flat);
+            let b = rhs.logical_complex_value(rhs_flat);
+            let difference = match calculation_dtype {
+                DType::F16 => (fnp_dtype::f16_from_f64(a.0 - b.0).to_f64(), 0.0),
+                DType::F32 | DType::Complex64 => (
+                    f64::from((a.0 as f32) - (b.0 as f32)),
+                    f64::from((a.1 as f32) - (b.1 as f32)),
+                ),
+                _ => (a.0 - b.0, a.1 - b.1),
             };
-
-            out_values.push(if is_close { 1.0 } else { 0.0 });
+            let distance = if out_shape.is_empty() {
+                // Subtracting two 0-D ndarrays produces a NumPy scalar.
+                // Python's abs(complex scalar) uses libc hypot, whereas
+                // abs(ndarray) below enters NumPy's scaled SIMD loop.
+                match calculation_dtype {
+                    DType::Complex64 => f64::from((difference.0 as f32).hypot(difference.1 as f32)),
+                    DType::Complex128 => difference.0.hypot(difference.1),
+                    _ => difference.0.abs(),
+                }
+            } else {
+                Self::isclose_magnitude(difference, calculation_dtype)
+            };
+            let reference = Self::isclose_magnitude(b, reference_dtype);
+            // Tolerances are Python-style weak scalars. Round their conversion,
+            // multiplication, and addition separately in the reference's real
+            // component dtype; widening the entire expression changes boundary
+            // decisions for float16, float32, and complex64 inputs.
+            let tolerance = match reference_dtype {
+                DType::F16 => {
+                    let relative = fnp_dtype::f16_from_f64(rtol).to_f32();
+                    let absolute = fnp_dtype::f16_from_f64(atol).to_f32();
+                    let product = f16::from_f32(relative * reference as f32).to_f32();
+                    f16::from_f32(absolute + product).to_f64()
+                }
+                DType::F32 | DType::Complex64 => {
+                    let product = (rtol as f32) * (reference as f32);
+                    f64::from((atol as f32) + product)
+                }
+                _ => atol + rtol * reference,
+            };
+            let equal = a.0 == b.0 && a.1 == b.1;
+            let reference_finite = b.0.is_finite() && b.1.is_finite();
+            let both_nan = (a.0.is_nan() || a.1.is_nan()) && (b.0.is_nan() || b.1.is_nan());
+            // Exact equality is an independent alternative: negative or NaN
+            // tolerances cannot make equal finite values or infinities unequal.
+            // Only the reference must be finite for the tolerance comparison.
+            *output = if equal
+                || (reference_finite && distance <= tolerance)
+                || (equal_nan && both_nan)
+            {
+                1.0
+            } else {
+                0.0
+            };
 
             if flat + 1 == out_count || out_shape.is_empty() {
                 continue;
@@ -24295,6 +24382,44 @@ impl UFuncArray {
             dtype: DType::Bool,
             integer_sidecar: None,
         })
+    }
+
+    fn isclose_magnitude(value: (f64, f64), dtype: DType) -> f64 {
+        if !dtype.is_complex() {
+            return value.0.abs();
+        }
+        // NumPy's contiguous complex-absolute loop evaluates a scaled norm,
+        // including its partial SIMD tail. libc hypot is more accurate in some
+        // cells but can differ by one ULP, changing a Boolean at the tolerance
+        // boundary. Use the same source-typed stages and default FMA dispatch.
+        if value.0.is_infinite() || value.1.is_infinite() {
+            return f64::INFINITY;
+        }
+        if value.0.is_nan() || value.1.is_nan() {
+            return f64::NAN;
+        }
+        let larger = value.0.abs().max(value.1.abs());
+        let smaller = value.0.abs().min(value.1.abs());
+        if larger == 0.0 {
+            return 0.0;
+        }
+        if dtype == DType::Complex64 {
+            let ratio = (smaller as f32) / (larger as f32);
+            let squared = if Self::complex_multiply_uses_fma() {
+                ratio.mul_add(ratio, 1.0)
+            } else {
+                ratio * ratio + 1.0
+            };
+            f64::from(squared.sqrt() * larger as f32)
+        } else {
+            let ratio = smaller / larger;
+            let squared = if Self::complex_multiply_uses_fma() {
+                ratio.mul_add(ratio, 1.0)
+            } else {
+                ratio * ratio + 1.0
+            };
+            squared.sqrt() * larger
+        }
     }
 
     /// Returns true if two arrays are element-wise equal within tolerance (np.allclose).
