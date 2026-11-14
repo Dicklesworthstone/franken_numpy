@@ -13123,7 +13123,7 @@ impl UFuncArray {
     ///
     /// Mimics `np.vsplit(a, sections)`.
     pub fn vsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
-        if self.shape.len() < 2 {
+        if self.complex_logical_shape("vsplit")?.len() < 2 {
             return Err(UFuncError::Msg(
                 "vsplit only works on arrays of 2 or more dimensions".to_string(),
             ));
@@ -13135,7 +13135,7 @@ impl UFuncArray {
     ///
     /// Mimics `np.hsplit(a, sections)`.
     pub fn hsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
-        match self.shape.len() {
+        match self.complex_logical_shape("hsplit")?.len() {
             0 => Err(UFuncError::Msg(
                 "hsplit only works on arrays of 1 or more dimensions".to_string(),
             )),
@@ -13148,7 +13148,7 @@ impl UFuncArray {
     ///
     /// Mimics `np.dsplit(a, sections)`.
     pub fn dsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
-        if self.shape.len() < 3 {
+        if self.complex_logical_shape("dsplit")?.len() < 3 {
             return Err(UFuncError::Msg(
                 "dsplit only works on arrays of 3 or more dimensions".to_string(),
             ));
@@ -13163,42 +13163,19 @@ impl UFuncArray {
         if arrays.is_empty() {
             return Ok(Vec::new());
         }
-        // Compute common broadcast shape
-        let mut shape = arrays[0].shape.clone();
+        // Resolve only logical axes: complex component storage is not a
+        // dimension against which a real or differently ranked input broadcasts.
+        let mut shape = arrays[0].complex_logical_shape("broadcast_arrays")?;
         for arr in &arrays[1..] {
-            shape = broadcast_shape(&shape, &arr.shape).map_err(UFuncError::Shape)?;
+            let input_shape = arr.complex_logical_shape("broadcast_arrays")?;
+            shape = broadcast_shape(&shape, &input_shape).map_err(UFuncError::Shape)?;
         }
-        // Broadcast each array to the common shape
-        let out_count = element_count(&shape).map_err(UFuncError::Shape)?;
-        let ndim = shape.len();
-        let mut result = Vec::with_capacity(arrays.len());
-        for arr in arrays {
-            let arr_ndim = arr.shape.len();
-            let arr_strides = contiguous_strides_elems(&arr.shape);
-            let steps = aligned_broadcast_axis_steps(ndim, &arr.shape, &arr_strides);
-            let out_strides = c_strides_elems(&shape);
-            let mut values = Vec::with_capacity(out_count);
-            let mut source_indices = Vec::with_capacity(out_count);
-            for flat in 0..out_count {
-                let mut src_idx = 0usize;
-                for d in 0..ndim {
-                    let coord = (flat / out_strides[d]) % shape[d];
-                    let offset = ndim - arr_ndim;
-                    if d >= offset && arr.shape[d - offset] > 1 {
-                        src_idx += coord * steps[d];
-                    }
-                }
-                values.push(arr.values[src_idx]);
-                source_indices.push(src_idx);
-            }
-            result.push(Self {
-                shape: shape.clone(),
-                values,
-                dtype: arr.dtype,
-                integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
-            });
-        }
-        Ok(result)
+        // Each input retains its own dtype and exact integer payload. Reuse
+        // broadcast_to's paired copies, allocation checks, and parallel kernels.
+        arrays
+            .iter()
+            .map(|array| array.broadcast_to(&shape))
+            .collect()
     }
 
     /// Trim leading and trailing zeros from a 1-D array (default: both ends).
@@ -15614,40 +15591,20 @@ impl UFuncArray {
     /// For a shape `[a, b, c]` array unstacked along axis=1, returns `b` arrays
     /// each of shape `[a, c]`.
     pub fn unstack(&self, axis: isize) -> Result<Vec<Self>, UFuncError> {
-        let ndim = self.shape.len();
-        if ndim == 0 {
+        let shape = self.complex_logical_shape("unstack")?;
+        if shape.is_empty() {
             return Err(UFuncError::Msg(
                 "unstack: cannot unstack a scalar".to_string(),
             ));
         }
-        let axis = normalize_axis(axis, ndim)?;
-        let axis_len = self.shape[axis];
-        let mut out_shape: Vec<usize> = self.shape.clone();
-        out_shape.remove(axis);
-        let out_count: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
-
-        let outer: usize =
-            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
-        let inner: usize =
-            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-
-        let mut result = Vec::with_capacity(axis_len);
-        for k in 0..axis_len {
-            let mut values = Vec::with_capacity(out_count);
-            let mut source_indices = Vec::with_capacity(out_count);
-            for o in 0..outer {
-                for i in 0..inner {
-                    let src_flat = o * axis_len * inner + k * inner + i;
-                    values.push(self.values[src_flat]);
-                    source_indices.push(src_flat);
-                }
-            }
-            result.push(Self {
-                shape: out_shape.clone(),
-                values,
-                dtype: self.dtype,
-                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-            });
+        let ax = normalize_axis(axis, shape.len())?;
+        let axis_len = shape[ax];
+        if axis_len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut result = self.array_split(axis_len, axis)?;
+        for part in &mut result {
+            part.shape.remove(ax);
         }
         Ok(result)
     }
@@ -15656,7 +15613,8 @@ impl UFuncArray {
 
     /// Split an array into sub-arrays along an axis.
     pub fn split(&self, sections: usize, axis: isize) -> Result<Vec<Self>, UFuncError> {
-        if self.shape.is_empty() {
+        let shape = self.complex_logical_shape("split")?;
+        if shape.is_empty() {
             return Err(UFuncError::Msg("cannot split scalar array".to_string()));
         }
         if sections == 0 {
@@ -15664,44 +15622,14 @@ impl UFuncArray {
                 "number sections must be larger than 0.".to_string(),
             ));
         }
-        let axis = normalize_axis(axis, self.shape.len())?;
-        let axis_len = self.shape[axis];
+        let ax = normalize_axis(axis, shape.len())?;
+        let axis_len = shape[ax];
         if !axis_len.is_multiple_of(sections) {
             return Err(UFuncError::Msg(format!(
                 "array split does not result in an equal division: {axis_len} into {sections}"
             )));
         }
-        let chunk = axis_len / sections;
-        let inner: usize =
-            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-        let outer: usize =
-            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
-
-        let mut result = Vec::with_capacity(sections);
-        for s in 0..sections {
-            let mut sub_shape = self.shape.clone();
-            sub_shape[axis] = chunk;
-            let count = element_count(&sub_shape).map_err(UFuncError::Shape)?;
-            let mut values = vec![0.0f64; count];
-            let mut source_indices = Vec::with_capacity(count);
-            for o in 0..outer {
-                for k in 0..chunk {
-                    let src_k = s * chunk + k;
-                    for i in 0..inner {
-                        let src_idx = o * axis_len * inner + src_k * inner + i;
-                        values[o * chunk * inner + k * inner + i] = self.values[src_idx];
-                        source_indices.push(src_idx);
-                    }
-                }
-            }
-            result.push(Self {
-                shape: sub_shape,
-                values,
-                dtype: self.dtype,
-                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-            });
-        }
-        Ok(result)
+        self.array_split(sections, axis)
     }
 
     /// Split at specific indices along an axis (np.split with indices_or_sections as array).
@@ -15709,7 +15637,8 @@ impl UFuncArray {
     /// Unlike equal-section `split`, this splits at the given indices.
     /// For indices `[2, 5]` along axis 0, produces sub-arrays `[0:2]`, `[2:5]`, `[5:]`.
     pub fn split_at(&self, indices: &[usize], axis: isize) -> Result<Vec<Self>, UFuncError> {
-        let ax = normalize_axis(axis, self.shape.len())?;
+        let shape = self.complex_logical_shape("split_at")?;
+        let ax = normalize_axis(axis, shape.len())?;
         self.array_split_at_indices(indices, ax)
     }
 
@@ -39179,7 +39108,8 @@ impl UFuncArray {
     /// The first `axis_len % sections` sub-arrays have size `axis_len / sections + 1`,
     /// the rest have size `axis_len / sections`.
     pub fn array_split(&self, sections: usize, axis: isize) -> Result<Vec<Self>, UFuncError> {
-        if self.shape.is_empty() {
+        let shape = self.complex_logical_shape("array_split")?;
+        if shape.is_empty() {
             return Err(UFuncError::Msg("cannot split scalar array".to_string()));
         }
         if sections == 0 {
@@ -39187,13 +39117,16 @@ impl UFuncArray {
                 "number sections must be larger than 0.".to_string(),
             ));
         }
-        let axis = normalize_axis(axis, self.shape.len())?;
-        let axis_len = self.shape[axis];
+        let axis = normalize_axis(axis, shape.len())?;
+        let axis_len = shape[axis];
         let base_size = axis_len / sections;
         let remainder = axis_len % sections;
 
         // Build internal split indices (not including 0 and end)
-        let mut split_indices = Vec::with_capacity(sections - 1);
+        let mut split_indices = Vec::new();
+        split_indices.try_reserve_exact(sections - 1).map_err(|_| {
+            UFuncError::Msg("array_split: unable to allocate section boundaries".to_string())
+        })?;
         let mut pos = 0;
         for s in 0..sections - 1 {
             pos += if s < remainder {
@@ -39216,47 +39149,96 @@ impl UFuncArray {
         indices: &[usize],
         axis: usize,
     ) -> Result<Vec<Self>, UFuncError> {
-        if self.shape.is_empty() {
+        let shape = self.complex_logical_shape("array_split")?;
+        if shape.is_empty() {
             return Err(UFuncError::Msg("cannot split scalar array".to_string()));
         }
-        let axis_len = self.shape[axis];
-        let inner: usize =
-            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-        let outer: usize =
-            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+        let axis_len = *shape.get(axis).ok_or(UFuncError::AxisOutOfBounds {
+            axis: isize::try_from(axis).unwrap_or(isize::MAX),
+            ndim: shape.len(),
+        })?;
+        // An empty array needs only the output shapes. Avoid forming unused
+        // strides, which may overflow for otherwise valid zero-sized arrays.
+        let (outer, inner) = if self.values.is_empty() {
+            (0, 0)
+        } else {
+            (
+                element_count(&shape[..axis]).map_err(UFuncError::Shape)?,
+                element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+            )
+        };
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let physical_inner = inner
+            .checked_mul(width)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
 
-        // Build boundary pairs: [0, idx0, idx1, ..., axis_len]
-        let mut bounds = Vec::with_capacity(indices.len() + 2);
-        bounds.push(0usize);
-        for &idx in indices {
-            bounds.push(idx.min(axis_len));
+        // Copy contiguous rows for both working cells and exact integer
+        // sidecars. A complex row includes its component axis, so every copied
+        // range starts and ends on a complete element, without an index buffer.
+        fn copy_rows<T: Copy>(
+            source: &[T],
+            axis_len: usize,
+            outer: usize,
+            inner: usize,
+            start: usize,
+            chunk: usize,
+        ) -> Result<Vec<T>, UFuncError> {
+            let row_len = chunk
+                .checked_mul(inner)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            let count = outer
+                .checked_mul(row_len)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            let mut values = Vec::new();
+            if count == 0 {
+                return Ok(values);
+            }
+            values.try_reserve_exact(count).map_err(|_| {
+                UFuncError::Msg("array_split: unable to allocate output array".to_string())
+            })?;
+            for row in 0..outer {
+                let offset = (row * axis_len + start) * inner;
+                values.extend_from_slice(&source[offset..offset + row_len]);
+            }
+            Ok(values)
         }
-        bounds.push(axis_len);
 
-        let mut result = Vec::with_capacity(bounds.len() - 1);
-        for w in bounds.windows(2) {
-            let start = w[0];
-            let end = w[1];
+        let sections = indices
+            .len()
+            .checked_add(1)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut result = Vec::new();
+        result.try_reserve_exact(sections).map_err(|_| {
+            UFuncError::Msg("array_split: unable to allocate output sections".to_string())
+        })?;
+        let mut start = 0;
+        for end in indices
+            .iter()
+            .map(|&index| index.min(axis_len))
+            .chain(std::iter::once(axis_len))
+        {
             let chunk = end.saturating_sub(start);
             let mut sub_shape = self.shape.clone();
             sub_shape[axis] = chunk;
-            let count = element_count(&sub_shape).map_err(UFuncError::Shape)?;
-            let mut values = vec![0.0f64; count];
-            for o in 0..outer {
-                for k in 0..chunk {
-                    let src_k = start + k;
-                    for i in 0..inner {
-                        values[o * chunk * inner + k * inner + i] =
-                            self.values[o * axis_len * inner + src_k * inner + i];
-                    }
-                }
-            }
-            result.push(Self {
+            let values = copy_rows(&self.values, axis_len, outer, physical_inner, start, chunk)?;
+            let integer_sidecar = match &self.integer_sidecar {
+                Some(IntegerSidecar::I64(source)) => Some(IntegerSidecar::I64(copy_rows(
+                    source, axis_len, outer, inner, start, chunk,
+                )?)),
+                Some(IntegerSidecar::U64(source)) => Some(IntegerSidecar::U64(copy_rows(
+                    source, axis_len, outer, inner, start, chunk,
+                )?)),
+                None => None,
+            };
+            let mut part = Self {
                 shape: sub_shape,
                 values,
                 dtype: self.dtype,
-                integer_sidecar: None,
-            });
+                integer_sidecar,
+            };
+            part.round_complex_transform_components();
+            result.push(part);
+            start = end;
         }
         Ok(result)
     }
