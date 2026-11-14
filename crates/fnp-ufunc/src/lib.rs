@@ -26929,20 +26929,22 @@ impl UFuncArray {
 
     /// Compute gradient with full options (np.gradient).
     ///
-    /// - `axis`: axis along which to compute gradient (None = default).
+    /// - `axis`: logical axis along which to compute gradient (None = axis 0).
     /// - `edge_order`: 1 (first-order) or 2 (second-order one-sided at edges).
     /// - `spacing`: optional coordinate array for non-uniform spacing.
+    ///
+    /// Floating and complex inputs retain their dtype; integer inputs are
+    /// converted to float64 before subtraction. Coordinate arrays have float64
+    /// dtype, including when their differences describe uniform spacing.
     pub fn gradient_advanced(
         &self,
         axis: Option<isize>,
         edge_order: usize,
         spacing: Option<&[f64]>,
     ) -> Result<Self, UFuncError> {
-        let ax = match axis {
-            None => 0,
-            Some(a) => normalize_axis(a, self.shape.len())?,
-        };
-        let n = self.shape[ax];
+        let shape = self.complex_logical_shape("gradient")?;
+        let ax = normalize_axis(axis.unwrap_or(0), shape.len())?;
+        let n = shape[ax];
         if n < 2 {
             return Err(UFuncError::Msg(
                 "gradient: need at least 2 elements along axis".to_string(),
@@ -26967,95 +26969,229 @@ impl UFuncArray {
                 n
             )));
         }
-        let strides = c_strides_elems(&self.shape);
-        let total: usize = fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
-        let out_strides = c_strides_elems(&self.shape);
-        // Each output element is a pure function of `flat` (reads strided neighbours of
-        // the input, no shared state), so an indexed parallel map over the flat range is
-        // bit-for-bit identical to the serial loop for any thread count. The previous
-        // form ran fully serial.
-        let compute = |flat: usize| -> f64 {
-            let mut rem = flat;
-            let mut k_val = 0usize;
-            for (d, &stride) in out_strides.iter().enumerate() {
-                let coord = rem / stride;
-                rem %= stride;
-                if d == ax {
-                    k_val = coord;
-                }
+        let step = spacing.map_or(1.0, |coords| coords[1] - coords[0]);
+        let uniform =
+            spacing.is_none_or(|coords| coords.windows(2).all(|pair| pair[1] - pair[0] == step));
+        if !self.dtype.is_numeric() && self.dtype != DType::Bool {
+            return Err(UFuncError::TypeResolutionInvalid {
+                detail: "gradient requires real or complex numeric input".into(),
+            });
+        }
+        if self.dtype == DType::Bool && (uniform || edge_order == 1) {
+            return Err(UFuncError::TypeResolutionInvalid {
+                detail: "Boolean subtraction is not supported in gradient".into(),
+            });
+        }
+        let promote_input = self.dtype.is_integer() || self.dtype == DType::Bool;
+        let dtype = if promote_input {
+            DType::F64
+        } else {
+            self.dtype
+        };
+        // Cast integer sources once, preserving exact sidecars until conversion.
+        // Narrow floating sources can instead be read at their declared precision
+        // directly from the existing buffer, with no additional full-array copy.
+        // Boolean input is valid only for entirely weighted stencils, which
+        // multiply normalized truth values without Boolean subtraction.
+        let converted = promote_input.then(|| self.astype(DType::F64));
+        let source = converted.as_ref().unwrap_or(self);
+        let mut values = try_zeroed_f64(source.values.len(), "gradient")?;
+        if values.is_empty() {
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values,
+                dtype,
+                integer_sidecar: None,
+            });
+        }
+        let width = if dtype.is_complex() { 2 } else { 1 };
+        let inner = element_count(&shape[ax + 1..]).map_err(UFuncError::Shape)?;
+        // A supplied float64 coordinate array produces strong float64 scalars
+        // or coefficient arrays. Omitted spacing uses weak Python scalars, so
+        // each intermediate stays at the input's own floating precision.
+        let calculation_dtype = if spacing.is_none() {
+            dtype
+        } else if dtype.is_complex() {
+            DType::Complex128
+        } else {
+            DType::F64
+        };
+        let round = |value: f64| match dtype {
+            DType::F16 => f16::from_f64(value).to_f64(),
+            DType::F32 | DType::Complex64 => f64::from(value as f32),
+            _ => value,
+        };
+        let subtract = |left: (f64, f64), right: (f64, f64)| {
+            (
+                Self::gradient_real_binary(left.0, right.0, dtype, BinaryOp::Sub),
+                Self::gradient_real_binary(left.1, right.1, dtype, BinaryOp::Sub),
+            )
+        };
+        let scale = |coefficient: f64, value: (f64, f64)| {
+            if dtype.is_complex() {
+                Self::complex_reduction_multiply((coefficient, 0.0), value, calculation_dtype)
+            } else {
+                (
+                    Self::gradient_real_binary(
+                        coefficient,
+                        value.0,
+                        calculation_dtype,
+                        BinaryOp::Mul,
+                    ),
+                    0.0,
+                )
             }
-            let base = flat - k_val * strides[ax];
-            let f = |k: usize| self.values[base + k * strides[ax]];
-
-            if let Some(coords) = spacing {
-                // Non-uniform spacing
-                if k_val == 0 {
-                    if edge_order == 2 {
-                        // Second-order one-sided (3-point) with non-uniform spacing
-                        let h0 = coords[1] - coords[0];
-                        let h1 = coords[2] - coords[1];
-                        let a_coeff = -(2.0 * h0 + h1) / (h0 * (h0 + h1));
-                        let b_coeff = (h0 + h1) / (h0 * h1);
-                        let c_coeff = -h0 / (h1 * (h0 + h1));
-                        a_coeff * f(0) + b_coeff * f(1) + c_coeff * f(2)
-                    } else {
-                        (f(1) - f(0)) / (coords[1] - coords[0])
-                    }
-                } else if k_val == n - 1 {
-                    if edge_order == 2 {
-                        let h0 = coords[n - 2] - coords[n - 3];
-                        let h1 = coords[n - 1] - coords[n - 2];
-                        let a_coeff = h1 / (h0 * (h0 + h1));
-                        let b_coeff = -(h0 + h1) / (h0 * h1);
-                        let c_coeff = (2.0 * h1 + h0) / (h1 * (h0 + h1));
-                        a_coeff * f(n - 3) + b_coeff * f(n - 2) + c_coeff * f(n - 1)
-                    } else {
-                        (f(n - 1) - f(n - 2)) / (coords[n - 1] - coords[n - 2])
-                    }
+        };
+        let add = |left: (f64, f64), right: (f64, f64)| {
+            if dtype.is_complex() {
+                Self::complex_reduction_add(left, right, calculation_dtype)
+            } else {
+                (
+                    Self::gradient_real_binary(left.0, right.0, calculation_dtype, BinaryOp::Add),
+                    0.0,
+                )
+            }
+        };
+        let divide = |numerator: (f64, f64), denominator: f64| {
+            if dtype.is_complex() {
+                if denominator == 0.0 {
+                    // NumPy's complex zero-divisor branch ignores the signs of
+                    // the denominator's zero components and divides each lane
+                    // by positive zero. The ratio formula would make all NaNs.
+                    (numerator.0 / 0.0, numerator.1 / 0.0)
                 } else {
-                    // Central difference with non-uniform spacing
-                    let h_minus = coords[k_val] - coords[k_val - 1];
-                    let h_plus = coords[k_val + 1] - coords[k_val];
-                    let hs = h_minus + h_plus;
-                    (h_minus * h_minus * f(k_val + 1)
-                        + (h_plus * h_plus - h_minus * h_minus) * f(k_val)
-                        - h_plus * h_plus * f(k_val - 1))
-                        / (h_minus * h_plus * hs)
+                    Self::complex_average_quotient(numerator, (denominator, 0.0), calculation_dtype)
                 }
             } else {
-                // Uniform spacing (dx=1.0)
-                if k_val == 0 {
-                    if edge_order == 2 {
-                        // Second-order: (-3*f(0) + 4*f(1) - f(2)) / 2
-                        (-3.0 * f(0) + 4.0 * f(1) - f(2)) / 2.0
-                    } else {
-                        f(1) - f(0)
-                    }
-                } else if k_val == n - 1 {
-                    if edge_order == 2 {
-                        // Second-order: (3*f(n-1) - 4*f(n-2) + f(n-3)) / 2
-                        (3.0 * f(n - 1) - 4.0 * f(n - 2) + f(n - 3)) / 2.0
-                    } else {
-                        f(k_val) - f(k_val - 1)
-                    }
+                (
+                    Self::gradient_real_binary(
+                        numerator.0,
+                        denominator,
+                        calculation_dtype,
+                        BinaryOp::Div,
+                    ),
+                    0.0,
+                )
+            }
+        };
+        let compute = |flat: usize| {
+            let k = (flat / inner) % n;
+            let base = flat - k * inner;
+            let f = |position: usize| {
+                let value = source.logical_complex_value(base + position * inner);
+                (round(value.0), round(value.1))
+            };
+            let result = if (k == 0 || k == n - 1) && edge_order == 1 {
+                let first = if k == 0 { 0 } else { n - 2 };
+                let divisor = if uniform {
+                    step
                 } else {
-                    (f(k_val + 1) - f(k_val - 1)) / 2.0
-                }
+                    let coords = spacing.expect("nonuniform gradient has coordinates");
+                    coords[first + 1] - coords[first]
+                };
+                divide(subtract(f(first + 1), f(first)), divisor)
+            } else if k > 0 && k + 1 < n && uniform {
+                divide(subtract(f(k + 1), f(k - 1)), 2.0 * step)
+            } else {
+                let (first, coefficients) = if k == 0 {
+                    let coefficients = if uniform {
+                        [-1.5 / step, 2.0 / step, -0.5 / step]
+                    } else {
+                        let coords = spacing.expect("nonuniform gradient has coordinates");
+                        let h0 = coords[1] - coords[0];
+                        let h1 = coords[2] - coords[1];
+                        [
+                            -(2.0 * h0 + h1) / (h0 * (h0 + h1)),
+                            (h0 + h1) / (h0 * h1),
+                            -h0 / (h1 * (h0 + h1)),
+                        ]
+                    };
+                    (0, coefficients)
+                } else if k == n - 1 {
+                    let coefficients = if uniform {
+                        [0.5 / step, -2.0 / step, 1.5 / step]
+                    } else {
+                        let coords = spacing.expect("nonuniform gradient has coordinates");
+                        let h0 = coords[n - 2] - coords[n - 3];
+                        let h1 = coords[n - 1] - coords[n - 2];
+                        [
+                            h1 / (h0 * (h0 + h1)),
+                            -(h0 + h1) / (h0 * h1),
+                            (2.0 * h1 + h0) / (h1 * (h0 + h1)),
+                        ]
+                    };
+                    (n - 3, coefficients)
+                } else {
+                    let coords = spacing.expect("nonuniform gradient has coordinates");
+                    let h0 = coords[k] - coords[k - 1];
+                    let h1 = coords[k + 1] - coords[k];
+                    (
+                        k - 1,
+                        [
+                            -h1 / (h0 * (h0 + h1)),
+                            (h1 - h0) / (h0 * h1),
+                            h0 / (h1 * (h0 + h1)),
+                        ],
+                    )
+                };
+                // Preserve NumPy's coefficient products and left-associated
+                // additions; algebraically combining the stencil changes
+                // narrow rounding, cancellation, signed zero, and infinities.
+                add(
+                    add(
+                        scale(coefficients[0], f(first)),
+                        scale(coefficients[1], f(first + 1)),
+                    ),
+                    scale(coefficients[2], f(first + 2)),
+                )
+            };
+            (round(result.0), round(result.1))
+        };
+        let fill = |(flat, output): (usize, &mut [f64])| {
+            let value = compute(flat);
+            output[0] = value.0;
+            if width == 2 {
+                output[1] = value.1;
             }
         };
         const GRADIENT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-        let values: Vec<f64> =
-            if total >= GRADIENT_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
-                (0..total).into_par_iter().map(compute).collect()
-            } else {
-                (0..total).map(compute).collect()
-            };
+        if values.len() / width >= GRADIENT_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+        {
+            values.par_chunks_mut(width).enumerate().for_each(fill);
+        } else {
+            values.chunks_mut(width).enumerate().for_each(fill);
+        }
         Ok(Self {
             shape: self.shape.clone(),
             values,
-            dtype: DType::F64,
+            dtype,
             integer_sidecar: None,
         })
+    }
+
+    /// Arithmetic stages of gradient stencils round in their resolved dtype.
+    fn gradient_real_binary(left: f64, right: f64, dtype: DType, op: BinaryOp) -> f64 {
+        macro_rules! binary {
+            ($left:expr, $right:expr) => {{
+                let (left, right) = ($left, $right);
+                match op {
+                    BinaryOp::Add => left + right,
+                    BinaryOp::Sub => left - right,
+                    BinaryOp::Mul => left * right,
+                    BinaryOp::Div => left / right,
+                    _ => unreachable!("gradient uses arithmetic stencils"),
+                }
+            }};
+        }
+        match dtype {
+            DType::F16 => f16::from_f32(binary!(
+                f16::from_f64(left).to_f32(),
+                f16::from_f64(right).to_f32()
+            ))
+            .to_f64(),
+            DType::F32 | DType::Complex64 => f64::from(binary!(left as f32, right as f32)),
+            _ => binary!(left, right),
+        }
     }
 
     /// Evaluate a piecewise-defined function (np.piecewise).

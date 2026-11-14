@@ -69,13 +69,7 @@ struct OracleBatch {
 }
 
 impl OracleBatch {
-    fn options(
-        &mut self,
-        array: &UFuncArray,
-        axis: Option<isize>,
-        flags: u8,
-        equal_nan: bool,
-    ) {
+    fn options(&mut self, array: &UFuncArray, axis: Option<isize>, flags: u8, equal_nan: bool) {
         self.cases.push(json!({
             "op": "unique", "array": input_spec(array), "axis": axis,
             "flags": flags, "equal_nan": equal_nan,
@@ -119,9 +113,13 @@ impl OracleBatch {
             ("unique_values", vec![values]),
             ("unique_counts", vec![count_values, counts]),
             ("unique_inverse", vec![inverse_values, inverse]),
-            ("unique_all", vec![all_values, indices, all_inverse, all_counts]),
+            (
+                "unique_all",
+                vec![all_values, indices, all_inverse, all_counts],
+            ),
         ] {
-            self.cases.push(json!({"op": op, "array": input_spec(array)}));
+            self.cases
+                .push(json!({"op": op, "array": input_spec(array)}));
             self.actual.push(Ok(actual));
         }
     }
@@ -191,7 +189,9 @@ json.dump(outputs, sys.stdout)
             .spawn()
             .expect("NumPy oracle must be available");
         let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(&serde_json::to_vec(&self.cases).unwrap()).unwrap();
+        stdin
+            .write_all(&serde_json::to_vec(&self.cases).unwrap())
+            .unwrap();
         drop(stdin);
         let output = child.wait_with_output().unwrap();
         assert!(
@@ -207,9 +207,9 @@ json.dump(outputs, sys.stdout)
                 assert!(actual.is_err(), "{context}: expected error, got {actual:?}");
                 continue;
             }
-            let actual = actual.as_ref().unwrap_or_else(|error| {
-                panic!("{context}: unexpected error {error:?}")
-            });
+            let actual = actual
+                .as_ref()
+                .unwrap_or_else(|error| panic!("{context}: unexpected error {error:?}"));
             let expected = expected["arrays"].as_array().unwrap();
             assert_eq!(actual.len(), expected.len(), "{context}: metadata presence");
             let operation = self.cases[case_index]["op"].as_str().unwrap();
@@ -218,7 +218,8 @@ json.dump(outputs, sys.stdout)
             let distinct_nan_inverse = if operation == "unique_inverse" {
                 Some(1)
             } else if operation == "unique"
-                && flags & 2 != 0 && !has_index
+                && flags & 2 != 0
+                && !has_index
                 && self.cases[case_index]["equal_nan"] == false
             {
                 Some(1)
@@ -231,8 +232,14 @@ json.dump(outputs, sys.stdout)
                 let components = if actual[0].dtype().is_complex() { 2 } else { 1 };
                 let mut frequencies = vec![0_usize; actual[0].values().len() / components];
                 for &index in actual[inverse_output].values() {
-                    assert!(index.is_finite() && index >= 0.0 && index.fract() == 0.0, "{context}");
-                    assert!((index as usize) < frequencies.len(), "{context}: inverse bounds");
+                    assert!(
+                        index.is_finite() && index >= 0.0 && index.fract() == 0.0,
+                        "{context}"
+                    );
+                    assert!(
+                        (index as usize) < frequencies.len(),
+                        "{context}: inverse bounds"
+                    );
                     frequencies[index as usize] += 1;
                 }
                 for (group, parts) in actual[0].values().chunks_exact(components).enumerate() {
@@ -241,7 +248,9 @@ json.dump(outputs, sys.stdout)
                     }
                 }
             }
-            for (array_index, (actual_array, expected_array)) in actual.iter().zip(expected).enumerate() {
+            for (array_index, (actual_array, expected_array)) in
+                actual.iter().zip(expected).enumerate()
+            {
                 let actual_values = &actual[0];
                 let expected_values = &expected[0];
                 let actual = actual_array;
@@ -252,19 +261,35 @@ json.dump(outputs, sys.stdout)
                     assert_eq!(shape.pop(), Some(2), "{context}: component axis");
                 }
                 assert_eq!(json!(shape), expected["shape"], "{context}: shape");
-                assert_eq!(dtype_name(actual.dtype()), expected["dtype"], "{context}: dtype");
+                assert_eq!(
+                    dtype_name(actual.dtype()),
+                    expected["dtype"],
+                    "{context}: dtype"
+                );
                 let bits = expected["bits"].as_array().unwrap();
-                assert_eq!(actual.values().len(), bits.len(), "{context}: component count");
+                assert_eq!(
+                    actual.values().len(),
+                    bits.len(),
+                    "{context}: component count"
+                );
                 for (component, (&actual, bits)) in actual.values().iter().zip(bits).enumerate() {
                     let expected = f64::from_bits(bits.as_u64().unwrap());
                     if distinct_nan_inverse == Some(array_index) && actual != expected {
-                        let components = if actual_values.dtype().is_complex() { 2 } else { 1 };
+                        let components = if actual_values.dtype().is_complex() {
+                            2
+                        } else {
+                            1
+                        };
                         let actual_start = actual as usize * components;
                         let expected_start = expected as usize * components;
                         let expected_bits = expected_values["bits"].as_array().unwrap();
-                        let actual_parts = &actual_values.values()[actual_start..actual_start + components];
-                        let expected_parts: Vec<f64> = expected_bits[expected_start..expected_start + components]
-                            .iter().map(|bits| f64::from_bits(bits.as_u64().unwrap())).collect();
+                        let actual_parts =
+                            &actual_values.values()[actual_start..actual_start + components];
+                        let expected_parts: Vec<f64> = expected_bits
+                            [expected_start..expected_start + components]
+                            .iter()
+                            .map(|bits| f64::from_bits(bits.as_u64().unwrap()))
+                            .collect();
                         assert!(actual_parts.iter().any(|part| part.is_nan()), "{context}");
                         for (&actual, &expected) in actual_parts.iter().zip(&expected_parts) {
                             assert!(
@@ -283,7 +308,8 @@ json.dump(outputs, sys.stdout)
                         assert!(actual.is_nan(), "{context}: component {component}");
                     } else {
                         assert_eq!(
-                            actual.to_bits(), expected.to_bits(),
+                            actual.to_bits(),
+                            expected.to_bits(),
                             "{context}: component {component}, {actual:?} != {expected:?}"
                         );
                     }
@@ -295,7 +321,14 @@ json.dump(outputs, sys.stdout)
 
 #[test]
 fn complex_unique_preserves_pairs_and_logical_inverse_shapes() {
-    let values = [(3.0, 4.0), (1.0, 5.0), (1.0, -2.0), (3.0, 4.0), (1.0, 5.0), (2.0, 0.0)];
+    let values = [
+        (3.0, 4.0),
+        (1.0, 5.0),
+        (1.0, -2.0),
+        (3.0, 4.0),
+        (1.0, 5.0),
+        (2.0, 0.0),
+    ];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
         for shape in [vec![6], vec![2, 3], vec![1, 2, 3]] {
@@ -315,9 +348,18 @@ fn complex_unique_preserves_pairs_and_logical_inverse_shapes() {
 fn complex_unique_nan_policy_and_array_api_variants_match_numpy() {
     let nan = f64::NAN;
     let values = [
-        (nan, 2.0), (1.0, nan), (nan, 1.0), (1.0, nan),
-        (0.0, nan), (nan, nan), (nan, 2.0), (1.0, 2.0),
-        (1.0, 2.0), (0.0, -0.0), (-0.0, 0.0), (f64::INFINITY, f64::NEG_INFINITY),
+        (nan, 2.0),
+        (1.0, nan),
+        (nan, 1.0),
+        (1.0, nan),
+        (0.0, nan),
+        (nan, nan),
+        (nan, 2.0),
+        (1.0, 2.0),
+        (1.0, 2.0),
+        (0.0, -0.0),
+        (-0.0, 0.0),
+        (f64::INFINITY, f64::NEG_INFINITY),
     ];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
@@ -346,8 +388,13 @@ fn complex_unique_keeps_the_minimum_nan_class_and_first_tied_representative() {
     let array = complex_array(
         &[7],
         &[
-            (first_nan, 0.0), (2.0, first_nan), (-1.0, second_nan),
-            (-1.0, first_nan), (0.0, -0.0), (-0.0, 0.0), (first_nan, first_nan),
+            (first_nan, 0.0),
+            (2.0, first_nan),
+            (-1.0, second_nan),
+            (-1.0, first_nan),
+            (0.0, -0.0),
+            (-0.0, 0.0),
+            (first_nan, first_nan),
         ],
         DType::Complex128,
     );
@@ -358,7 +405,10 @@ fn complex_unique_keeps_the_minimum_nan_class_and_first_tied_representative() {
     assert_eq!(values.values()[2], -1.0);
     assert_eq!(values.values()[3].to_bits(), second_nan.to_bits());
     assert_eq!(indices.unwrap().values(), &[4.0, 2.0]);
-    assert_eq!(inverse.unwrap().values(), &[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(
+        inverse.unwrap().values(),
+        &[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+    );
     assert_eq!(counts.unwrap().values(), &[2.0, 5.0]);
 
     // NumPy 2.4's metadata-free hash route keeps the first source NaN.
@@ -372,10 +422,18 @@ fn complex_unique_keeps_the_minimum_nan_class_and_first_tied_representative() {
 fn complex_unique_axis_groups_whole_slices_and_preserves_nan_rows() {
     let nan = f64::NAN;
     let values = [
-        (2.0, 1.0), (nan, 1.0), (0.0, -0.0),
-        (1.0, 1.0), (5.0, 2.0), (0.0, 0.0),
-        (1.0, 1.0), (5.0, 2.0), (-0.0, -0.0),
-        (2.0, 1.0), (nan, 1.0), (0.0, -0.0),
+        (2.0, 1.0),
+        (nan, 1.0),
+        (0.0, -0.0),
+        (1.0, 1.0),
+        (5.0, 2.0),
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (5.0, 2.0),
+        (-0.0, -0.0),
+        (2.0, 1.0),
+        (nan, 1.0),
+        (0.0, -0.0),
     ];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
@@ -401,9 +459,12 @@ fn complex_unique_rounds_source_components_before_grouping() {
     let values = [
         (1.0 + 2.0_f64.powi(-25), 2.0 + 2.0_f64.powi(-24)),
         (1.0, 2.0),
-        (16_777_217.0, 0.0), (16_777_216.0, 0.0),
-        (1e-100, -1e-100), (0.0, -0.0),
-        (1e100, 1.0), (f64::INFINITY, 1.0),
+        (16_777_217.0, 0.0),
+        (16_777_216.0, 0.0),
+        (1e-100, -1e-100),
+        (0.0, -0.0),
+        (1e100, 1.0),
+        (f64::INFINITY, 1.0),
     ];
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
@@ -422,8 +483,19 @@ fn complex_unique_rounds_source_components_before_grouping() {
 fn complex_unique_scalar_empty_arrays_and_empty_slices_match_numpy() {
     let mut batch = OracleBatch::default();
     for dtype in [DType::Complex64, DType::Complex128] {
-        for shape in [vec![], vec![0], vec![0, 3], vec![3, 0], vec![2, 0, 3], vec![2, 3, 0]] {
-            let values = if shape.is_empty() { vec![(-0.0, 2.0)] } else { vec![] };
+        for shape in [
+            vec![],
+            vec![0],
+            vec![0, 3],
+            vec![3, 0],
+            vec![2, 0, 3],
+            vec![2, 3, 0],
+        ] {
+            let values = if shape.is_empty() {
+                vec![(-0.0, 2.0)]
+            } else {
+                vec![]
+            };
             let array = complex_array(&shape, &values, dtype);
             for flags in 0..8 {
                 batch.options(&array, None, flags, true);
@@ -450,7 +522,11 @@ fn complex_unique_checked_errors_preserve_legacy_input_without_losing_components
             (vec![0], vec![]),
         ] {
             let array = UFuncArray::new(shape, values, dtype).unwrap();
-            assert!(array.unique_with_options(None, true, true, true, true).is_err());
+            assert!(
+                array
+                    .unique_with_options(None, true, true, true, true)
+                    .is_err()
+            );
             assert!(array.unique_axis_with_info(0, true, true, true).is_err());
             let (preserved, indices, inverse, counts) = array.unique_with_info(true, true, true);
             assert_eq!(preserved, array);
@@ -471,17 +547,26 @@ fn complex_unique_checked_errors_preserve_legacy_input_without_losing_components
         }
 
         let huge = complex_array(&[0, usize::MAX, usize::MAX], &[], dtype);
-        let (values, indices, inverse, counts) =
-            huge.unique_with_options(Some(1), true, false, false, true).unwrap();
+        let (values, indices, inverse, counts) = huge
+            .unique_with_options(Some(1), true, false, false, true)
+            .unwrap();
         assert_eq!(values.shape(), &[0, 1, usize::MAX, 2]);
         assert!(values.values().is_empty());
         assert_eq!(indices.unwrap().values(), &[0.0]);
         assert!(inverse.is_none() && counts.is_none());
-        assert!(huge.unique_with_options(Some(1), false, true, false, true).is_err());
+        assert!(
+            huge.unique_with_options(Some(1), false, true, false, true)
+                .is_err()
+        );
         if (usize::MAX as u128) > i64::MAX as u128 {
-            assert!(huge.unique_with_options(Some(1), false, false, true, true).is_err());
+            assert!(
+                huge.unique_with_options(Some(1), false, false, true, true)
+                    .is_err()
+            );
         }
-        let flat = huge.unique_with_options(None, true, true, true, true).unwrap();
+        let flat = huge
+            .unique_with_options(None, true, true, true, true)
+            .unwrap();
         assert_eq!(flat.0.shape(), &[0, 2]);
         assert_eq!(flat.2.unwrap().shape(), &[0, usize::MAX, usize::MAX]);
     }
@@ -490,8 +575,9 @@ fn complex_unique_checked_errors_preserve_legacy_input_without_losing_components
     {
         let axis_len = (1_usize << 53) + 1;
         let array = complex_array(&[0, axis_len], &[], DType::Complex128);
-        let (_, _, _, counts) =
-            array.unique_with_options(Some(1), false, false, true, true).unwrap();
+        let (_, _, _, counts) = array
+            .unique_with_options(Some(1), false, false, true, true)
+            .unwrap();
         assert_eq!(
             counts.unwrap().to_storage().unwrap(),
             ArrayStorage::I64(vec![axis_len as i64]),
@@ -506,24 +592,39 @@ fn checked_unique_keeps_real_nan_options_and_exact_integer_sidecars() {
         vec![2, 3],
         vec![f64::NAN, -0.0, 2.0, f64::NAN, 0.0, 2.0],
         DType::F64,
-    ).unwrap();
+    )
+    .unwrap();
     for equal_nan in [false, true] {
         for flags in 0..8 {
             batch.options(&real, None, flags, equal_nan);
         }
     }
     for storage in [
-        ArrayStorage::I64(vec![-9_007_199_254_740_993, -9_007_199_254_740_992,
-                              -9_007_199_254_740_993, 1, 0, 1]),
-        ArrayStorage::U64(vec![9_007_199_254_740_993, 9_007_199_254_740_992,
-                              9_007_199_254_740_993, 1, 0, 1]),
+        ArrayStorage::I64(vec![
+            -9_007_199_254_740_993,
+            -9_007_199_254_740_992,
+            -9_007_199_254_740_993,
+            1,
+            0,
+            1,
+        ]),
+        ArrayStorage::U64(vec![
+            9_007_199_254_740_993,
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+            1,
+            0,
+            1,
+        ]),
     ] {
         let array = UFuncArray::from_storage(vec![2, 3], storage).unwrap();
         for equal_nan in [false, true] {
             batch.options(&array, None, 7, equal_nan);
             batch.options(&array, Some(0), 7, equal_nan);
         }
-        let (unique, _, _, _) = array.unique_with_options(None, true, true, true, true).unwrap();
+        let (unique, _, _, _) = array
+            .unique_with_options(None, true, true, true, true)
+            .unwrap();
         assert!(unique.has_integer_sidecar());
         match unique.to_storage().unwrap() {
             ArrayStorage::I64(values) => {
@@ -550,13 +651,25 @@ fn complex_unique_generated_axis_and_metadata_cases_match_numpy() {
             1 => vec![3, 4],
             _ => vec![2, 3, 2],
         };
-        let dtype = if case % 2 == 0 { DType::Complex64 } else { DType::Complex128 };
-        let values: Vec<(f64, f64)> = (0..12).map(|index| {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let re = ((state >> 32) % 5) as f64 - 2.0;
-            let im = ((state >> 40) % 5) as f64 - 2.0;
-            if case % 4 == 0 && index % 7 == 0 { (re, f64::NAN) } else { (re, im) }
-        }).collect();
+        let dtype = if case % 2 == 0 {
+            DType::Complex64
+        } else {
+            DType::Complex128
+        };
+        let values: Vec<(f64, f64)> = (0..12)
+            .map(|index| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let re = ((state >> 32) % 5) as f64 - 2.0;
+                let im = ((state >> 40) % 5) as f64 - 2.0;
+                if case % 4 == 0 && index % 7 == 0 {
+                    (re, f64::NAN)
+                } else {
+                    (re, im)
+                }
+            })
+            .collect();
         let array = complex_array(&shape, &values, dtype);
         batch.options(&array, None, 7, case % 2 == 0);
         for axis in 0..shape.len() {

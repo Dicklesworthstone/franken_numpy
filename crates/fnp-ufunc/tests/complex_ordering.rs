@@ -230,17 +230,25 @@ json.dump(outputs, sys.stdout)
                 );
                 continue;
             }
-            let actual = actual.as_ref().unwrap_or_else(|error| {
-                panic!("{context}: unexpected error {error:?}")
-            });
+            let actual = actual
+                .as_ref()
+                .unwrap_or_else(|error| panic!("{context}: unexpected error {error:?}"));
             let mut shape = actual.shape().to_vec();
             if actual.dtype().is_complex() {
                 assert_eq!(shape.pop(), Some(2), "{context}");
             }
             assert_eq!(json!(shape), expected["shape"], "{context}: shape");
-            assert_eq!(dtype_name(actual.dtype()), expected["dtype"], "{context}: dtype");
+            assert_eq!(
+                dtype_name(actual.dtype()),
+                expected["dtype"],
+                "{context}: dtype"
+            );
             let bits = expected["bits"].as_array().unwrap();
-            assert_eq!(actual.values().len(), bits.len(), "{context}: component count");
+            assert_eq!(
+                actual.values().len(),
+                bits.len(),
+                "{context}: component count"
+            );
             for (component, (&actual, bits)) in actual.values().iter().zip(bits).enumerate() {
                 let expected = f64::from_bits(bits.as_u64().unwrap());
                 if expected.is_nan() {
@@ -436,7 +444,12 @@ fn complex_searchsorted_mixed_types_preserve_promotion_and_exact_integer_sources
     .unwrap();
     let unsigned = UFuncArray::from_storage(
         vec![4],
-        ArrayStorage::U64(vec![0, 9_007_199_254_740_993, 9_007_199_254_740_994, u64::MAX]),
+        ArrayStorage::U64(vec![
+            0,
+            9_007_199_254_740_993,
+            9_007_199_254_740_994,
+            u64::MAX,
+        ]),
     )
     .unwrap();
     for real in [&signed, &unsigned] {

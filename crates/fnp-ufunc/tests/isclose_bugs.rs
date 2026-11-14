@@ -355,7 +355,8 @@ print(json.dumps(rows))
         );
         let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(self.actual.len(), expected.len());
-        for ((case, (close, allclose)), expected) in self.cases.iter().zip(self.actual).zip(expected)
+        for ((case, (close, allclose)), expected) in
+            self.cases.iter().zip(self.actual).zip(expected)
         {
             if expected.get("error").is_some() {
                 assert!(close.is_err(), "{case}: expected {expected}, got {close:?}");
@@ -373,7 +374,12 @@ print(json.dumps(rows))
                 expected["shape"],
                 "{case}: logical shape"
             );
-            assert!(close.values().iter().all(|&value| value == 0.0 || value == 1.0));
+            assert!(
+                close
+                    .values()
+                    .iter()
+                    .all(|&value| value == 0.0 || value == 1.0)
+            );
             assert_eq!(
                 json!(
                     close

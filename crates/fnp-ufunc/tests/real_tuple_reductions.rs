@@ -182,13 +182,7 @@ impl OracleBatch {
         });
     }
 
-    fn push_nanarg(
-        &mut self,
-        input: usize,
-        array: &UFuncArray,
-        op: &str,
-        axis: Option<isize>,
-    ) {
+    fn push_nanarg(&mut self, input: usize, array: &UFuncArray, op: &str, axis: Option<isize>) {
         self.cases.push(json!({
             "input": input, "op": op, "axis": axis, "keepdims": false,
         }));
@@ -680,7 +674,10 @@ fn nanarg_extrema_observe_declared_source_precision() {
     for (dtype, values) in [
         (DType::F16, vec![1.0001, 1.0, f64::NAN, -0.0]),
         (DType::F16, vec![70000.0, 80000.0, f64::NAN, f64::INFINITY]),
-        (DType::F32, vec![1.0 + 2.0_f64.powi(-25), 1.0, f64::NAN, -0.0]),
+        (
+            DType::F32,
+            vec![1.0 + 2.0_f64.powi(-25), 1.0, f64::NAN, -0.0],
+        ),
         (DType::F32, vec![1.0e100, 1.0e90, f64::NAN, f64::INFINITY]),
         (DType::Bool, vec![1.9, 1.1, 0.0, -0.0]),
         (DType::I8, vec![1.9, 1.1, 3.1, 3.9]),

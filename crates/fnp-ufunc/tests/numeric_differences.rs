@@ -1,4 +1,4 @@
-//! Discrete differences preserve logical elements, source precision, and integer bits.
+//! Numerical derivatives preserve logical elements, source precision, and integer bits.
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{UFuncArray, UFuncError};
@@ -116,6 +116,24 @@ impl OracleBatch {
         self.actual.push(actual);
     }
 
+    fn gradient(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        axis: Option<isize>,
+        edge_order: usize,
+        spacing: Option<&[f64]>,
+    ) {
+        let coordinates =
+            spacing.map(|values| values.iter().map(f64::to_string).collect::<Vec<_>>());
+        self.case(
+            input,
+            "gradient",
+            json!({"axis": axis, "edge_order": edge_order, "spacing": coordinates}),
+            array.gradient_advanced(axis, edge_order, spacing),
+        );
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -154,6 +172,15 @@ for case in data['cases']:
                 if args.get(name) is not None:
                     kwargs[name] = inputs[args[name]]
             result = np.ediff1d(array, **kwargs)
+        elif case['op'] == 'gradient':
+            # The native Rust single-output API defaults to axis zero.
+            axis = args['axis'] if args['axis'] is not None else 0
+            kwargs = dict(axis=axis, edge_order=args['edge_order'])
+            if args['spacing'] is None:
+                result = np.gradient(array, **kwargs)
+            else:
+                coordinates = np.array([float(value) for value in args['spacing']], dtype=np.float64)
+                result = np.gradient(array, coordinates, **kwargs)
         else:
             raise AssertionError(case['op'])
         result = np.asarray(result)
@@ -180,13 +207,13 @@ print(json.dumps(rows))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("launch live NumPy discrete difference oracle");
+            .expect("launch live NumPy numerical derivative oracle");
         let data = json!({"inputs": self.inputs, "cases": self.cases});
         serde_json::to_writer(child.stdin.take().unwrap(), &data).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
-            "NumPy discrete difference oracle failed: {}",
+            "NumPy numerical derivative oracle failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
@@ -199,7 +226,10 @@ print(json.dumps(rows))
             .zip(expected)
         {
             let source = &data["inputs"][case["input"].as_u64().unwrap() as usize];
-            let context = format!("{case}, source={source}");
+            let context = format!(
+                "{case}, source dtype={}, shape={}",
+                source["dtype"], source["shape"]
+            );
             if expected.get("error").is_some() {
                 assert!(
                     actual.is_err(),
@@ -240,8 +270,9 @@ print(json.dumps(rows))
                 if expected.is_nan() {
                     assert!(actual.is_nan(), "{context}: component {index} expected NaN");
                 } else {
-                    // Subtraction has no reassociation freedom. Compare exact
-                    // bits, including signed zero and infinity, at every dtype.
+                    // Match NumPy's operation order without reassociation or
+                    // widening away narrow intermediate rounding. Signed zero
+                    // and infinity signs are part of this bitwise contract.
                     assert_eq!(
                         actual.to_bits(),
                         expected.to_bits(),
@@ -736,5 +767,379 @@ fn differences_reject_malformed_storage_and_handle_huge_empty_dimensions() {
             vec![2, 0]
         };
         assert_eq!(nonempty.shape(), expected);
+    }
+}
+
+#[test]
+fn gradients_preserve_complex_axes_and_differentiate_quadratics() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        // f(x) = x^2 + i(3x - x^2), with a constant offset in the second row.
+        let array = complex(
+            &[2, 3],
+            &[
+                (0.0, 0.0),
+                (4.0, 2.0),
+                (16.0, -4.0),
+                (7.0, -11.0),
+                (11.0, -9.0),
+                (23.0, -15.0),
+            ],
+            dtype,
+        );
+        let derivative = array
+            .gradient_advanced(Some(-1), 2, Some(&[0.0, 2.0, 4.0]))
+            .unwrap();
+        assert_eq!(derivative.dtype(), dtype);
+        assert_eq!(derivative.shape(), &[2, 3, 2]);
+        assert_eq!(
+            derivative.values(),
+            &[
+                0.0, 3.0, 4.0, -1.0, 8.0, -5.0, 0.0, 3.0, 4.0, -1.0, 8.0, -5.0
+            ]
+        );
+
+        // The Rust single-output default selects logical axis zero.
+        let default = array.gradient().unwrap();
+        assert_eq!(default.dtype(), dtype);
+        assert_eq!(default.shape(), array.shape());
+        assert_eq!(
+            default.values(),
+            &[
+                7.0, -11.0, 7.0, -11.0, 7.0, -11.0, 7.0, -11.0, 7.0, -11.0, 7.0, -11.0
+            ]
+        );
+        assert_eq!(
+            array.gradient_axis(Some(-2)).unwrap().values(),
+            default.values()
+        );
+        assert!(array.gradient_axis(Some(2)).is_err());
+    }
+}
+
+#[test]
+fn gradient_source_precision_and_strong_coordinate_scalars_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let real = [
+        104.64485168457031,
+        -83.22027587890625,
+        31.232345581054688,
+        997.1002807617188,
+    ];
+    let imaginary = [-2.33567, 197.7123, -191.5001, 37.10031];
+    for dtype in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let array = if dtype.is_complex() {
+            complex(
+                &[4],
+                &real.into_iter().zip(imaginary).collect::<Vec<_>>(),
+                dtype,
+            )
+        } else {
+            UFuncArray::new(vec![4], real.to_vec(), dtype).unwrap()
+        };
+        let input = batch.input(&array);
+        // Equal coordinate differences collapse to a strong NumPy float64
+        // scalar. Omitted spacing uses weak Python 1.0, which rounds narrow
+        // products/additions separately at the second-order boundaries.
+        for coordinates in [
+            None,
+            Some(&[0.0, 1.0, 2.0, 3.0][..]),
+            Some(&[0.0, 0.5, 2.0, 3.0][..]),
+            Some(&[3.0, 2.5, 2.0, 1.5][..]),
+        ] {
+            for edge_order in [1, 2] {
+                batch.gradient(input, &array, None, edge_order, coordinates);
+            }
+        }
+
+        let large = if dtype == DType::F16 {
+            2049.0
+        } else {
+            16_777_217.0
+        };
+        let source = if dtype.is_complex() {
+            complex(
+                &[4],
+                &[
+                    (large, -large - 2.0),
+                    (large - 1.0, -large - 3.0),
+                    (0.1, -0.3),
+                    (-0.2, 0.7),
+                ],
+                dtype,
+            )
+        } else {
+            UFuncArray::new(vec![4], vec![large, large - 1.0, 0.1, -0.3], dtype).unwrap()
+        };
+        let input = batch.input(&source);
+        for coordinates in [None, Some(&[0.0, 1.0, 2.0, 3.0][..])] {
+            for edge_order in [1, 2] {
+                batch.gradient(input, &source, Some(-1), edge_order, coordinates);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn integer_gradients_convert_declared_storage_before_subtraction() {
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::I8(vec![i8::MIN, i8::MAX, -1, 0, 1, 17]),
+        ArrayStorage::I32(vec![i32::MIN, i32::MAX, -1, 0, 1, 17]),
+        ArrayStorage::U8(vec![u8::MAX, 0, 1, 127, 128, 17]),
+        ArrayStorage::I64(vec![
+            (1_i64 << 53) + 1,
+            (1_i64 << 53) + 2,
+            (1_i64 << 53) + 3,
+            (1_i64 << 53) + 5,
+            i64::MAX - 1,
+            i64::MIN + 1,
+        ]),
+        ArrayStorage::U64(vec![
+            u64::MAX - 1,
+            u64::MAX,
+            1_u64 << 63,
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 2,
+            0,
+        ]),
+    ] {
+        for shape in [vec![6], vec![2, 3]] {
+            let array = UFuncArray::from_storage(shape.clone(), storage.clone()).unwrap();
+            let input = batch.input(&array);
+            for axis in 0..shape.len() {
+                let uniform = (0..shape[axis])
+                    .map(|index| index as f64 * 0.5)
+                    .collect::<Vec<_>>();
+                let nonuniform = (0..shape[axis])
+                    .map(|index| (index * index) as f64)
+                    .collect::<Vec<_>>();
+                for coordinates in [None, Some(uniform.as_slice()), Some(nonuniform.as_slice())] {
+                    for edge_order in [1, 2] {
+                        batch.gradient(input, &array, Some(axis as isize), edge_order, coordinates);
+                    }
+                }
+            }
+        }
+    }
+    // A legacy working buffer is not necessarily normalized to its dtype.
+    let raw = UFuncArray::new(vec![4], vec![1.9, -2.9, 3.9, -4.9], DType::I8).unwrap();
+    let input = batch.input(&raw);
+    batch.gradient(input, &raw, None, 1, None);
+    batch.gradient(input, &raw, None, 2, Some(&[0.0, 1.0, 3.0, 7.0]));
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_gradients_match_numpy_for_nonfinite_values_and_degenerate_spacing() {
+    let mut batch = OracleBatch::default();
+    let patterns = [
+        vec![(0.0, 0.0), (-0.0, 0.0), (0.0, -0.0), (-0.0, -0.0)],
+        vec![
+            (f64::INFINITY, 1.0),
+            (2.0, 3.0),
+            (f64::INFINITY, 4.0),
+            (f64::NEG_INFINITY, 5.0),
+        ],
+        vec![
+            (1.0, f64::INFINITY),
+            (3.0, 2.0),
+            (4.0, f64::NEG_INFINITY),
+            (5.0, f64::INFINITY),
+        ],
+        vec![
+            (f64::NAN, 1.0),
+            (2.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+            (3.0, 5.0),
+        ],
+        vec![(1.0, -2.0), (2.0, -1.0), (4.0, 2.0), (8.0, 7.0)],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for values in &patterns {
+            let array = complex(&[4], values, dtype);
+            let input = batch.input(&array);
+            for coordinates in [
+                None,
+                Some(&[3.0, 2.0, 1.0, 0.0][..]),
+                Some(&[0.0, -0.0, -0.0, -0.0][..]),
+                Some(&[0.0, 1.0, 1.0, 3.0][..]),
+                Some(&[0.0, f64::INFINITY, f64::INFINITY, f64::NAN][..]),
+            ] {
+                for edge_order in [1, 2] {
+                    batch.gradient(input, &array, None, edge_order, coordinates);
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn gradient_shape_axis_spacing_and_boolean_validation_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let cases: &[(&[usize], Option<isize>, usize, Option<&[f64]>)] = &[
+        (&[], None, 1, None),
+        (&[], Some(0), 2, Some(&[])),
+        (&[0], None, 1, None),
+        (&[1], Some(-1), 1, None),
+        (&[2], None, 2, None),
+        (&[3], None, 3, None),
+        (&[3], None, 1, Some(&[0.0, 1.0])),
+        (&[3], None, 2, Some(&[])),
+        (&[3], Some(1), 1, None),
+        (&[3], Some(-2), 2, None),
+        (&[0, 3], Some(1), 1, None),
+        (&[3, 0], Some(0), 2, Some(&[0.0, 1.0, 3.0])),
+        (&[2, 0, 4], Some(2), 2, Some(&[0.0, 1.0, 3.0, 7.0])),
+        (&[2, 0, 4], Some(0), 2, None),
+        (&[3], None, 1, Some(&[3.0, 2.0, 1.0])),
+        (&[3], None, 1, Some(&[0.0, -0.0, 0.0])),
+        (&[4], Some(-1), 2, Some(&[0.0, 0.1, 0.2, 0.3])),
+    ];
+    for dtype in [DType::F32, DType::Complex128, DType::I64] {
+        for &(shape, axis, edge_order, coordinates) in cases {
+            let array = pattern_array(shape, dtype);
+            let input = batch.input(&array);
+            batch.gradient(input, &array, axis, edge_order, coordinates);
+        }
+    }
+    for array in [
+        UFuncArray::from_storage(vec![4], ArrayStorage::Bool(vec![true, false, true, false]))
+            .unwrap(),
+        UFuncArray::new(vec![4], vec![0.0, 2.0, -0.0, f64::NAN], DType::Bool).unwrap(),
+    ] {
+        let input = batch.input(&array);
+        for coordinates in [
+            None,
+            Some(&[0.0, 1.0, 2.0, 3.0][..]),
+            Some(&[0.0, 1.0, 3.0, 7.0][..]),
+        ] {
+            for edge_order in [1, 2] {
+                // Boolean subtraction is invalid, but NumPy's entirely
+                // weighted nonuniform second-order stencil accepts bools.
+                batch.gradient(input, &array, None, edge_order, coordinates);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn multidimensional_and_parallel_gradients_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F32, DType::Complex64, DType::Complex128] {
+        let shape = [3, 4, 5];
+        let array = pattern_array(&shape, dtype);
+        let input = batch.input(&array);
+        for axis in [None, Some(-3), Some(-2), Some(-1)] {
+            let normalized = axis.map_or(0, |axis| (axis + 3) as usize);
+            let coordinates = (0..shape[normalized])
+                .map(|index| (index * index + index) as f64 * 0.5)
+                .collect::<Vec<_>>();
+            for spacing in [None, Some(coordinates.as_slice())] {
+                for edge_order in [1, 2] {
+                    batch.gradient(input, &array, axis, edge_order, spacing);
+                }
+            }
+        }
+    }
+    let serial = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let parallel = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    for dtype in [DType::F32, DType::Complex64] {
+        // 16,641 logical elements cross the production parallel threshold even
+        // when complex component storage is counted separately from elements.
+        let array = pattern_array(&[129, 129], dtype);
+        let input = batch.input(&array);
+        for axis in [0, 1] {
+            let sequential = serial
+                .install(|| array.gradient_advanced(Some(axis), 2, None))
+                .unwrap();
+            let concurrent = parallel
+                .install(|| array.gradient_advanced(Some(axis), 2, None))
+                .unwrap();
+            assert_eq!(sequential.dtype(), concurrent.dtype());
+            assert_eq!(sequential.shape(), concurrent.shape());
+            assert!(
+                sequential
+                    .values()
+                    .iter()
+                    .zip(concurrent.values())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "gradient changes with thread count for {dtype:?}, axis={axis}"
+            );
+            batch.case(
+                input,
+                "gradient",
+                json!({"axis": axis, "edge_order": 2, "spacing": null}),
+                Ok(concurrent),
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn gradients_reject_malformed_scalars_and_avoid_empty_stride_overflow() {
+    for scalar in [
+        complex(&[], &[(1.0, 2.0)], DType::Complex64),
+        UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![i64::MAX])).unwrap(),
+    ] {
+        assert!(scalar.gradient().is_err());
+        assert!(scalar.gradient_axis(Some(0)).is_err());
+        assert!(scalar.gradient_advanced(None, 2, Some(&[])).is_err());
+    }
+    for malformed in [
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![3], vec![1.0; 3], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
+    ] {
+        assert!(malformed.gradient().is_err());
+        assert!(malformed.gradient_advanced(Some(0), 2, None).is_err());
+    }
+    for dtype in [
+        DType::F16,
+        DType::F64,
+        DType::I64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let mut shape = vec![0, usize::MAX, usize::MAX];
+        if dtype.is_complex() {
+            shape.push(2);
+        }
+        let array = UFuncArray::new(shape.clone(), vec![], dtype).unwrap();
+        for axis in [1, 2] {
+            for edge_order in [1, 2] {
+                let result = array
+                    .gradient_advanced(Some(axis), edge_order, None)
+                    .unwrap();
+                assert_eq!(result.shape(), shape);
+                assert!(result.values().is_empty());
+                assert_eq!(
+                    result.dtype(),
+                    if dtype.is_integer() {
+                        DType::F64
+                    } else {
+                        dtype
+                    }
+                );
+            }
+        }
+        assert!(array.gradient_axis(Some(3)).is_err());
+        assert!(array.gradient_advanced(Some(1), usize::MAX, None).is_err());
+        assert!(array.gradient_advanced(Some(1), 1, Some(&[])).is_err());
     }
 }

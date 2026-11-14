@@ -381,11 +381,16 @@ fn public_comparison_functions_validate_complex_layouts_and_report_invalid() {
     ] {
         assert!(matches!(
             public_comparison(&nan, &scalar, op),
-            Err(UFuncError::FloatingPoint { kind: FloatErrorKind::Invalid, .. })
+            Err(UFuncError::FloatingPoint {
+                kind: FloatErrorKind::Invalid,
+                ..
+            })
         ));
     }
     assert_eq!(
-        public_comparison(&nan, &scalar, BinaryOp::LogicalAnd).unwrap().values(),
+        public_comparison(&nan, &scalar, BinaryOp::LogicalAnd)
+            .unwrap()
+            .values(),
         &[1.0]
     );
 }
