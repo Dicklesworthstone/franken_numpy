@@ -6891,6 +6891,33 @@ fn tridiag_eigvals_qr(d: &mut [f64], e: &mut [f64], n: usize) {
     }
 }
 
+/// Form a Householder vector in bounded binary units. Scaling only the vector
+/// leaves the similarity transform unchanged, including columns far smaller
+/// than the rest of the matrix. A power of two preserves the established
+/// rounding order wherever the original intermediate values were normal.
+fn hessenberg_reflector(h: &[f64], n: usize, j: usize, v: &mut [f64]) -> Option<f64> {
+    let largest = ((j + 1)..n)
+        .map(|row| h[row * n + j].abs())
+        .fold(0.0_f64, f64::max);
+    if largest == 0.0 {
+        return None;
+    }
+    let unit = ScaledReal {
+        significand: 1.0,
+        exponent: ScaledReal::new(largest).exponent,
+    }
+    .value();
+    v[..=j].fill(0.0);
+    for row in (j + 1)..n {
+        v[row] = h[row * n + j] / unit;
+    }
+    let col_norm = v[(j + 1)..].iter().map(|x| x * x).sum::<f64>().sqrt();
+    let sign = if v[j + 1] >= 0.0 { 1.0 } else { -1.0 };
+    v[j + 1] += sign * col_norm;
+    let v_norm_sq: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
+    Some(2.0 / v_norm_sq)
+}
+
 /// Reduce general n×n matrix to upper Hessenberg form via Householder similarity.
 /// Returns `(H, Q)` where `A = Q H Q^T`, `H` is upper Hessenberg (n×n row-major).
 fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
@@ -6905,32 +6932,10 @@ fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut dbuf = vec![0.0; n];
     let mut f_vec = vec![0.0; n];
     for j in 0..n.saturating_sub(2) {
-        // Householder to zero column j below row j+1 (entries j+2..n)
-        let col_norm = {
-            let mut s = 0.0;
-            for i in (j + 1)..n {
-                s += h[i * n + j] * h[i * n + j];
-            }
-            s.sqrt()
+        // Householder to zero column j below row j+1 (entries j+2..n).
+        let Some(scale) = hessenberg_reflector(&h, n, j, &mut v) else {
+            continue;
         };
-        if col_norm < f64::EPSILON {
-            continue;
-        }
-
-        let sign = if h[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
-        for vi in &mut v[..=j] {
-            *vi = 0.0;
-        }
-        for (i, vi) in v[(j + 1)..n].iter_mut().enumerate() {
-            *vi = h[(i + j + 1) * n + j];
-        }
-        v[j + 1] += sign * col_norm;
-
-        let v_norm_sq: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
-        if v_norm_sq == 0.0 {
-            continue;
-        }
-        let scale = 2.0 / v_norm_sq;
 
         // Left: H = P * H. Two row-contiguous passes instead of the naive
         // per-column walk (which strode `h[i*n+col]` down each column with stride
@@ -6999,32 +7004,9 @@ fn hessenberg_reduce_values(a: &[f64], n: usize) -> Vec<f64> {
     let mut dbuf = vec![0.0; n];
     let mut f_vec = vec![0.0; n];
     for j in 0..n.saturating_sub(2) {
-        // Householder to zero column j below row j+1 (entries j+2..n)
-        let col_norm = {
-            let mut s = 0.0;
-            for i in (j + 1)..n {
-                s += h[i * n + j] * h[i * n + j];
-            }
-            s.sqrt()
+        let Some(scale) = hessenberg_reflector(&h, n, j, &mut v) else {
+            continue;
         };
-        if col_norm < f64::EPSILON {
-            continue;
-        }
-
-        let sign = if h[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
-        for vi in &mut v[..=j] {
-            *vi = 0.0;
-        }
-        for (i, vi) in v[(j + 1)..n].iter_mut().enumerate() {
-            *vi = h[(i + j + 1) * n + j];
-        }
-        v[j + 1] += sign * col_norm;
-
-        let v_norm_sq: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
-        if v_norm_sq == 0.0 {
-            continue;
-        }
-        let scale = 2.0 / v_norm_sq;
 
         for dc in dbuf.iter_mut() {
             *dc = 0.0;
@@ -7117,13 +7099,13 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         // Real 2×2 blocks are left to the normal QR step, which splits them into
         // two 1×1 blocks (the eigenvector path relies on that triangular form).
         if p - lo == 2 {
-            let a11 = h[(p - 2) * n + (p - 2)];
-            let a12 = h[(p - 2) * n + (p - 1)];
-            let a21 = h[(p - 1) * n + (p - 2)];
-            let a22 = h[(p - 1) * n + (p - 1)];
-            let tr = a11 + a22;
-            let dt = a11 * a22 - a12 * a21;
-            if tr * tr - 4.0 * dt < 0.0 {
+            let pair = schur_eigenvalues_2x2(
+                h[(p - 2) * n + (p - 2)],
+                h[(p - 2) * n + (p - 1)],
+                h[(p - 1) * n + (p - 2)],
+                h[(p - 1) * n + (p - 1)],
+            );
+            if pair[1] != 0.0 {
                 p -= 2;
                 continue;
             }
@@ -7143,32 +7125,68 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         // gives cubic convergence and resolves complex pairs without the
         // single-shift stagnation that made eigvals pathologically slow.
         let m = p - 1;
+        let shift_magnitude = [
+            h[(p - 2) * n + (p - 2)],
+            h[(p - 2) * n + (p - 1)],
+            h[(p - 1) * n + (p - 2)],
+            h[(p - 1) * n + (p - 1)],
+            h[lo * n + lo],
+            h[(lo + 1) * n + lo],
+            h[(lo + 1) * n + (lo + 1)],
+            h[lo * n + (lo + 1)],
+            if lo + 2 <= m {
+                h[(lo + 2) * n + (lo + 1)]
+            } else {
+                0.0
+            },
+            if m >= lo + 2 {
+                h[(m - 1) * n + (m - 2)]
+            } else {
+                0.0
+            },
+        ]
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+        let shift_unit = if shift_magnitude != 0.0
+            && (shift_magnitude < 16.0 * f64::MIN_POSITIVE.sqrt()
+                || shift_magnitude > f64::MAX.sqrt() / 16.0)
+        {
+            ScaledReal {
+                significand: 1.0,
+                exponent: ScaledReal::new(shift_magnitude).exponent,
+            }
+            .value()
+        } else {
+            1.0
+        };
+        let entry = |row: usize, col: usize| h[row * n + col] / shift_unit;
         let (s, t) = if since_defl > 0 && since_defl.is_multiple_of(10) {
             // Exceptional shift to break a rare cycle: complex shifts of magnitude
             // ~the local subdiagonal scale.
-            let sa = h[m * n + (m - 1)].abs()
+            let sa = entry(m, m - 1).abs()
                 + if m >= lo + 2 {
-                    h[(m - 1) * n + (m - 2)].abs()
+                    entry(m - 1, m - 2).abs()
                 } else {
                     0.0
                 };
             (1.5 * sa, sa * sa)
         } else {
-            let tr = h[(p - 2) * n + (p - 2)] + h[(p - 1) * n + (p - 1)];
-            let dt = h[(p - 2) * n + (p - 2)] * h[(p - 1) * n + (p - 1)]
-                - h[(p - 2) * n + (p - 1)] * h[(p - 1) * n + (p - 2)];
+            let tr = entry(p - 2, p - 2) + entry(p - 1, p - 1);
+            let dt = entry(p - 2, p - 2) * entry(p - 1, p - 1)
+                - entry(p - 2, p - 1) * entry(p - 1, p - 2);
             (tr, dt)
         };
 
         // First column of (H - λ1 I)(H - λ2 I) = H² - sH + tI (entries x, y, z).
-        let h00 = h[lo * n + lo];
-        let h10 = h[(lo + 1) * n + lo];
-        let h11 = h[(lo + 1) * n + (lo + 1)];
-        let h01 = h[lo * n + (lo + 1)];
+        let h00 = entry(lo, lo);
+        let h10 = entry(lo + 1, lo);
+        let h11 = entry(lo + 1, lo + 1);
+        let h01 = entry(lo, lo + 1);
         let mut x = h00 * h00 + h01 * h10 - s * h00 + t;
         let mut y = h10 * (h00 + h11 - s);
         let mut zz = if lo + 2 <= m {
-            h10 * h[(lo + 2) * n + (lo + 1)]
+            h10 * entry(lo + 2, lo + 1)
         } else {
             0.0
         };
@@ -7176,9 +7194,25 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         let mut k = lo;
         while k <= p - 2 {
             let nr = if k + 2 <= m { 3 } else { 2 };
-            let a0 = x;
-            let a1 = y;
-            let a2 = if nr == 3 { zz } else { 0.0 };
+            // The first vector is quadratic in H; subsequent bulges are linear.
+            // Normalize each before squaring, including a tiny active block
+            // inside a much larger matrix where global scaling cannot help.
+            let largest = x
+                .abs()
+                .max(y.abs())
+                .max(if nr == 3 { zz.abs() } else { 0.0 });
+            let unit = if largest == 0.0 {
+                1.0
+            } else {
+                ScaledReal {
+                    significand: 1.0,
+                    exponent: ScaledReal::new(largest).exponent,
+                }
+                .value()
+            };
+            let a0 = x / unit;
+            let a1 = y / unit;
+            let a2 = if nr == 3 { zz / unit } else { 0.0 };
             let norm2 = a0 * a0 + a1 * a1 + a2 * a2;
             if norm2 > 0.0 {
                 let norm = norm2.sqrt();
@@ -7361,38 +7395,67 @@ fn matrix_inf_norm(a: &[f64], n: usize) -> f64 {
     max_row_sum
 }
 
+fn schur_eigenvalues_2x2(a11: f64, a12: f64, a21: f64, a22: f64) -> [f64; 4] {
+    let trace = a11 + a22;
+    let determinant = a11 * a22 - a12 * a21;
+    let trace_squared = trace * trace;
+    let four_determinant = 4.0 * determinant;
+    let discriminant = trace_squared - four_determinant;
+    let cancellation_bound = 8.0 * f64::EPSILON * trace_squared.abs().max(four_determinant.abs());
+    if discriminant.is_finite() && discriminant.abs() > cancellation_bound {
+        if discriminant < 0.0 {
+            let real = trace / 2.0;
+            let imag = (-discriminant).sqrt() / 2.0;
+            return [real, imag, real, -imag];
+        }
+        let root = discriminant.sqrt();
+        return [(trace + root) / 2.0, 0.0, (trace - root) / 2.0, 0.0];
+    }
+
+    // ((a-d)/2)^2 + b*c avoids subtracting two nearly equal trace-sized
+    // quantities. Extended exponents preserve small conjugate pairs alongside
+    // huge real parts and offdiagonals whose product is finite even when their
+    // ratio cannot be represented. Keep the established arithmetic above when
+    // its discriminant is well resolved.
+    let half = ScaledReal::new(0.5);
+    let a = ScaledReal::new(a11);
+    let d = ScaledReal::new(a22);
+    let center = a.sum(d).multiply(half);
+    let difference = a.sum(d.negated()).multiply(half);
+    let radicand = difference
+        .multiply(difference)
+        .sum(ScaledReal::new(a12).multiply(ScaledReal::new(a21)));
+    let root = radicand.sqrt_abs();
+    if radicand.significand < 0.0 {
+        let real = center.value();
+        let imag = root.value();
+        [real, imag, real, -imag]
+    } else {
+        [
+            center.sum(root).value(),
+            0.0,
+            center.sum(root.negated()).value(),
+            0.0,
+        ]
+    }
+}
+
 /// Extract eigenvalues from quasi-upper-triangular (real Schur) form.
 /// Returns interleaved `[re0, im0, re1, im1, ...]`.
 fn extract_schur_eigenvalues(m: &[f64], n: usize) -> Vec<f64> {
-    // Scale-relative threshold for detecting 2x2 blocks in Schur form.
-    // Matches LAPACK's approach: compare sub-diagonal to eps * local diagonal magnitude.
-    let mat_norm = matrix_inf_norm(m, n).max(f64::MIN_POSITIVE);
-    let block_eps = f64::EPSILON * mat_norm;
+    // QR deflation explicitly zeros the subdiagonal between converged blocks.
+    // A global norm cutoff here would discard small complex pairs whenever an
+    // unrelated eigenvalue has a much larger magnitude.
     let mut eigenvalues = Vec::with_capacity(n * 2);
     let mut i = 0;
     while i < n {
-        if i + 1 < n && m[(i + 1) * n + i].abs() > block_eps {
-            let a11 = m[i * n + i];
-            let a12 = m[i * n + (i + 1)];
-            let a21 = m[(i + 1) * n + i];
-            let a22 = m[(i + 1) * n + (i + 1)];
-            let trace = a11 + a22;
-            let det = a11 * a22 - a12 * a21;
-            let disc = trace * trace - 4.0 * det;
-            if disc < 0.0 {
-                let real = trace / 2.0;
-                let imag = (-disc).sqrt() / 2.0;
-                eigenvalues.push(real);
-                eigenvalues.push(imag);
-                eigenvalues.push(real);
-                eigenvalues.push(-imag);
-            } else {
-                let sqrt_disc = disc.sqrt();
-                eigenvalues.push((trace + sqrt_disc) / 2.0);
-                eigenvalues.push(0.0);
-                eigenvalues.push((trace - sqrt_disc) / 2.0);
-                eigenvalues.push(0.0);
-            }
+        if i + 1 < n && m[(i + 1) * n + i] != 0.0 {
+            eigenvalues.extend_from_slice(&schur_eigenvalues_2x2(
+                m[i * n + i],
+                m[i * n + (i + 1)],
+                m[(i + 1) * n + i],
+                m[(i + 1) * n + (i + 1)],
+            ));
             i += 2;
         } else {
             eigenvalues.push(m[i * n + i]);
@@ -7401,6 +7464,39 @@ fn extract_schur_eigenvalues(m: &[f64], n: usize) -> Vec<f64> {
         }
     }
     eigenvalues
+}
+
+/// Keep the quadratic Francis shift and its squared reflector norm away from
+/// underflow/overflow. The existing arithmetic order is retained when the
+/// matrix is already in range. Division (rather than a reciprocal) also works
+/// for subnormal input magnitudes.
+fn scaled_schur_input(a: &[f64], n: usize) -> (std::borrow::Cow<'_, [f64]>, f64) {
+    let largest = a.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    let margin = 4.0 * n as f64;
+    let lower = f64::MIN_POSITIVE.sqrt().sqrt() * margin;
+    let upper = f64::MAX.sqrt().sqrt() / margin;
+    if largest == 0.0 || (lower..=upper).contains(&largest) {
+        return (std::borrow::Cow::Borrowed(a), 1.0);
+    }
+
+    // An already triangular matrix needs no reduction. In particular, retain
+    // tiny diagonal eigenvalues next to huge ones instead of scaling them away.
+    if (0..n).all(|row| a[row * n..row * n + row].iter().all(|&value| value == 0.0)) {
+        return (std::borrow::Cow::Borrowed(a), 1.0);
+    }
+
+    // Do not erase or round input entries into subnormal relative values. Such
+    // mixed-scale matrices need the local reflector/block scaling below rather
+    // than a single global factor (even a nonzero subnormal can lose most bits).
+    if a.iter()
+        .any(|&value| value != 0.0 && (value / largest).abs() < f64::MIN_POSITIVE)
+    {
+        return (std::borrow::Cow::Borrowed(a), 1.0);
+    }
+    (
+        std::borrow::Cow::Owned(a.iter().map(|value| value / largest).collect()),
+        largest,
+    )
 }
 
 /// Eigenvalues of a general (possibly non-symmetric) NxN matrix via QR iteration.
@@ -7418,12 +7514,18 @@ pub fn eig_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Err(spectral_non_finite_input_error());
     }
 
-    // Hessenberg reduction + implicit shifted QR
-    let mut h = hessenberg_reduce_values(a, n);
+    // Hessenberg reduction + implicit shifted QR, in bounded units when needed.
+    let (input, output_scale) = scaled_schur_input(a, n);
+    let mut h = hessenberg_reduce_values(&input, n);
     hessenberg_qr_iter(&mut h, None, n);
 
     // Extract eigenvalues from quasi-upper-triangular (real Schur) form
-    let eigenvalues = extract_schur_eigenvalues(&h, n);
+    let mut eigenvalues = extract_schur_eigenvalues(&h, n);
+    if output_scale != 1.0 {
+        for value in &mut eigenvalues {
+            *value *= output_scale;
+        }
+    }
     Ok(eigenvalues)
 }
 
@@ -7442,9 +7544,15 @@ pub fn schur_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgErro
         return Err(LinAlgError::SpectralConvergenceFailed);
     }
 
-    // Hessenberg reduction + implicit shifted QR with Schur vector accumulation
-    let (mut h, mut q) = hessenberg_reduce(a, n);
+    // Schur vectors are invariant under positive scalar multiplication of A.
+    let (input, output_scale) = scaled_schur_input(a, n);
+    let (mut h, mut q) = hessenberg_reduce(&input, n);
     hessenberg_qr_iter(&mut h, Some(&mut q), n);
+    if output_scale != 1.0 {
+        for value in &mut h {
+            *value *= output_scale;
+        }
+    }
 
     Ok((h, q))
 }
@@ -7772,22 +7880,13 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
         return Err(spectral_non_finite_input_error());
     }
 
-    // Hessenberg reduction + implicit shifted QR accumulating Schur vectors
-    let (mut h, mut z) = hessenberg_reduce(a, n);
+    // Keep the eigenvector solve in the same bounded units as the QR iteration.
+    let (input, output_scale) = scaled_schur_input(a, n);
+    let (mut h, mut z) = hessenberg_reduce(&input, n);
     hessenberg_qr_iter(&mut h, Some(&mut z), n);
 
     // Extract eigenvalues from quasi-upper-triangular Schur form
-    let eigenvalues = extract_schur_eigenvalues(&h, n);
-
-    // Keep block detection consistent with extract_schur_eigenvalues. Scale the
-    // shifted systems separately so back-substitution does not square entries
-    // in the original matrix's units or overflow when forming their products.
-    let h_norm = matrix_inf_norm(&h, n).max(f64::MIN_POSITIVE);
-    let block_eps = f64::EPSILON * h_norm;
-    let scale = h.iter().map(|value| value.abs()).fold(0.0, f64::max);
-    let scale = if scale == 0.0 { 1.0 } else { scale };
-    let scaled_h: Vec<f64> = h.iter().map(|value| value / scale).collect();
-    let pivot_floor = f64::EPSILON * matrix_inf_norm(&scaled_h, n).max(1.0);
+    let mut eigenvalues = extract_schur_eigenvalues(&h, n);
 
     // Build eigenvectors of T via back-substitution, then transform by Z.
     // Walk complete Schur blocks, for both real and complex eigenvalues. A
@@ -7796,52 +7895,77 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
     let mut eigvecs = vec![0.0; 2 * n * n];
     let mut col = 0;
     while col < n {
-        let lam_re = eigenvalues[2 * col] / scale;
-        let lam_im = eigenvalues[2 * col + 1] / scale;
-        let paired = col + 1 < n && h[(col + 1) * n + col].abs() > block_eps;
-        let end = col + if paired { 2 } else { 1 };
+        let lam_re = eigenvalues[2 * col];
+        let lam_im = eigenvalues[2 * col + 1];
+        let block_start = if col > 0 && h[col * n + col - 1] != 0.0 {
+            col - 1
+        } else {
+            col
+        };
+        let paired = block_start + 1 < n && h[(block_start + 1) * n + block_start] != 0.0;
+        let conjugate_pair = paired && lam_im != 0.0;
+        let end = block_start + if paired { 2 } else { 1 };
         let mut vr_re = vec![0.0; n];
         let mut vr_im = vec![0.0; n];
         if paired {
-            let upper = scaled_h[col * n + col + 1];
-            let lower = scaled_h[(col + 1) * n + col];
+            let upper = h[block_start * n + block_start + 1];
+            let lower = h[(block_start + 1) * n + block_start];
             // Choose the larger offdiagonal as the divisor, keeping the initial
             // eigenvector bounded even when the block is strongly unbalanced.
+            // Keep this block's units: a matrix-wide division can erase a tiny
+            // independent pair next to an unrelated huge eigenvalue.
             if upper.abs() >= lower.abs() {
-                vr_re[col] = 1.0;
-                vr_re[col + 1] = (lam_re - scaled_h[col * n + col]) / upper;
-                vr_im[col + 1] = lam_im / upper;
+                vr_re[block_start] = 1.0;
+                vr_re[block_start + 1] = ScaledReal::new(lam_re)
+                    .sum(ScaledReal::new(h[block_start * n + block_start]).negated())
+                    .divide(ScaledReal::new(upper));
+                vr_im[block_start + 1] = lam_im / upper;
             } else {
-                vr_re[col + 1] = 1.0;
-                vr_re[col] = (lam_re - scaled_h[(col + 1) * n + col + 1]) / lower;
-                vr_im[col] = lam_im / lower;
+                vr_re[block_start + 1] = 1.0;
+                vr_re[block_start] = ScaledReal::new(lam_re)
+                    .sum(ScaledReal::new(h[(block_start + 1) * n + block_start + 1]).negated())
+                    .divide(ScaledReal::new(lower));
+                vr_im[block_start] = lam_im / lower;
             }
         } else {
             vr_re[col] = 1.0;
         }
 
-        let mut unsolved = col;
+        let mut unsolved = block_start;
         while unsolved > 0 {
             let bottom = unsolved - 1;
-            let is_block = bottom > 0 && h[bottom * n + bottom - 1].abs() > block_eps;
+            let is_block = bottom > 0 && h[bottom * n + bottom - 1] != 0.0;
             let top = if is_block { bottom - 1 } else { bottom };
+            // Each shifted block is solved in its own bounded units. A single
+            // matrix-wide scale and pivot floor otherwise discard legitimate
+            // equations in small blocks of mixed-scale matrices.
+            let mut unit = lam_re.abs().max(lam_im.abs());
+            for row in top..=bottom {
+                for k in top..end {
+                    unit = unit.max(h[row * n + k].abs());
+                }
+            }
+            let unit = if unit == 0.0 { 1.0 } else { unit };
+            let local_re = lam_re / unit;
+            let local_im = lam_im / unit;
+            let pivot_floor = f64::EPSILON * (1.0 + local_re.abs() + local_im.abs());
             let mut rhs = [(0.0, 0.0); 2];
             for row in top..=bottom {
                 for k in (bottom + 1)..end {
-                    rhs[row - top].0 -= scaled_h[row * n + k] * vr_re[k];
-                    rhs[row - top].1 -= scaled_h[row * n + k] * vr_im[k];
+                    rhs[row - top].0 -= (h[row * n + k] / unit) * vr_re[k];
+                    rhs[row - top].1 -= (h[row * n + k] / unit) * vr_im[k];
                 }
             }
             if is_block {
                 let solved = schur_solve_2x2(
                     [
                         [
-                            (scaled_h[top * n + top] - lam_re, -lam_im),
-                            (scaled_h[top * n + bottom], 0.0),
+                            (h[top * n + top] / unit - local_re, -local_im),
+                            (h[top * n + bottom] / unit, 0.0),
                         ],
                         [
-                            (scaled_h[bottom * n + top], 0.0),
-                            (scaled_h[bottom * n + bottom] - lam_re, -lam_im),
+                            (h[bottom * n + top] / unit, 0.0),
+                            (h[bottom * n + bottom] / unit - local_re, -local_im),
                         ],
                     ],
                     rhs,
@@ -7854,7 +7978,7 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
             } else {
                 (vr_re[top], vr_im[top]) = schur_divide(
                     rhs[0],
-                    (scaled_h[top * n + top] - lam_re, -lam_im),
+                    (h[top * n + top] / unit - local_re, -local_im),
                     pivot_floor,
                 );
             }
@@ -7897,15 +8021,22 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
         for value in column {
             *value /= norm;
         }
-        if paired {
+        if conjugate_pair {
             for row in 0..n {
                 eigvecs[2 * ((col + 1) * n + row)] = eigvecs[2 * (col * n + row)];
                 eigvecs[2 * ((col + 1) * n + row) + 1] = -eigvecs[2 * (col * n + row) + 1];
             }
         }
-        col = end;
+        // An extreme unbalanced real 2x2 block can remain unreduced after QR.
+        // Its two real roots have independent eigenvectors, not conjugates.
+        col += if conjugate_pair { 2 } else { 1 };
     }
 
+    if output_scale != 1.0 {
+        for value in &mut eigenvalues {
+            *value *= output_scale;
+        }
+    }
     Ok((eigenvalues, eigvecs))
 }
 
@@ -11934,6 +12065,17 @@ impl ScaledReal {
             significand: -self.significand,
             ..self
         }
+    }
+
+    fn sqrt_abs(self) -> Self {
+        let significand = if self.exponent.rem_euclid(2) == 0 {
+            self.significand.abs()
+        } else {
+            2.0 * self.significand.abs()
+        };
+        let mut root = Self::new(significand.sqrt());
+        root.exponent += self.exponent.div_euclid(2);
+        root
     }
 
     fn divide(self, rhs: Self) -> f64 {
@@ -17832,6 +17974,228 @@ for col in range(n):
         let (lo, hi) = if e0 < e1 { (e0, e1) } else { (e1, e0) };
         assert!((lo / scale - 2.0).abs() < 1e-6, "small eigenvalue: {lo}");
         assert!((hi / scale - 5.0).abs() < 1e-6, "large eigenvalue: {hi}");
+    }
+
+    #[test]
+    fn general_eig_extreme_scales_preserve_eigenpairs_and_schur_reconstruction() {
+        let matrices = [
+            (2, vec![3.0, 1.0, 1.0, 2.0]),
+            (3, vec![3.0, 2.0, 1.0, 1.0, 4.0, 3.0, 2.0, -1.0, 2.0]),
+            (
+                4,
+                vec![
+                    0.0, -2.0, 1.0, 0.5, 2.0, 0.0, 0.3, 1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, 1.0,
+                    3.0,
+                ],
+            ),
+        ];
+        for (n, matrix) in matrices {
+            for scale in [1e-300, 1e-200, 1e-100, 1e-20, 1.0, 1e100, 1e200, 1e300] {
+                let a: Vec<f64> = matrix.iter().map(|value| value * scale).collect();
+                assert_eig_nxn_full_residuals(&a, n);
+                let values = eig_nxn(&a, n).expect("scaled eigenvalues");
+                let (full_values, _) = eig_nxn_full(&a, n).expect("scaled eigenpairs");
+                assert_eq!(values, full_values, "n={n}, scale={scale}");
+
+                let (t, q) = schur_nxn(&a, n).expect("scaled Schur decomposition");
+                assert!(t.iter().chain(&q).all(|value| value.is_finite()));
+                for row in 0..n {
+                    for col in 0..n {
+                        let mut reconstructed = 0.0;
+                        for i in 0..n {
+                            for j in 0..n {
+                                reconstructed +=
+                                    q[row * n + i] * (t[i * n + j] / scale) * q[col * n + j];
+                            }
+                        }
+                        assert!(
+                            (reconstructed - a[row * n + col] / scale).abs() < 1e-10,
+                            "n={n}, scale={scale}, ({row},{col}): {reconstructed}"
+                        );
+                        let inner: f64 = (0..n).map(|k| q[k * n + row] * q[k * n + col]).sum();
+                        let expected = if row == col { 1.0 } else { 0.0 };
+                        assert!((inner - expected).abs() < 1e-12);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn general_eig_retains_small_complex_blocks_and_tiny_diagonal_values() {
+        // The old global norm cutoff erased this independent conjugate pair.
+        for (large, small) in [
+            (1e30, 1.0),
+            (1e100, 1e-100),
+            (1e300, 1e-20),
+            (1e300, 1e-23),
+            (1e300, 1e-300),
+        ] {
+            let a = [large, 0.0, 0.0, 0.0, 0.0, -small, 0.0, small, 0.0];
+            let expected = [large, 0.0, 0.0, small, 0.0, -small];
+            let values = eig_nxn(&a, 3).expect("separate Schur blocks");
+            let (full_values, vectors) = eig_nxn_full(&a, 3).expect("separate eigenpairs");
+            for actual in [&values, &full_values] {
+                for (&got, &want) in actual.iter().zip(&expected) {
+                    if want == 0.0 {
+                        assert_eq!(got, 0.0);
+                    } else {
+                        assert!((got / want - 1.0).abs() < 1e-12);
+                    }
+                }
+            }
+            // Normalize by the small block itself: a residual divided by the
+            // unrelated large root would hide a completely wrong eigenvector.
+            for col in 1..3 {
+                let vector = &vectors[6 * col..6 * (col + 1)];
+                assert_eq!(&vector[..2], &[0.0, 0.0]);
+                let lambda = (
+                    full_values[2 * col] / small,
+                    full_values[2 * col + 1] / small,
+                );
+                let first = cmul(lambda.0, lambda.1, vector[2], vector[3]);
+                let second = cmul(lambda.0, lambda.1, vector[4], vector[5]);
+                assert!((-vector[4] - first.0).hypot(-vector[5] - first.1) < 1e-12);
+                assert!((vector[2] - second.0).hypot(vector[3] - second.1) < 1e-12);
+            }
+        }
+
+        // Scaling this triangular matrix globally would erase its small root.
+        let a = [1e300, 0.0, 0.0, 1e-300];
+        assert_eq!(eig_nxn(&a, 2).unwrap(), [1e300, 0.0, 1e-300, 0.0]);
+        assert_eq!(eig_nxn_full(&a, 2).unwrap().0, [1e300, 0.0, 1e-300, 0.0]);
+        assert_eq!(schur_nxn(&a, 2).unwrap().0, a);
+    }
+
+    #[test]
+    fn general_eig_mixed_scale_householders_and_real_blocks_remain_valid() {
+        for small in [1e-20, 1e-100, 1e-160, 1e-300] {
+            // Tiny Householder columns must not be skipped or produce an
+            // infinite reciprocal squared norm beside ordinary-sized entries.
+            let a = [1.0, 0.0, 0.0, small, 2.0, 0.0, small, 0.0, 3.0];
+            let values = eig_nxn(&a, 3).expect("mixed-scale Hessenberg reduction");
+            let mut real: Vec<_> = values.chunks_exact(2).map(|pair| pair[0]).collect();
+            real.sort_by(f64::total_cmp);
+            for (&got, expected) in real.iter().zip([1.0, 2.0, 3.0]) {
+                assert!((got - expected).abs() < 1e-12);
+            }
+            assert_eig_nxn_full_residuals(&a, 3);
+
+            // This real 2x2 block used to exhaust QR's iteration budget when
+            // squaring its quadratic shift vector underflowed to zero. Returning
+            // the same real vector twice can pass a matrix-wide residual bound.
+            let a = [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                3.0 * small,
+                small,
+                0.0,
+                small,
+                2.0 * small,
+            ];
+            let (values, vectors) = eig_nxn_full(&a, 3).expect("tiny real Schur block");
+            for col in 1..3 {
+                let lambda = values[2 * col] / small;
+                assert_eq!(values[2 * col + 1], 0.0);
+                let vector = &vectors[6 * col..6 * (col + 1)];
+                assert_eq!(&vector[..2], &[0.0, 0.0]);
+                assert_eq!(vector[3], 0.0);
+                assert_eq!(vector[5], 0.0);
+                let x = vector[2];
+                let y = vector[4];
+                assert!(
+                    (3.0 * x + y - lambda * x).hypot(x + 2.0 * y - lambda * y) < 1e-11,
+                    "small={small}, lambda={lambda}, vector=({x},{y})"
+                );
+            }
+            let overlap = vectors[8] * vectors[14] + vectors[10] * vectors[16];
+            assert!(
+                overlap.abs() < 1e-11,
+                "tiny real eigenvectors overlap: {overlap}"
+            );
+        }
+    }
+
+    #[test]
+    fn general_eig_rotation_preserves_subnormal_and_large_units() {
+        for scale in [f64::from_bits(1), 1e-320, 1e-200, 1e200, 1e300] {
+            let a = [0.0, -scale, scale, 0.0];
+            let expected = [0.0, scale, 0.0, -scale];
+            assert_eq!(eig_nxn(&a, 2).unwrap(), expected);
+            assert_eq!(eig_nxn_full(&a, 2).unwrap().0, expected);
+            assert_eig_nxn_full_residuals(&a, 2);
+        }
+        // The offdiagonal ratio underflows, but their product is exactly one.
+        let a = [0.0, -1e300, 1e-300, 0.0];
+        let values = eig_nxn(&a, 2).unwrap();
+        assert_eq!(values, [0.0, 1.0, 0.0, -1.0]);
+
+        // The real counterpart has two distinct real eigenvectors. A remaining
+        // 2x2 block must not cause the second vector to be copied as a conjugate.
+        let a = [0.0, 1e300, 1e-300, 0.0];
+        let (values, vectors) = eig_nxn_full(&a, 2).unwrap();
+        assert_eq!(values, [1.0, 0.0, -1.0, 0.0]);
+        for col in 0..2 {
+            let ratio = vectors[4 * col + 2] / vectors[4 * col];
+            assert!((ratio / (values[2 * col] / 1e300) - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn general_eig_scaled_dense_and_batched_values_match_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+scale = float(sys.argv[2])
+a = np.array(json.loads(sys.argv[3])).reshape(n, n)
+parts = np.array(json.loads(sys.argv[4])).reshape(n, 2)
+actual = parts[:, 0] + 1j * parts[:, 1]
+reference = np.linalg.eigvals(a)
+remaining = set(range(n))
+for value in actual / scale:
+    match = min(remaining, key=lambda k: abs(value - reference[k] / scale))
+    remaining.remove(match)
+    np.testing.assert_allclose(value, reference[match] / scale, rtol=1e-10, atol=1e-12)
+"#;
+        // These magnitudes stress the raw quartic QR intermediates while
+        // remaining inside the installed LAPACK oracle's safe scaling range.
+        let matrix = [3.0, 2.0, 1.0, 1.0, 4.0, 3.0, 2.0, -1.0, 2.0];
+        let mut batch = Vec::new();
+        let scales = [1e-100, 1e-20, 1.0, 1e100];
+        for scale in scales {
+            let a: Vec<f64> = matrix.iter().map(|value| value * scale).collect();
+            let values = eig_nxn(&a, 3).expect("scaled oracle eigenvalues");
+            let output = Command::new(oracle_python_bin())
+                .arg("-c")
+                .arg(script)
+                .arg("3")
+                .arg(scale.to_string())
+                .arg(format!("{a:?}"))
+                .arg(format!("{values:?}"))
+                .output()
+                .expect("NumPy scaled eigenvalue oracle should run");
+            assert!(
+                output.status.success(),
+                "scale={scale}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            batch.extend(a);
+        }
+        let values = batch_eig(&batch, &[scales.len(), 3, 3]).expect("scaled batch eigenvalues");
+        for (lane, input) in batch.chunks_exact(9).enumerate() {
+            assert_eq!(
+                &values[6 * lane..6 * (lane + 1)],
+                eig_nxn(input, 3).unwrap()
+            );
+        }
     }
 
     #[test]
