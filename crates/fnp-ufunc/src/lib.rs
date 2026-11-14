@@ -13242,11 +13242,25 @@ impl UFuncArray {
     ///
     /// Mimics `np.resize(a, new_shape)`.
     pub fn resize(&self, new_shape: &[usize]) -> Result<Self, UFuncError> {
-        let new_count = element_count(new_shape).map_err(UFuncError::Shape)?;
+        self.complex_logical_shape("resize")?;
+        let new_count = if new_shape.contains(&0) {
+            0
+        } else {
+            element_count(new_shape).map_err(UFuncError::Shape)?
+        };
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let physical_count = new_count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut shape = new_shape.to_vec();
+        if self.dtype.is_complex() {
+            shape.push(2);
+        }
         if self.values.is_empty() {
             return Ok(Self {
-                shape: new_shape.to_vec(),
-                values: vec![0.0; new_count],
+                shape,
+                values: try_zeroed_f64(physical_count, "resize")?,
                 dtype: self.dtype,
                 integer_sidecar: None,
             });
@@ -13257,22 +13271,26 @@ impl UFuncArray {
         // the materialized source-index vector, and the sidecar gather all
         // disappear. Pure relocation, bit-for-bit identical; sharing the
         // helper means the sidecar and non-sidecar branches cannot diverge.
-        let values = resize_seed_double(&self.values, new_count);
+        // Complex sources and output lengths contain complete pairs, so the
+        // same contiguous seed-and-double kernel cannot split an element.
+        let values = resize_seed_double(&self.values, physical_count)?;
         let integer_sidecar = match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
-                Some(IntegerSidecar::I64(resize_seed_double(v, new_count)))
+                Some(IntegerSidecar::I64(resize_seed_double(v, new_count)?))
             }
             Some(IntegerSidecar::U64(v)) => {
-                Some(IntegerSidecar::U64(resize_seed_double(v, new_count)))
+                Some(IntegerSidecar::U64(resize_seed_double(v, new_count)?))
             }
             None => None,
         };
-        Ok(Self {
-            shape: new_shape.to_vec(),
+        let mut result = Self {
+            shape,
             values,
             dtype: self.dtype,
             integer_sidecar,
-        })
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     fn where_select_complex(condition: &Self, x: &Self, y: &Self) -> Result<Self, UFuncError> {
@@ -15697,14 +15715,15 @@ impl UFuncArray {
 
     /// Construct an array by repeating input the given number of times along each axis.
     pub fn tile(&self, reps: &[usize]) -> Result<Self, UFuncError> {
+        let logical_shape = self.complex_logical_shape("tile")?;
         if reps.is_empty() {
-            return Ok(self.clone());
+            return Ok(self.copy_with_logical_shape(logical_shape));
         }
         // Pad shape or reps to match lengths
-        let ndim = self.shape.len().max(reps.len());
+        let ndim = logical_shape.len().max(reps.len());
         let mut padded_shape = vec![1usize; ndim];
-        let offset = ndim - self.shape.len();
-        for (i, &s) in self.shape.iter().enumerate() {
+        let offset = ndim - logical_shape.len();
+        for (i, &s) in logical_shape.iter().enumerate() {
             padded_shape[offset + i] = s;
         }
         let mut padded_reps = vec![1usize; ndim];
@@ -15713,20 +15732,27 @@ impl UFuncArray {
             padded_reps[rep_offset + i] = r;
         }
 
-        let out_shape: Vec<usize> = padded_shape
+        let mut out_shape: Vec<usize> = padded_shape
             .iter()
             .zip(&padded_reps)
-            .map(|(&s, &r)| s * r)
-            .collect();
-        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-        let src_count = element_count(&padded_shape).map_err(UFuncError::Shape)?;
-
-        // Reshape source to padded shape
-        let src_values = if self.values.len() == src_count {
-            &self.values[..]
+            .map(|(&s, &r)| {
+                s.checked_mul(r)
+                    .ok_or(UFuncError::Shape(ShapeError::Overflow))
+            })
+            .collect::<Result<_, _>>()?;
+        let out_count = if out_shape.contains(&0) {
+            0
         } else {
-            return Err(UFuncError::Msg("tile: internal shape mismatch".to_string()));
+            element_count(&out_shape).map_err(UFuncError::Shape)?
         };
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let physical_count = out_count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if self.dtype.is_complex() {
+            out_shape.push(2);
+        }
 
         if out_count == 0 {
             return Ok(Self {
@@ -15738,7 +15764,7 @@ impl UFuncArray {
         }
 
         // The output's last axis is the source's contiguous last-axis run (length
-        // s_last, stride 1) repeated r_last times, and outer rows just select a
+        // s_last * width) repeated r_last times, and outer rows just select a
         // source row by `index % source_dim`. So decode ONLY the outer rows
         // (out_count / out_last of them) and fill each via copy_from_slice memcpy
         // instead of recomputing an ndim divmod for every one of out_count
@@ -15757,13 +15783,17 @@ impl UFuncArray {
         // avoiding the zero-fill of a `vec![0.0; out_count]` we would immediately
         // overwrite. orow ascends and each row contributes a contiguous block, so
         // the appended order is the canonical row-major output order.
-        let mut out_values: Vec<f64> = Vec::with_capacity(out_count);
+        let mut out_values: Vec<f64> = Vec::new();
+        out_values.try_reserve_exact(physical_count).map_err(|_| {
+            UFuncError::Msg("tile: unable to allocate output array (out of memory)".into())
+        })?;
         let need_idx = self.integer_sidecar.is_some();
-        let mut source_indices = if need_idx {
-            Vec::with_capacity(out_count)
-        } else {
-            Vec::new()
-        };
+        let mut source_indices = Vec::new();
+        if need_idx {
+            source_indices.try_reserve_exact(out_count).map_err(|_| {
+                UFuncError::Msg("tile: unable to allocate index array (out of memory)".into())
+            })?;
+        }
 
         for orow in 0..outer_out {
             // Map the output outer row to the start of its source last-axis run.
@@ -15775,7 +15805,7 @@ impl UFuncArray {
                 let src_idx = out_idx % padded_shape[d];
                 src_flat += src_idx * src_strides[d];
             }
-            let src_row = &src_values[src_flat..src_flat + s_last];
+            let src_row = &self.values[src_flat * width..(src_flat + s_last) * width];
             for _ in 0..r_last {
                 out_values.extend_from_slice(src_row);
             }
@@ -15787,172 +15817,170 @@ impl UFuncArray {
                 }
             }
         }
-        Ok(Self {
+        let mut result = Self {
             shape: out_shape,
             values: out_values,
             dtype: self.dtype,
             integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-        })
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     /// Repeat elements of an array along an axis or flattened.
     pub fn repeat(&self, repeats: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
-        if repeats == 0 {
-            return match axis {
-                None => Ok(Self {
-                    shape: vec![0],
-                    values: Vec::new(),
-                    dtype: self.dtype,
-                    integer_sidecar: None,
-                }),
-                Some(ax) => {
-                    let ax = normalize_axis(ax, self.shape.len())?;
-                    let mut out_shape = self.shape.clone();
-                    out_shape[ax] = 0;
-                    Ok(Self {
-                        shape: out_shape,
-                        values: Vec::new(),
-                        dtype: self.dtype,
-                        integer_sidecar: None,
-                    })
-                }
-            };
+        let logical_shape = self.complex_logical_shape("repeat")?;
+        // NumPy converts the repeat count to intp before checking the axis or
+        // considering an empty result. Zero-sized inputs cannot bypass it.
+        if repeats > isize::MAX as usize {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
         }
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        // Like NumPy's repeat, scalar input is first promoted to a one-element
+        // vector, so explicit axes 0 and -1 are valid for scalars.
+        let axis = axis
+            .map(|axis| normalize_axis(axis, logical_shape.len().max(1)))
+            .transpose()?;
+        let mut out_shape = if axis.is_none() || logical_shape.is_empty() {
+            vec![self.values.len() / width]
+        } else {
+            logical_shape.clone()
+        };
+        let output_axis = axis.unwrap_or(0);
+        let axis_len = out_shape[output_axis];
+        let repeated_axis_len = axis_len
+            .checked_mul(repeats)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        out_shape[output_axis] = repeated_axis_len;
+        let out_count = if out_shape.contains(&0) {
+            0
+        } else {
+            element_count(&out_shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = out_count
+            .checked_mul(width)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
         if repeats == 1 {
-            let mut out = self.clone();
-            match axis {
-                None => out.shape = vec![out.values.len()],
-                Some(ax) => {
-                    normalize_axis(ax, self.shape.len())?;
-                }
-            }
-            return Ok(out);
+            return Ok(self.copy_with_logical_shape(out_shape));
         }
-        match axis {
-            None => {
-                let values: Vec<f64> = self
-                    .values
-                    .iter()
-                    .flat_map(|&v| std::iter::repeat_n(v, repeats))
-                    .collect();
-                let n = values.len();
-                let mut source_indices = Vec::with_capacity(n);
-                for i in 0..self.values.len() {
-                    for _ in 0..repeats {
-                        source_indices.push(i);
-                    }
-                }
-                Ok(Self {
-                    shape: vec![n],
-                    values,
-                    dtype: self.dtype,
-                    integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-                })
-            }
-            Some(ax) => {
-                let ax = normalize_axis(ax, self.shape.len())?;
-                let inner: usize =
-                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let axis_len = self.shape[ax];
-                let new_axis_len = axis_len * repeats;
+        if self.dtype.is_complex() {
+            out_shape.push(2);
+        }
+        if physical_count == 0 {
+            return Ok(Self {
+                shape: out_shape,
+                values: Vec::new(),
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&[]),
+            });
+        }
+        let inner = if let Some(axis) = axis.filter(|_| !logical_shape.is_empty()) {
+            element_count(&logical_shape[axis + 1..]).map_err(UFuncError::Shape)? * width
+        } else {
+            width
+        };
 
-                let mut out_shape = self.shape.clone();
-                out_shape[ax] = new_axis_len;
-                let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-                if out_count == 0 || inner == 0 {
-                    return Ok(Self {
-                        shape: out_shape,
-                        values: vec![0.0f64; out_count],
-                        dtype: self.dtype,
-                        integer_sidecar: self.reindexed_integer_sidecar(&vec![0usize; out_count]),
-                    });
-                }
-
-                // Each output row is a contiguous `inner`-length slice that copies a
-                // contiguous source row verbatim (output row `orow` selects source
-                // axis index `k = (orow mod axis_len*repeats) / repeats` within outer
-                // block `o = orow / (axis_len*repeats)`). The old loop copied the run
-                // element-by-element; instead memcpy each row via copy_from_slice and
-                // run the independent rows across the rayon pool. A pure data move, so
-                // bit-for-bit identical. The i64/u64 sidecar reindex map is only built
-                // when a sidecar is present.
-                let akr = axis_len * repeats;
-                let src_ref = &self.values;
-                let mut values = vec![0.0f64; out_count];
-                const REPEAT_PAR_MIN: usize = 1 << 15;
-                if inner == 1 {
-                    let fill_block = |(src_idx, dst): (usize, &mut [f64])| {
-                        dst.fill(src_ref[src_idx]);
-                    };
-                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
-                        values
-                            .par_chunks_mut(repeats)
-                            .enumerate()
-                            .for_each(fill_block);
-                    } else {
-                        values.chunks_mut(repeats).enumerate().for_each(fill_block);
-                    }
-                } else {
-                    let fill_row = |(orow, dst): (usize, &mut [f64])| {
-                        let o = orow / akr;
-                        let k = (orow % akr) / repeats;
-                        let src_base = o * axis_len * inner + k * inner;
-                        dst.copy_from_slice(&src_ref[src_base..src_base + inner]);
-                    };
-                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
-                        values.par_chunks_mut(inner).enumerate().for_each(fill_row);
-                    } else {
-                        values.chunks_mut(inner).enumerate().for_each(fill_row);
-                    }
-                }
-                let integer_sidecar = if self.integer_sidecar.is_some() {
-                    let mut source_indices = vec![0usize; out_count];
-                    let fill_idx = |(orow, dst): (usize, &mut [usize])| {
-                        let o = orow / akr;
-                        let k = (orow % akr) / repeats;
-                        let src_base = o * axis_len * inner + k * inner;
-                        for (i, slot) in dst.iter_mut().enumerate() {
-                            *slot = src_base + i;
-                        }
-                    };
-                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
-                        source_indices
-                            .par_chunks_mut(inner)
-                            .enumerate()
-                            .for_each(fill_idx);
-                    } else {
-                        source_indices
-                            .chunks_mut(inner)
-                            .enumerate()
-                            .for_each(fill_idx);
-                    }
-                    self.reindexed_integer_sidecar(&source_indices)
-                } else {
-                    None
+        // Repeat complete contiguous rows, including both components of each
+        // complex element. Share the existing block-fill and parallel row-copy
+        // kernels with exact integer sidecars instead of materializing indices.
+        fn repeat_rows<T: Copy + Default + Send + Sync>(
+            source: &[T],
+            count: usize,
+            axis_len: usize,
+            inner: usize,
+            repeats: usize,
+            repeated_axis_len: usize,
+        ) -> Result<Vec<T>, UFuncError> {
+            let mut values = Vec::new();
+            values.try_reserve_exact(count).map_err(|_| {
+                UFuncError::Msg("repeat: unable to allocate output array (out of memory)".into())
+            })?;
+            values.resize(count, T::default());
+            const REPEAT_PAR_MIN: usize = 1 << 15;
+            let parallel = count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2;
+            if inner == 1 {
+                let fill_block = |(source_index, destination): (usize, &mut [T])| {
+                    destination.fill(source[source_index]);
                 };
-                Ok(Self {
-                    shape: out_shape,
-                    values,
-                    dtype: self.dtype,
-                    integer_sidecar,
-                })
+                if parallel {
+                    values
+                        .par_chunks_mut(repeats)
+                        .enumerate()
+                        .for_each(fill_block);
+                } else {
+                    values.chunks_mut(repeats).enumerate().for_each(fill_block);
+                }
+            } else {
+                let fill_row = |(row, destination): (usize, &mut [T])| {
+                    let outer = row / repeated_axis_len;
+                    let axis_index = (row % repeated_axis_len) / repeats;
+                    let source_start = (outer * axis_len + axis_index) * inner;
+                    destination.copy_from_slice(&source[source_start..source_start + inner]);
+                };
+                if parallel {
+                    values.par_chunks_mut(inner).enumerate().for_each(fill_row);
+                } else {
+                    values.chunks_mut(inner).enumerate().for_each(fill_row);
+                }
             }
+            Ok(values)
         }
+
+        let values = repeat_rows(
+            &self.values,
+            physical_count,
+            axis_len,
+            inner,
+            repeats,
+            repeated_axis_len,
+        )?;
+        let integer_sidecar = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(source)) => Some(IntegerSidecar::I64(repeat_rows(
+                source,
+                out_count,
+                axis_len,
+                inner,
+                repeats,
+                repeated_axis_len,
+            )?)),
+            Some(IntegerSidecar::U64(source)) => Some(IntegerSidecar::U64(repeat_rows(
+                source,
+                out_count,
+                axis_len,
+                inner,
+                repeats,
+                repeated_axis_len,
+            )?)),
+            None => None,
+        };
+        let mut result = Self {
+            shape: out_shape,
+            values,
+            dtype: self.dtype,
+            integer_sidecar,
+        };
+        result.round_complex_transform_components();
+        Ok(result)
     }
 
     /// Roll array elements along an axis or flattened.
     pub fn roll(&self, shift: isize, axis: Option<isize>) -> Result<Self, UFuncError> {
-        match axis {
+        let logical_shape = self.complex_logical_shape("roll")?;
+        let width = if self.dtype.is_complex() { 2 } else { 1 };
+        let result = match axis {
             None => {
                 let n = self.values.len();
                 if n == 0 {
-                    return Ok(self.clone());
+                    return Ok(self.copy_with_logical_shape(logical_shape));
                 }
-                let s = if shift >= 0 {
-                    (shift as usize) % n
+                let count = n / width;
+                let logical_shift = if shift >= 0 {
+                    (shift as usize) % count
                 } else {
-                    (n - (shift.unsigned_abs() % n)) % n
+                    (count - (shift.unsigned_abs() % count)) % count
                 };
+                let s = logical_shift * width;
                 // A flat roll is a rotation: out = values[n-s..] ++ values[..n-s].
                 // The old path scattered element-by-element with a per-element
                 // modulo AND built a full n-element source-index array used only to
@@ -15960,17 +15988,24 @@ impl UFuncArray {
                 // two contiguous block copies directly — bit-identical (out[(i+s)%n]
                 // = values[i] is exactly that rotation), no modulo, no index array.
                 if self.integer_sidecar.is_none() {
-                    let mut values = Vec::with_capacity(n);
+                    let mut values = Vec::new();
+                    values.try_reserve_exact(n).map_err(|_| {
+                        UFuncError::Msg(
+                            "roll: unable to allocate output array (out of memory)".into(),
+                        )
+                    })?;
                     values.extend_from_slice(&self.values[n - s..]);
                     values.extend_from_slice(&self.values[..n - s]);
-                    return Ok(Self {
+                    let mut result = Self {
                         shape: self.shape.clone(),
                         values,
                         dtype: self.dtype,
                         integer_sidecar: None,
-                    });
+                    };
+                    result.round_complex_transform_components();
+                    return Ok(result);
                 }
-                let mut values = vec![0.0f64; n];
+                let mut values = try_zeroed_f64(n, "roll")?;
                 let mut source_indices = vec![0usize; n];
                 for (i, &v) in self.values.iter().enumerate() {
                     let dst = (i + s) % n;
@@ -15985,22 +16020,24 @@ impl UFuncArray {
                 })
             }
             Some(ax) => {
-                let ax = normalize_axis(ax, self.shape.len())?;
+                let ax = normalize_axis(ax, logical_shape.len())?;
+                // A zero extent on any axis makes the entire operation empty.
+                // Return before constructing strides or zero-length chunks.
+                if self.values.is_empty() {
+                    return Ok(self.copy_with_logical_shape(logical_shape));
+                }
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let axis_len = self.shape[ax];
-                if axis_len == 0 {
-                    return Ok(self.clone());
-                }
+                let axis_len = logical_shape[ax];
                 let s = if shift >= 0 {
                     (shift as usize) % axis_len
                 } else {
                     (axis_len - (shift.unsigned_abs() % axis_len)) % axis_len
                 };
                 if s == 0 {
-                    return Ok(self.clone());
+                    return Ok(self.copy_with_logical_shape(logical_shape));
                 }
                 // Rolling axis `ax` by `s` rotates the `axis_len` rows (each a
                 // contiguous `inner`-element run) within every outer block: in row k
@@ -16012,7 +16049,7 @@ impl UFuncArray {
                 let block = axis_len * inner;
                 let split = (axis_len - s) * inner;
                 let s_off = s * inner;
-                let mut values = vec![0.0f64; self.values.len()];
+                let mut values = try_zeroed_f64(self.values.len(), "roll")?;
                 let rotate = |(out_block, in_block): (&mut [f64], &[f64])| {
                     out_block[s_off..block].copy_from_slice(&in_block[0..split]);
                     out_block[0..s_off].copy_from_slice(&in_block[split..block]);
@@ -16056,29 +16093,49 @@ impl UFuncArray {
                     integer_sidecar,
                 })
             }
-        }
+        };
+        result.map(|mut result| {
+            result.round_complex_transform_components();
+            result
+        })
     }
 
     /// Roll along multiple axes simultaneously (np.roll with array shift/axis).
     ///
-    /// `shifts` and `axes` must have the same length. Each axis is rolled by the
-    /// corresponding shift amount sequentially.
+    /// `shifts` and `axes` broadcast when either has length one. Repeated axes
+    /// accumulate their shifts without overflowing a signed shift sum.
     pub fn roll_multi(&self, shifts: &[isize], axes: &[isize]) -> Result<Self, UFuncError> {
-        if shifts.len() != axes.len() {
+        let logical_shape = self.complex_logical_shape("roll")?;
+        let axes = axes
+            .iter()
+            .map(|&axis| normalize_axis(axis, logical_shape.len()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = if shifts.len() == axes.len() {
+            shifts.len()
+        } else if shifts.len() == 1 {
+            axes.len()
+        } else if axes.len() == 1 {
+            shifts.len()
+        } else {
             return Err(UFuncError::Msg(
-                "roll: shift and axis must have same length".to_string(),
+                "roll: shift and axis must broadcast to the same shape".into(),
             ));
-        }
+        };
         // Roll the first (axis, shift) straight from self rather than cloning the
         // whole input to seed the loop. Bit-identical (each roll is read-only and
         // builds a new array; same sequence of rolls).
-        let mut pairs = shifts.iter().zip(axes.iter());
-        let Some((&s0, &a0)) = pairs.next() else {
-            return Ok(self.clone());
+        let mut pairs = (0..count).map(|index| {
+            (
+                shifts[if shifts.len() == 1 { 0 } else { index }],
+                axes[if axes.len() == 1 { 0 } else { index }],
+            )
+        });
+        let Some((s0, a0)) = pairs.next() else {
+            return Ok(self.copy_with_logical_shape(logical_shape));
         };
-        let mut current = self.roll(s0, Some(a0))?;
-        for (&s, &a) in pairs {
-            current = current.roll(s, Some(a))?;
+        let mut current = self.roll(s0, Some(a0 as isize))?;
+        for (s, a) in pairs {
+            current = current.roll(s, Some(a as isize))?;
         }
         Ok(current)
     }
@@ -23953,18 +24010,26 @@ impl UFuncArray {
         if n == 0 {
             return Ok(self.clone());
         }
-        if self.shape.is_empty() {
+        let logical_shape = self.complex_logical_shape("diff")?;
+        if logical_shape.is_empty() {
             return Err(UFuncError::Msg(
                 "diff requires input that is at least one dimensional".to_string(),
             ));
         }
         let ax = match axis {
-            Some(a) => normalize_axis(a, self.shape.len())?,
-            None => self.shape.len() - 1,
+            Some(a) => normalize_axis(a, logical_shape.len())?,
+            None => logical_shape.len() - 1,
         };
-        if self.shape[ax] == 0 {
+        // The physical inner span includes both complex components. Advancing
+        // along a logical axis therefore subtracts real from real and imaginary
+        // from imaginary without gathering or splitting either component plane.
+        // Empty arrays never visit the outer/inner products, which can overflow
+        // for otherwise valid zero-sized shapes.
+        if self.values.is_empty() || self.shape[ax] <= n {
+            let mut shape = self.shape.clone();
+            shape[ax] = shape[ax].saturating_sub(n);
             return Ok(Self {
-                shape: self.shape.clone(),
+                shape,
                 values: Vec::new(),
                 dtype: self.dtype,
                 integer_sidecar: None,
@@ -24111,7 +24176,7 @@ impl UFuncArray {
             DType::U8 => |v1, v0| f64::from((v1 as u8).wrapping_sub(v0 as u8)),
             DType::U16 => |v1, v0| f64::from((v1 as u16).wrapping_sub(v0 as u16)),
             DType::U32 => |v1, v0| f64::from((v1 as u32).wrapping_sub(v0 as u32)),
-            DType::F32 => |v1, v0| f64::from((v1 as f32) - (v0 as f32)),
+            DType::F32 | DType::Complex64 => |v1, v0| f64::from((v1 as f32) - (v0 as f32)),
             DType::F16 => |v1, v0| {
                 f64::from(fnp_dtype::f16::from_f32(
                     fnp_dtype::f16::from_f64(v1).to_f32() - fnp_dtype::f16::from_f64(v0).to_f32(),
@@ -24202,24 +24267,45 @@ impl UFuncArray {
         prepend: Option<&Self>,
         append: Option<&Self>,
     ) -> Result<Self, UFuncError> {
-        if prepend.is_none() && append.is_none() {
+        if n == 0 || (prepend.is_none() && append.is_none()) {
             return self.diff(n, axis);
         }
-        // Concatenate prepend + self + append along axis, then diff
+        let logical_shape = self.complex_logical_shape("diff")?;
+        if logical_shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "diff requires input that is at least one dimensional".into(),
+            ));
+        }
         let ax = match axis {
-            Some(a) => normalize_axis(a, self.shape.len())?,
-            None => self.shape.len() - 1,
+            Some(a) => normalize_axis(a, logical_shape.len())?,
+            None => logical_shape.len() - 1,
         };
+        // NumPy expands scalar endpoints to one complete slice along the
+        // selected axis. Non-scalar endpoints keep their shape and the shared
+        // concatenate path validates dimensions and promotes original dtypes.
+        let expand_scalar = |value: Option<&Self>| -> Result<Option<Self>, UFuncError> {
+            if let Some(value) = value
+                && value.complex_logical_shape("diff")?.is_empty()
+            {
+                let mut shape = logical_shape.clone();
+                shape[ax] = 1;
+                value.broadcast_to(&shape).map(Some)
+            } else {
+                Ok(None)
+            }
+        };
+        let scalar_prepend = expand_scalar(prepend)?;
+        let scalar_append = expand_scalar(append)?;
         let mut arrays: Vec<&Self> = Vec::new();
-        if let Some(p) = prepend {
+        if let Some(p) = scalar_prepend.as_ref().or(prepend) {
             arrays.push(p);
         }
         arrays.push(self);
-        if let Some(a) = append {
+        if let Some(a) = scalar_append.as_ref().or(append) {
             arrays.push(a);
         }
-        let combined = Self::concatenate(&arrays, ax as isize)?;
-        combined.diff(n, axis)
+        let combined = Self::join_with_dtype(&arrays, ax as isize, None, "same_kind", false)?;
+        combined.diff(n, Some(ax as isize))
     }
 
     /// Element-wise comparison: |a - b| <= atol + rtol * |b| (np.isclose).
@@ -36644,18 +36730,47 @@ impl UFuncArray {
 
     /// Differences between consecutive elements of an array (np.ediff1d).
     pub fn ediff1d(&self) -> Result<Self, UFuncError> {
-        self.ediff1d_ext(None, None)
+        self.ediff1d_with_arrays(None, None)
     }
 
     /// `np.ediff1d` with `to_begin` and `to_end` parameters.
     ///
     /// Values from `to_begin` are prepended and `to_end` are appended to the
-    /// difference array.
+    /// difference array. These endpoints have float64 dtype; NumPy's
+    /// `same_kind` rule rejects them for integer input, even when empty.
+    /// Use [`Self::ediff1d_with_arrays`] for integer or complex endpoints.
     pub fn ediff1d_ext(
         &self,
         to_begin: Option<&[f64]>,
         to_end: Option<&[f64]>,
     ) -> Result<Self, UFuncError> {
+        let to_begin = to_begin
+            .map(|values| Self::new(vec![values.len()], values.to_vec(), DType::F64))
+            .transpose()?;
+        let to_end = to_end
+            .map(|values| Self::new(vec![values.len()], values.to_vec(), DType::F64))
+            .transpose()?;
+        self.ediff1d_with_arrays(to_begin.as_ref(), to_end.as_ref())
+    }
+
+    /// Flatten complete elements, subtract neighbours, and add typed endpoints.
+    /// Endpoints are flattened independently and cast to the input dtype under
+    /// NumPy's `same_kind` rule. Integer sidecars remain exact throughout.
+    pub fn ediff1d_with_arrays(
+        &self,
+        to_begin: Option<&Self>,
+        to_end: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
+        self.complex_logical_shape("ediff1d")?;
+        for endpoint in [to_begin, to_end].into_iter().flatten() {
+            endpoint.complex_logical_shape("ediff1d")?;
+            if !fnp_dtype::can_cast(endpoint.dtype, self.dtype, "same_kind") {
+                return Err(UFuncError::Msg(format!(
+                    "ediff1d: endpoint dtype {:?} is not compatible with {:?} under the 'same_kind' rule",
+                    endpoint.dtype, self.dtype
+                )));
+            }
+        }
         if self.dtype == DType::Bool {
             return Err(UFuncError::Msg(
                 "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead.".to_string(),
@@ -36665,26 +36780,16 @@ impl UFuncArray {
         if to_begin.is_none() && to_end.is_none() {
             return Ok(diff_arr);
         }
-        let begin = to_begin.unwrap_or(&[]);
-        let end = to_end.unwrap_or(&[]);
         let mut parts: Vec<Self> = Vec::with_capacity(3);
-        if !begin.is_empty() {
-            parts.push(Self::from_values_with_dtype(
-                vec![begin.len()],
-                begin.to_vec(),
-                diff_arr.dtype,
-            )?);
+        if let Some(begin) = to_begin {
+            parts.push(begin.ravel());
         }
         parts.push(diff_arr);
-        if !end.is_empty() {
-            parts.push(Self::from_values_with_dtype(
-                vec![end.len()],
-                end.to_vec(),
-                self.dtype,
-            )?);
+        if let Some(end) = to_end {
+            parts.push(end.ravel());
         }
         let refs: Vec<&Self> = parts.iter().collect();
-        Self::concatenate(&refs, 0)
+        Self::concatenate_with_dtype(&refs, 0, self.dtype, "same_kind")
     }
 
     /// Trapezoidal integration (np.trapezoid / np.trapz).
@@ -45571,15 +45676,18 @@ fn transpose_last2_par<T: Copy + Send + Sync>(
 /// prefix, then double via `extend_from_within` (the .359 resize kernel,
 /// generic over the f64 bridge and the i64/u64 sidecar payloads). Produces
 /// exactly `src[i % src.len()]` at every position - a pure relocation.
-fn resize_seed_double<T: Copy>(src: &[T], new_count: usize) -> Vec<T> {
-    let mut out = Vec::with_capacity(new_count);
+fn resize_seed_double<T: Copy>(src: &[T], new_count: usize) -> Result<Vec<T>, UFuncError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(new_count).map_err(|_| {
+        UFuncError::Msg("resize: unable to allocate output array (out of memory)".into())
+    })?;
     let seed_len = src.len().min(new_count);
     out.extend_from_slice(&src[..seed_len]);
     while out.len() < new_count {
         let copy_len = out.len().min(new_count - out.len());
         out.extend_from_within(..copy_len);
     }
-    out
+    Ok(out)
 }
 
 /// Transpose for a suffix-identity permutation (`perm[d] == d` for every
@@ -99331,14 +99439,17 @@ print(json.dumps(mismatches))
             u64_arr.diff(2, None).unwrap().to_storage().unwrap(),
             ArrayStorage::U64(vec![u64::MAX - 2, 3])
         );
+        let begin = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![7])).unwrap();
+        let end = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![9])).unwrap();
         assert_eq!(
             u64_arr
-                .ediff1d_ext(Some(&[7.0]), Some(&[9.0]))
+                .ediff1d_with_arrays(Some(&begin), Some(&end))
                 .unwrap()
                 .to_storage()
                 .unwrap(),
             ArrayStorage::U64(vec![7, 1, u64::MAX - 1, 1, 9])
         );
+        assert!(u64_arr.ediff1d_ext(Some(&[7.0]), Some(&[9.0])).is_err());
 
         // 5. Small U64/I64 binary ops that wrap past 2^53 or underflow 0 synthesize sidecar.
         let u64_zero = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![0])).unwrap();

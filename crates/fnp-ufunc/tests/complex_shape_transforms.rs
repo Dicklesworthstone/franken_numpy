@@ -155,6 +155,14 @@ for case in data['cases']:
             result = np.rollaxis(array, args['axis'], args['start'])
         elif op == 'broadcast_to':
             result = np.broadcast_to(array, args['shape'])
+        elif op == 'tile':
+            result = np.tile(array, args['reps'])
+        elif op == 'repeat':
+            result = np.repeat(array, args['repeats'], axis=args['axis'])
+        elif op == 'resize':
+            result = np.resize(array, args['shape'])
+        elif op == 'roll':
+            result = np.roll(array, args['shift'], axis=args['axis'])
         elif op in ('fliplr', 'flipud'):
             result = getattr(np, op)(array)
         elif op == 'rot90':
@@ -255,6 +263,347 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn complex_repetition_and_resize_match_numpy_logical_elements() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[3],
+        &[2, 3],
+        &[3, 0],
+        &[0, 3],
+        &[2, 1, 3],
+        &[2, 0, 3],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let array = complex(shape, dtype);
+            let input = batch.input(&array);
+            let repetitions: &[&[usize]] = &[
+                &[],
+                &[0],
+                &[1],
+                &[2],
+                &[1, 2],
+                &[2, 1],
+                &[0, 2],
+                &[2, 0],
+                &[2, 3, 1],
+                &[1, 2, 2, 1],
+            ];
+            for &reps in repetitions {
+                batch.case(input, "tile", json!({"reps": reps}), array.tile(reps));
+            }
+            let rank = shape.len() as isize;
+            for repeats in [0, 1, 2, 3] {
+                for axis in [
+                    None,
+                    Some(-rank - 1),
+                    Some(-rank),
+                    Some(-1),
+                    Some(0),
+                    Some(1),
+                    Some(rank),
+                ] {
+                    batch.case(
+                        input,
+                        "repeat",
+                        json!({"repeats": repeats, "axis": axis}),
+                        array.repeat(repeats, axis),
+                    );
+                }
+            }
+            let resized_shapes: &[&[usize]] =
+                &[&[], &[0], &[1], &[5], &[2, 3], &[3, 2, 2], &[2, 0, 3]];
+            for &new_shape in resized_shapes {
+                batch.case(
+                    input,
+                    "resize",
+                    json!({"shape": new_shape}),
+                    array.resize(new_shape),
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_roll_matches_numpy_logical_axes_and_shift_broadcasting() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[5],
+        &[2, 3],
+        &[3, 0],
+        &[0, 3],
+        &[2, 1, 3],
+        &[2, 0, 3],
+    ];
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for &shape in shapes {
+            let array = complex(shape, dtype);
+            let input = batch.input(&array);
+            let rank = shape.len() as isize;
+            for shift in [isize::MIN, -101, -7, -1, 0, 1, 5, 102, isize::MAX] {
+                for axis in [
+                    None,
+                    Some(-rank - 1),
+                    Some(-rank),
+                    Some(-1),
+                    Some(0),
+                    Some(1),
+                    Some(rank),
+                ] {
+                    batch.case(
+                        input,
+                        "roll",
+                        json!({"shift": shift, "axis": axis}),
+                        array.roll(shift, axis),
+                    );
+                }
+            }
+            let multi_cases: &[(&[isize], &[isize])] = &[
+                (&[], &[]),
+                (&[], &[0]),
+                (&[1], &[]),
+                (&[1, 2], &[]),
+                (&[], &[0, 1]),
+                (&[1], &[0, 1]),
+                (&[1, 2], &[0]),
+                (&[1, 2], &[0, 1]),
+                (&[1, 2], &[0, 0]),
+                (&[1, 2], &[-1, -1]),
+                (&[1, 2], &[0, 1, 0]),
+                (&[1], &[0, isize::MAX]),
+                (&[isize::MAX, isize::MAX], &[-1, -1]),
+                (&[isize::MIN, isize::MIN], &[-1, -1]),
+                (&[isize::MIN, isize::MAX], &[-1]),
+            ];
+            for &(shifts, axes) in multi_cases {
+                batch.case(
+                    input,
+                    "roll",
+                    json!({"shift": shifts, "axis": axes}),
+                    array.roll_multi(shifts, axes),
+                );
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn repetition_resize_and_roll_preserve_real_and_exact_integer_payloads() {
+    let mut batch = OracleBatch::default();
+    for array in [
+        UFuncArray::from_storage(
+            vec![2, 3],
+            ArrayStorage::I64(vec![i64::MIN, i64::MAX, (1_i64 << 53) + 1, -1, 0, 1]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(
+            vec![2, 3],
+            ArrayStorage::U64(vec![u64::MAX, u64::MAX - 1, (1_u64 << 63) + 1, 0, 1, 2]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(
+            vec![2, 3],
+            ArrayStorage::F32(vec![0.0, -0.0, 0.25, -3.5, f32::INFINITY, f32::NAN]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![i64::MAX])).unwrap(),
+        UFuncArray::from_storage(vec![], ArrayStorage::U64(vec![u64::MAX])).unwrap(),
+        UFuncArray::from_storage(vec![2, 0, 3], ArrayStorage::I64(vec![])).unwrap(),
+    ] {
+        let input = batch.input(&array);
+        for reps in [&[][..], &[0][..], &[2][..], &[2, 3][..]] {
+            batch.case(input, "tile", json!({"reps": reps}), array.tile(reps));
+        }
+        for repeats in [0, 1, 3] {
+            for axis in [None, Some(-1), Some(0), Some(1)] {
+                batch.case(
+                    input,
+                    "repeat",
+                    json!({"repeats": repeats, "axis": axis}),
+                    array.repeat(repeats, axis),
+                );
+            }
+        }
+        for shift in [isize::MIN, -1, 0, 3, isize::MAX] {
+            for axis in [None, Some(-1), Some(0), Some(1)] {
+                batch.case(
+                    input,
+                    "roll",
+                    json!({"shift": shift, "axis": axis}),
+                    array.roll(shift, axis),
+                );
+            }
+        }
+        for shape in [&[][..], &[0][..], &[1][..], &[3, 5][..]] {
+            batch.case(
+                input,
+                "resize",
+                json!({"shape": shape}),
+                array.resize(shape),
+            );
+        }
+        for (shifts, axes) in [
+            (&[1][..], &[0, 1][..]),
+            (&[1, 2][..], &[-1][..]),
+            (&[isize::MIN, isize::MAX][..], &[0, 0][..]),
+        ] {
+            batch.case(
+                input,
+                "roll",
+                json!({"shift": shifts, "axis": axes}),
+                array.roll_multi(shifts, axes),
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn complex_relocation_retains_paired_nan_payloads_and_signed_zeros() {
+    let source = [
+        f64::from_bits(0x7ff8_0000_0000_0123),
+        -0.0,
+        0.0,
+        f64::from_bits(0xfff8_0000_0000_0456),
+        -0.0,
+        0.0,
+    ];
+    let array = UFuncArray::new(vec![3, 2], source.to_vec(), DType::Complex128).unwrap();
+    for (result, indices) in [
+        (array.tile(&[2]).unwrap(), vec![0, 1, 2, 0, 1, 2]),
+        (array.repeat(2, None).unwrap(), vec![0, 0, 1, 1, 2, 2]),
+        (array.repeat(2, Some(-1)).unwrap(), vec![0, 0, 1, 1, 2, 2]),
+        (array.roll(1, None).unwrap(), vec![2, 0, 1]),
+        (array.roll(-1, Some(-1)).unwrap(), vec![1, 2, 0]),
+        (array.resize(&[4]).unwrap(), vec![0, 1, 2, 0]),
+    ] {
+        assert_eq!(result.shape(), &[indices.len(), 2]);
+        for (output, input) in indices.into_iter().enumerate() {
+            for component in 0..2 {
+                assert_eq!(
+                    result.values()[2 * output + component].to_bits(),
+                    source[2 * input + component].to_bits()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn logical_relocation_covers_parallel_copy_and_repeat_kernels() {
+    let mut batch = OracleBatch::default();
+    for array in [
+        complex(&[17, 1025], DType::Complex64),
+        complex(&[17, 1025], DType::Complex128),
+        UFuncArray::from_storage(
+            vec![17, 2049],
+            ArrayStorage::U64((0..17 * 2049).map(|index| (1_u64 << 63) + index).collect()),
+        )
+        .unwrap(),
+    ] {
+        let input = batch.input(&array);
+        for axis in [Some(0), Some(-1)] {
+            batch.case(
+                input,
+                "repeat",
+                json!({"repeats": 2, "axis": axis}),
+                array.repeat(2, axis),
+            );
+        }
+        batch.case(
+            input,
+            "roll",
+            json!({"shift": -101, "axis": -1}),
+            array.roll(-101, Some(-1)),
+        );
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn logical_relocation_rejects_malformed_layouts_and_capacity_overflows() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        for malformed in [
+            UFuncArray::new(vec![], vec![1.0], dtype).unwrap(),
+            UFuncArray::new(vec![2, 3], vec![1.0; 6], dtype).unwrap(),
+            UFuncArray::new(vec![0, 1], vec![], dtype).unwrap(),
+        ] {
+            assert!(malformed.tile(&[]).is_err());
+            assert!(malformed.tile(&[1]).is_err());
+            assert!(malformed.repeat(0, None).is_err());
+            assert!(malformed.repeat(1, Some(0)).is_err());
+            assert!(malformed.roll(0, None).is_err());
+            assert!(malformed.roll_multi(&[], &[]).is_err());
+            assert!(malformed.resize(&[0]).is_err());
+        }
+        let source = complex(&[2], dtype);
+        let too_many = isize::MAX as usize / std::mem::size_of::<f64>() / 2 + 1;
+        for result in [
+            source.tile(&[usize::MAX]),
+            source.tile(&[too_many]),
+            source.repeat(usize::MAX, None),
+            source.repeat(too_many, Some(-1)),
+            source.resize(&[too_many]),
+            source.resize(&[usize::MAX, 2]),
+        ] {
+            assert!(matches!(
+                result,
+                Err(UFuncError::Shape(ShapeError::Overflow))
+            ));
+        }
+        let empty_shape = vec![0, usize::MAX, usize::MAX, 2];
+        let empty = UFuncArray::new(empty_shape.clone(), vec![], dtype).unwrap();
+        for result in [
+            empty.tile(&[1]).unwrap(),
+            empty.repeat(2, Some(0)).unwrap(),
+            empty.roll(isize::MIN, Some(-1)).unwrap(),
+            empty.roll_multi(&[isize::MAX], &[0, 1, 2]).unwrap(),
+            empty.resize(&[0, usize::MAX, usize::MAX]).unwrap(),
+        ] {
+            assert_eq!(result.shape(), empty_shape);
+            assert!(result.values().is_empty());
+        }
+        assert_eq!(empty.repeat(2, None).unwrap().shape(), &[0, 2]);
+        assert_eq!(
+            empty.repeat(0, Some(1)).unwrap().shape(),
+            &[0, 0, usize::MAX, 2]
+        );
+        assert!(empty.roll(0, Some(3)).is_err());
+        assert!(empty.roll_multi(&[], &[3]).is_err());
+        for axis in [None, Some(0)] {
+            assert!(empty.repeat(isize::MAX as usize, axis).is_ok());
+            assert!(matches!(
+                empty.repeat(isize::MAX as usize + 1, axis),
+                Err(UFuncError::Shape(ShapeError::Overflow))
+            ));
+        }
+    }
+    let real = UFuncArray::scalar(1.0, DType::F64);
+    assert!(real.repeat(usize::MAX, None).is_err());
+    assert!(real.tile(&[usize::MAX]).is_err());
+    assert!(real.resize(&[usize::MAX]).is_err());
+    let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+    assert!(empty.repeat(isize::MAX as usize, None).is_ok());
+    assert!(matches!(
+        empty.repeat(isize::MAX as usize + 1, None),
+        Err(UFuncError::Shape(ShapeError::Overflow))
+    ));
+    assert!(matches!(
+        empty.repeat(isize::MAX as usize + 1, Some(isize::MAX)),
+        Err(UFuncError::Shape(ShapeError::Overflow))
+    ));
 }
 
 #[test]
