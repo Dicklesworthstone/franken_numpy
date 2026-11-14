@@ -57,7 +57,7 @@ const SVD_FUSED_TWO_SIDED_REGISTER_BLOCK: usize = 4;
 /// into Vt by compact-WY panels instead of one scalar reflector at a time.
 const SVD_RIGHT_VT_BLOCK_MIN_DIM: usize = 512;
 const SVD_RIGHT_VT_PANEL_NB: usize = 128;
-/// Iteration limit coefficient for eigenvalue/Schur QR convergence: max_iters = coeff * n * n.
+/// Iteration limit coefficient per eigenvalue/Schur QR phase: max_iters = coeff * n * n.
 pub const EIGEN_QR_ITERATION_COEFF: usize = 60;
 /// Maximum iterations for matrix square root (Denman-Beavers).
 pub const SQRTM_MAX_ITERATIONS: usize = 50;
@@ -6896,6 +6896,12 @@ fn tridiag_eigvals_qr(d: &mut [f64], e: &mut [f64], n: usize) {
 /// than the rest of the matrix. A power of two preserves the established
 /// rounding order wherever the original intermediate values were normal.
 fn hessenberg_reflector(h: &[f64], n: usize, j: usize, v: &mut [f64]) -> Option<f64> {
+    // An already Hessenberg column needs no similarity transform. Besides
+    // preserving its entries, this avoids an unnecessary reflector dot product
+    // overflowing on a huge isolated block beside a tiny independent block.
+    if ((j + 2)..n).all(|row| h[row * n + j] == 0.0) {
+        return None;
+    }
     let largest = ((j + 1)..n)
         .map(|row| h[row * n + j].abs())
         .fold(0.0_f64, f64::max);
@@ -7046,12 +7052,252 @@ fn hessenberg_reduce_values(a: &[f64], n: usize) -> Vec<f64> {
     h
 }
 
-/// Explicit single-shift QR iteration on upper Hessenberg form with deflation.
-/// Converges to quasi-upper-triangular (real Schur) form.
-/// If `z` is `Some`, accumulates the Schur vectors.
-fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
-    let eps = f64::EPSILON;
-    let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
+/// Reduce a Hessenberg matrix to independent 1x1 and 2x2 Schur blocks.
+/// If `z` is `Some`, accumulate every similarity transform into its columns.
+/// A bounded single-shift recovery handles blocks on which Francis QR stalls;
+/// exhausting both budgets is an error, never a partially extracted spectrum.
+fn hessenberg_qr_iter(
+    h: &mut [f64],
+    z: Option<&mut [f64]>,
+    n: usize,
+) -> Result<(), LinAlgError> {
+    let max_iter = EIGEN_QR_ITERATION_COEFF
+        .saturating_mul(n)
+        .saturating_mul(n);
+    hessenberg_qr_iter_with_budget(h, z, n, max_iter, max_iter)
+}
+
+fn hessenberg_qr_iter_with_budget(
+    h: &mut [f64],
+    mut z: Option<&mut [f64]>,
+    n: usize,
+    francis_budget: usize,
+    recovery_budget: usize,
+) -> Result<(), LinAlgError> {
+    if !hessenberg_has_finite_band(h, n) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+
+    // Keep the established Francis arithmetic unchanged when it converges.
+    hessenberg_francis_qr_iter(h, z.as_deref_mut(), n, francis_budget);
+    if !hessenberg_has_finite_band(h, n) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+    if !hessenberg_has_schur_blocks(h, n) {
+        hessenberg_single_shift_recovery(h, z.as_deref_mut(), n, recovery_budget);
+    }
+    if !hessenberg_has_schur_blocks(h, n)
+        || z.as_deref()
+            .is_some_and(|vectors| vectors.iter().any(|value| !value.is_finite()))
+    {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+    Ok(())
+}
+
+fn hessenberg_has_finite_band(h: &[f64], n: usize) -> bool {
+    if h.iter().any(|value| !value.is_finite()) {
+        return false;
+    }
+    let largest = h.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    if largest == 0.0 {
+        return true;
+    }
+    // Similarity transforms leave roundoff below the first subdiagonal. Keep
+    // that data, but reject a genuine bulge before assuming Hessenberg form.
+    // Division before comparison avoids overflowing the tolerance at huge scales.
+    let roundoff = 32.0 * n as f64 * f64::EPSILON;
+    for row in 2..n {
+        for col in 0..(row - 1) {
+            if h[row * n + col].abs() / largest > roundoff {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn hessenberg_has_schur_blocks(h: &[f64], n: usize) -> bool {
+    hessenberg_has_finite_band(h, n)
+        && (2..n).all(|row| {
+            h[row * n + row - 1] == 0.0 || h[(row - 1) * n + row - 2] == 0.0
+        })
+}
+
+/// Preserve the ordinary deflation arithmetic, but do not turn two large finite
+/// diagonal entries into an infinite threshold by adding their magnitudes first.
+fn hessenberg_deflation_threshold(upper: f64, lower: f64) -> f64 {
+    let upper = upper.abs();
+    let lower = lower.abs();
+    let sum = upper + lower;
+    if sum.is_finite() {
+        f64::EPSILON * sum
+    } else {
+        f64::EPSILON * upper + f64::EPSILON * lower
+    }
+}
+
+/// A bounded Givens rotation, including a first component formed by subtracting
+/// two finite numbers whose difference would overflow an ordinary f64.
+fn hessenberg_givens(x: ScaledReal, y: ScaledReal) -> (f64, f64) {
+    if x.significand == 0.0 && y.significand == 0.0 {
+        return (1.0, 0.0);
+    }
+    let exponent = if x.significand == 0.0 {
+        y.exponent
+    } else if y.significand == 0.0 {
+        x.exponent
+    } else {
+        x.exponent.max(y.exponent)
+    };
+    let x = ScaledReal {
+        exponent: x.exponent - exponent,
+        ..x
+    }
+    .value();
+    let y = ScaledReal {
+        exponent: y.exponent - exponent,
+        ..y
+    }
+    .value();
+    let norm = x.hypot(y);
+    (x / norm, y / norm)
+}
+
+/// Use single shifts only on unresolved blocks. This alternate QR schedule
+/// breaks double-shift cycles without changing a successfully converged result.
+fn hessenberg_single_shift_recovery(
+    h: &mut [f64],
+    mut z: Option<&mut [f64]>,
+    n: usize,
+    max_iter: usize,
+) {
+    let mut p = n;
+    let mut last_p = n;
+    let mut since_deflation = 0usize;
+
+    for _ in 0..max_iter {
+        if hessenberg_has_schur_blocks(h, n) || !hessenberg_has_finite_band(h, n) {
+            return;
+        }
+        while p > 1
+            && h[(p - 1) * n + p - 2].abs()
+                <= hessenberg_deflation_threshold(
+                    h[(p - 2) * n + p - 2],
+                    h[(p - 1) * n + p - 1],
+                )
+        {
+            h[(p - 1) * n + p - 2] = 0.0;
+            p -= 1;
+        }
+        if p <= 1 {
+            return;
+        }
+        let mut lo = p - 1;
+        while lo > 0
+            && h[lo * n + lo - 1].abs()
+                > hessenberg_deflation_threshold(
+                    h[(lo - 1) * n + lo - 1],
+                    h[lo * n + lo],
+                )
+        {
+            lo -= 1;
+        }
+        if lo > 0 {
+            h[lo * n + lo - 1] = 0.0;
+        }
+        // The extractor and eigenvector solve support either real or complex
+        // isolated 2x2 blocks. Only a larger unreduced block needs more QR work.
+        if p - lo <= 2 {
+            p = lo;
+            continue;
+        }
+        if p < last_p {
+            since_deflation = 0;
+            last_p = p;
+        } else {
+            since_deflation += 1;
+        }
+
+        let bottom = h[(p - 1) * n + p - 1];
+        let pair = schur_eigenvalues_2x2(
+            h[(p - 2) * n + p - 2],
+            h[(p - 2) * n + p - 1],
+            h[(p - 1) * n + p - 2],
+            bottom,
+        );
+        let mut shift = if pair[1] != 0.0
+            || (pair[0] - bottom).abs() < (pair[2] - bottom).abs()
+        {
+            pair[0]
+        } else {
+            pair[2]
+        };
+        if since_deflation > 0 && since_deflation.is_multiple_of(10) {
+            let exceptional = ScaledReal::new(bottom)
+                .sum(ScaledReal::new(h[(p - 1) * n + p - 2].abs()))
+                .value();
+            shift = if exceptional.is_finite() {
+                exceptional
+            } else {
+                bottom
+            };
+        }
+        if !shift.is_finite() {
+            return;
+        }
+
+        let mut x = ScaledReal::new(h[lo * n + lo]).sum(ScaledReal::new(shift).negated());
+        let mut y = ScaledReal::new(h[(lo + 1) * n + lo]);
+        for k in lo..(p - 1) {
+            let (cos, sin) = hessenberg_givens(x, y);
+            if !cos.is_finite() || !sin.is_finite() {
+                return;
+            }
+
+            // Left: G^T H, including the coupling to already deflated columns.
+            let start = if k > lo { k - 1 } else { lo };
+            for col in start..n {
+                let upper = h[k * n + col];
+                let lower = h[(k + 1) * n + col];
+                h[k * n + col] = cos * upper + sin * lower;
+                h[(k + 1) * n + col] = -sin * upper + cos * lower;
+            }
+            if k > lo {
+                // This entry is the bulge just eliminated by the rotation.
+                h[(k + 1) * n + k - 1] = 0.0;
+            }
+
+            // Right: H G. The extra row carries the next Hessenberg bulge.
+            let row_end = (k + 3).min(p);
+            for row in h.chunks_mut(n).take(row_end) {
+                let left = row[k];
+                let right = row[k + 1];
+                row[k] = cos * left + sin * right;
+                row[k + 1] = -sin * left + cos * right;
+            }
+            if let Some(ref mut vectors) = z {
+                for row in vectors.chunks_mut(n) {
+                    let left = row[k];
+                    let right = row[k + 1];
+                    row[k] = cos * left + sin * right;
+                    row[k + 1] = -sin * left + cos * right;
+                }
+            }
+            if k < p - 2 {
+                x = ScaledReal::new(h[(k + 1) * n + k]);
+                y = ScaledReal::new(h[(k + 2) * n + k]);
+            }
+        }
+    }
+}
+
+fn hessenberg_francis_qr_iter(
+    h: &mut [f64],
+    mut z: Option<&mut [f64]>,
+    n: usize,
+    max_iter: usize,
+) {
     let mut p = n; // active upper bound (exclusive of converged tail)
     // Stagnation tracking: force an exceptional shift if the active block has not
     // deflated for several iterations (guards rare double-shift cycling).
@@ -7066,7 +7312,10 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         // Deflation from bottom: check if h[p-1, p-2] ≈ 0
         while p > 1
             && h[(p - 1) * n + (p - 2)].abs()
-                <= eps * (h[(p - 2) * n + (p - 2)].abs() + h[(p - 1) * n + (p - 1)].abs())
+                <= hessenberg_deflation_threshold(
+                    h[(p - 2) * n + (p - 2)],
+                    h[(p - 1) * n + (p - 1)],
+                )
         {
             h[(p - 1) * n + (p - 2)] = 0.0;
             p -= 1;
@@ -7079,7 +7328,10 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         let mut lo = p - 1;
         while lo > 0
             && h[lo * n + (lo - 1)].abs()
-                > eps * (h[(lo - 1) * n + (lo - 1)].abs() + h[lo * n + lo].abs())
+                > hessenberg_deflation_threshold(
+                    h[(lo - 1) * n + (lo - 1)],
+                    h[lo * n + lo],
+                )
         {
             lo -= 1;
         }
@@ -7517,7 +7769,7 @@ pub fn eig_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     // Hessenberg reduction + implicit shifted QR, in bounded units when needed.
     let (input, output_scale) = scaled_schur_input(a, n);
     let mut h = hessenberg_reduce_values(&input, n);
-    hessenberg_qr_iter(&mut h, None, n);
+    hessenberg_qr_iter(&mut h, None, n)?;
 
     // Extract eigenvalues from quasi-upper-triangular (real Schur) form
     let mut eigenvalues = extract_schur_eigenvalues(&h, n);
@@ -7547,7 +7799,7 @@ pub fn schur_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgErro
     // Schur vectors are invariant under positive scalar multiplication of A.
     let (input, output_scale) = scaled_schur_input(a, n);
     let (mut h, mut q) = hessenberg_reduce(&input, n);
-    hessenberg_qr_iter(&mut h, Some(&mut q), n);
+    hessenberg_qr_iter(&mut h, Some(&mut q), n)?;
     if output_scale != 1.0 {
         for value in &mut h {
             *value *= output_scale;
@@ -7883,7 +8135,7 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
     // Keep the eigenvector solve in the same bounded units as the QR iteration.
     let (input, output_scale) = scaled_schur_input(a, n);
     let (mut h, mut z) = hessenberg_reduce(&input, n);
-    hessenberg_qr_iter(&mut h, Some(&mut z), n);
+    hessenberg_qr_iter(&mut h, Some(&mut z), n)?;
 
     // Extract eigenvalues from quasi-upper-triangular Schur form
     let mut eigenvalues = extract_schur_eigenvalues(&h, n);
@@ -18414,6 +18666,225 @@ for col in range(n):
         assert!((hi / scale - 5.0).abs() < 1e-6, "large eigenvalue: {hi}");
     }
 
+    fn assert_general_schur_similarity(a: &[f64], t: &[f64], q: &[f64], n: usize) {
+        let scale = a.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        for row in 0..n {
+            for col in 0..n {
+                let mut aq = 0.0;
+                let mut qt = 0.0;
+                let mut dot = 0.0;
+                for k in 0..n {
+                    aq += (a[row * n + k] / scale) * q[k * n + col];
+                    qt += q[row * n + k] * (t[k * n + col] / scale);
+                    dot += q[k * n + row] * q[k * n + col];
+                }
+                assert!(
+                    (aq - qt).abs() < 1e-11 * n as f64,
+                    "A Q != Q T at ({row}, {col}): {aq} vs {qt}"
+                );
+                let identity = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - identity).abs() < 1e-11 * n as f64,
+                    "Schur vectors are not orthogonal at ({row}, {col}): {dot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn general_schur_iteration_budget_rejects_unreduced_blocks() {
+        // Companion of (lambda^2 + 1)(lambda - 2)(lambda + 3).
+        let companion = [
+            0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0,
+            0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, -1.0,
+        ];
+        for recovery_budget in [0, 1] {
+            let mut h = companion;
+            assert_eq!(
+                super::hessenberg_qr_iter_with_budget(&mut h, None, 4, 0, recovery_budget),
+                Err(LinAlgError::SpectralConvergenceFailed)
+            );
+        }
+
+        // An already isolated real root and conjugate pair need no iterations.
+        let mut isolated = [2.0, 0.5, -0.25, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0];
+        super::hessenberg_qr_iter_with_budget(&mut isolated, None, 3, 0, 0)
+            .expect("complete blocks do not need an iteration budget");
+        assert_eq!(
+            super::extract_schur_eigenvalues(&isolated, 3),
+            vec![2.0, 0.0, 0.0, 1.0, 0.0, -1.0]
+        );
+    }
+
+    #[test]
+    fn general_schur_structure_gate_distinguishes_roundoff_from_a_real_bulge() {
+        for scale in [1e-100_f64, 1.0, 1e100] {
+            let mut roundoff = [
+                scale, 0.0, 0.0, 0.0, 2.0 * scale, 0.0,
+                f64::EPSILON * scale, 0.0, 3.0 * scale,
+            ];
+            let saved = roundoff;
+            super::hessenberg_qr_iter_with_budget(&mut roundoff, None, 3, 0, 0)
+                .expect("roundoff below the Hessenberg band is allowed");
+            assert_eq!(roundoff, saved, "the gate must not discard matrix entries");
+
+            let mut bulge = saved;
+            bulge[6] = 0.01 * scale;
+            assert_eq!(
+                super::hessenberg_qr_iter_with_budget(&mut bulge, None, 3, 0, 8),
+                Err(LinAlgError::SpectralConvergenceFailed)
+            );
+            assert_eq!(bulge[6], 0.01 * scale);
+        }
+    }
+
+    #[test]
+    fn general_schur_recovery_givens_handles_extended_differences() {
+        let max = super::ScaledReal::new(f64::MAX);
+        let (cos, sin) = super::hessenberg_givens(max.sum(max), max);
+        let norm = 5.0_f64.sqrt();
+        assert!((cos - 2.0 / norm).abs() < 4.0 * f64::EPSILON);
+        assert!((sin - 1.0 / norm).abs() < 4.0 * f64::EPSILON);
+        for value in [f64::from_bits(1), 1e-300, 1e300] {
+            let value = super::ScaledReal::new(value);
+            let (cos, sin) = super::hessenberg_givens(value, value);
+            assert!((cos - std::f64::consts::FRAC_1_SQRT_2).abs() < 4.0 * f64::EPSILON);
+            assert!((sin - std::f64::consts::FRAC_1_SQRT_2).abs() < 4.0 * f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn general_schur_recovery_preserves_scaled_analytic_spectra_and_similarity() {
+        let root_three_over_two = 3.0_f64.sqrt() / 2.0;
+        let cases = [
+            (
+                3usize,
+                vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                vec![
+                    (1.0, 0.0),
+                    (-0.5, root_three_over_two),
+                    (-0.5, -root_three_over_two),
+                ],
+            ),
+            (
+                4,
+                vec![
+                    0.0, 0.0, 0.0, 6.0, 1.0, 0.0, 0.0, -1.0,
+                    0.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, -1.0,
+                ],
+                vec![(-3.0, 0.0), (2.0, 0.0), (0.0, 1.0), (0.0, -1.0)],
+            ),
+            (
+                5,
+                vec![
+                    0.0, 0.0, 0.0, 6.0, 0.5,
+                    1.0, 0.0, 0.0, -1.0, 1.0,
+                    0.0, 1.0, 0.0, 5.0, 2.0,
+                    0.0, 0.0, 1.0, -1.0, -1.0,
+                    0.0, 0.0, 0.0, 0.0, 7.0,
+                ],
+                vec![(-3.0, 0.0), (2.0, 0.0), (0.0, 1.0), (0.0, -1.0), (7.0, 0.0)],
+            ),
+        ];
+        for (n, base, expected) in cases {
+            for scale in [1e-100_f64, 1.0, 1e100] {
+                let a: Vec<f64> = base.iter().map(|value| value * scale).collect();
+                let mut h = a.clone();
+                let mut q = vec![0.0; n * n];
+                for i in 0..n {
+                    q[i * n + i] = 1.0;
+                }
+                // Force the alternate schedule so this cannot silently test
+                // only the established Francis path.
+                super::hessenberg_qr_iter_with_budget(&mut h, Some(&mut q), n, 0, 1024)
+                    .expect("bounded recovery of analytic spectrum");
+                for row in 2..n {
+                    assert!(
+                        h[row * n + row - 1] == 0.0
+                            || h[(row - 1) * n + row - 2] == 0.0,
+                        "unreduced block at row {row}, n={n}, scale={scale}"
+                    );
+                }
+                assert_general_schur_similarity(&a, &h, &q, n);
+
+                let mut remaining = expected.clone();
+                for value in super::extract_schur_eigenvalues(&h, n).as_chunks::<2>().0 {
+                    let pair = (value[0] / scale, value[1] / scale);
+                    let matched = remaining.iter().position(|&(real, imag)| {
+                        (pair.0 - real).abs() < 1e-10 && (pair.1 - imag).abs() < 1e-10
+                    });
+                    let matched = matched.unwrap_or_else(|| {
+                        panic!("unexpected eigenvalue {pair:?}, n={n}, scale={scale}")
+                    });
+                    remaining.remove(matched);
+                }
+                assert!(remaining.is_empty());
+
+                let mut values_only_h = a;
+                super::hessenberg_qr_iter_with_budget(&mut values_only_h, None, n, 0, 1024)
+                    .expect("values-only recovery");
+                for (&left, &right) in h.iter().zip(&values_only_h) {
+                    assert_eq!(left.to_bits(), right.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn general_schur_huge_finite_diagonals_do_not_erase_a_complex_pair() {
+        let huge = 1e308_f64;
+        let tiny = 1e-300_f64;
+        let a = [huge, huge, 0.0, -huge, huge, 0.0, 0.0, 0.0, tiny];
+        // Keeping the tiny independent root bypasses global input scaling.
+        // Adding the two huge diagonal magnitudes before multiplying by EPSILON
+        // must not create an infinite threshold and falsely deflate the pair.
+        let values = eig_nxn(&a, 3).expect("finite complex pair and tiny real root");
+        assert!((values[0] / huge - 1.0).abs() < 8.0 * f64::EPSILON);
+        assert!((values[1] / huge - 1.0).abs() < 8.0 * f64::EPSILON);
+        assert!((values[2] / huge - 1.0).abs() < 8.0 * f64::EPSILON);
+        assert!((values[3] / huge + 1.0).abs() < 8.0 * f64::EPSILON);
+        assert_eq!(&values[4..], &[tiny, 0.0]);
+        assert_eig_nxn_full_residuals(&a, 3);
+
+        let (t, q) = schur_nxn(&a, 3).expect("finite Schur factors at mixed scales");
+        assert_eq!(t[8], tiny);
+        assert_general_schur_similarity(&a, &t, &q, 3);
+    }
+
+    #[test]
+    fn general_schur_dense_complex_pairs_remain_complete() {
+        let n = 8usize;
+        let mut seed = 0x2e72_d640_6d05_b3cdu64;
+        let a: Vec<f64> = (0..n * n)
+            .map(|index| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let value = ((seed >> 11) as f64 / (1_u64 << 53) as f64) * 2.0 - 1.0;
+                let row = index / n;
+                if row == index % n {
+                    value + (row as f64 + 1.0) * 0.125
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let (t, q) = schur_nxn(&a, n).expect("complete Schur decomposition");
+        for row in 2..n {
+            assert!(
+                t[row * n + row - 1] == 0.0 || t[(row - 1) * n + row - 2] == 0.0,
+                "an unreduced block cannot be interpreted as independent eigenpairs"
+            );
+        }
+        assert_general_schur_similarity(&a, &t, &q, n);
+        assert_eq!(
+            eig_nxn(&a, n).expect("complete eigenvalue spectrum"),
+            super::extract_schur_eigenvalues(&t, n)
+        );
+        assert_eig_nxn_full_residuals(&a, n);
+    }
+
     #[test]
     fn general_eig_extreme_scales_preserve_eigenpairs_and_schur_reconstruction() {
         let matrices = [
@@ -18845,7 +19316,7 @@ for value in actual / scale:
             let (mut h, _q) = super::hessenberg_reduce(&a, n);
             let t_hess = t.elapsed().as_secs_f64() * 1e3;
             let t = Instant::now();
-            super::hessenberg_qr_iter(&mut h, None, n);
+            super::hessenberg_qr_iter(&mut h, None, n).expect("general eig convergence");
             let t_qr = t.elapsed().as_secs_f64() * 1e3;
             println!("eig n={n}: hessenberg={t_hess:.1}ms qr_iter={t_qr:.1}ms");
         }
@@ -18993,7 +19464,7 @@ for value in actual / scale:
             let mut hs = h0.clone();
             hessenberg_qr_iter_singleshift_ref(&mut hs, n);
             let mut hd = h0.clone();
-            super::hessenberg_qr_iter(&mut hd, None, n);
+            super::hessenberg_qr_iter(&mut hd, None, n).expect("double-shift convergence");
             let mut es = super::extract_schur_eigenvalues(&hs, n);
             let mut ed = super::extract_schur_eigenvalues(&hd, n);
             es.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -19011,7 +19482,7 @@ for value in actual / scale:
                 to.push(t.elapsed().as_secs_f64() * 1e3);
                 let mut h2 = h0.clone();
                 let t = Instant::now();
-                super::hessenberg_qr_iter(&mut h2, None, n);
+                super::hessenberg_qr_iter(&mut h2, None, n).expect("double-shift convergence");
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
             println!(
