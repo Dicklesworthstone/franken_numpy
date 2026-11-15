@@ -5,10 +5,12 @@
 
 use fnp_linalg::{
     LinAlgError, batch_inv, batch_solve, cholesky_nxn, complex_det_nxn, complex_inv_nxn,
-    complex_solve_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, lu_factor_nxn, lu_solve, qr_mxn, qr_nxn,
-    slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, svd_mxn_full,
+    complex_solve_nxn, complex_solve_nxn_multi, det_2x2, det_nxn, inv_2x2, inv_nxn,
+    lstsq_svd_multi, lu_factor_nxn, lu_solve, qr_mxn, qr_nxn, slogdet_2x2, slogdet_nxn, solve_2x2,
+    solve_nxn, solve_nxn_multi, svd_mxn_full,
 };
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const NUMPY_LINALG_ORACLE: &str = r#"
 import numpy as np
@@ -1168,4 +1170,242 @@ fn conformance_inv_hilbert_3x3() {
     }
     let identity: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     assert_vec_close("inv hilbert 3x3", &product, &identity, 1e-6, 1e-6);
+}
+
+fn assert_numpy_multi_rhs_cases(script: &str, cases: &[String]) {
+    let python = std::env::var_os("FNP_ORACLE_PYTHON").unwrap_or_else(|| "python3".into());
+    let mut child = Command::new(python)
+        .env("OPENBLAS_NUM_THREADS", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("NumPy multi-RHS oracle should start");
+    child
+        .stdin
+        .take()
+        .expect("oracle input")
+        .write_all(format!("[{}]", cases.join(",")).as_bytes())
+        .expect("write oracle cases");
+    let output = child
+        .wait_with_output()
+        .expect("NumPy oracle should finish");
+    assert!(
+        output.status.success(),
+        "NumPy multi-RHS oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn real_multi_rhs_lstsq_matches_numpy() {
+    let mut cases = Vec::new();
+    for (m, n, nrhs, deficient) in [
+        (1, 1, 1, false),
+        (5, 3, 1, false),
+        (5, 3, 3, false),
+        (3, 5, 2, false),
+        (3, 3, 2, false),
+        (6, 3, 2, true),
+        (3, 6, 2, true),
+        (4, 3, 0, false),
+        (0, 3, 2, false),
+        (3, 0, 2, false),
+        (0, 0, 0, false),
+    ] {
+        let mut base_a = vec![0.0; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                base_a[row * n + col] = (((row * 7 + col * 5 + 3) % 17) as f64 - 8.0) / 4.0;
+                if row == col {
+                    base_a[row * n + col] += 2.0;
+                }
+            }
+        }
+        if deficient {
+            if m >= n {
+                for row in 0..m {
+                    base_a[row * n + 1] = base_a[row * n];
+                }
+            } else {
+                for col in 0..n {
+                    base_a[n + col] = base_a[col];
+                }
+            }
+        }
+        let base_b: Vec<f64> = (0..m * nrhs)
+            .map(|index| ((index * 3 + 1) % 11) as f64 - 5.0)
+            .collect();
+        for scale in [1e-100, 1.0, 1e100] {
+            let a: Vec<f64> = base_a.iter().map(|value| value * scale).collect();
+            let b: Vec<f64> = base_b.iter().map(|value| value * scale).collect();
+            for rcond in [None, Some(1e-2)] {
+                let (x, residuals, rank, values) =
+                    lstsq_svd_multi(&a, &b, m, n, nrhs, rcond).unwrap();
+                let cutoff = rcond.map_or_else(|| "none".into(), |value| value.to_string());
+                cases.push(format!(
+                    r#"{{"m":{m},"n":{n},"nrhs":{nrhs},"a":{a:?},"b":{b:?},"x":{x:?},"residuals":{residuals:?},"rank":{rank},"values":{values:?},"rcond":"{cutoff}"}}"#
+                ));
+            }
+        }
+    }
+    let a = [1.0, 0.0, 0.0, 2e-16];
+    let b = [1.0, -2.0, 1.0, 3.0];
+    for rcond in [
+        None,
+        Some(-1.0),
+        Some(0.0),
+        Some(0.1),
+        Some(1.0),
+        Some(f64::INFINITY),
+    ] {
+        let (x, residuals, rank, values) = lstsq_svd_multi(&a, &b, 2, 2, 2, rcond).unwrap();
+        let cutoff = rcond.map_or_else(|| "none".into(), |value| value.to_string());
+        cases.push(format!(
+            r#"{{"m":2,"n":2,"nrhs":2,"a":{a:?},"b":{b:?},"x":{x:?},"residuals":{residuals:?},"rank":{rank},"values":{values:?},"rcond":"{cutoff}"}}"#
+        ));
+    }
+    assert_numpy_multi_rhs_cases(
+        r#"
+import json, sys
+import numpy as np
+for case in json.load(sys.stdin):
+    m, n, nrhs = case['m'], case['n'], case['nrhs']
+    a = np.array(case['a'], dtype=np.float64).reshape(m, n)
+    b = np.array(case['b'], dtype=np.float64).reshape(m, nrhs)
+    rcond = None if case['rcond'] == 'none' else float(case['rcond'])
+    x, residuals, rank, values = np.linalg.lstsq(a, b, rcond=rcond)
+    assert case['rank'] == rank, (case, rank)
+    got_x = np.array(case['x'], dtype=np.float64).reshape(n, nrhs)
+    xscale = float(np.max(np.abs(x), initial=0.0)) or 1.0
+    sscale = float(np.max(np.abs(values), initial=0.0)) or 1.0
+    bscale = float(np.max(np.abs(b), initial=0.0)) or 1.0
+    np.testing.assert_allclose(got_x / xscale, x / xscale, rtol=2e-10, atol=2e-11)
+    np.testing.assert_allclose(np.array(case['values']) / sscale, values / sscale,
+                               rtol=2e-10, atol=2e-11)
+    np.testing.assert_allclose(np.array(case['residuals']) / bscale / bscale,
+                               residuals / bscale / bscale, rtol=2e-9, atol=2e-20)
+"#,
+        &cases,
+    );
+}
+
+#[test]
+fn real_multi_rhs_lstsq_preserves_scaled_projections_and_rejects_invalid_inputs() {
+    // U^T B for the first RHS exceeds f64::MAX. Both requested solutions are
+    // representable, including the second RHS's subnormal answer.
+    let (x, _, rank, values) = lstsq_svd_multi(
+        &[1e308, 1e308],
+        &[1.7e308, 1.0, 1.7e308, 1.0],
+        2,
+        1,
+        2,
+        None,
+    )
+    .unwrap();
+    assert_eq!(rank, 1);
+    assert_scalar_close("large RHS solution", x[0], 1.7, 1e-14, 1e-14);
+    assert!((x[1] / 1e-308 - 1.0).abs() < 1e-14);
+    assert!((values[0] / 1e308 - std::f64::consts::SQRT_2).abs() < 1e-14);
+    let tiny = lstsq_svd_multi(&[1e-300], &[2e-300, -3e-300], 1, 1, 2, None).unwrap();
+    assert_vec_close("tiny matrix solutions", &tiny.0, &[2.0, -3.0], 1e-14, 1e-14);
+    let zero = lstsq_svd_multi(&[0.0; 6], &[1.0; 9], 3, 2, 3, None).unwrap();
+    assert_eq!(zero.0, vec![0.0; 6]);
+    assert_eq!(zero.2, 0);
+    assert!(zero.1.is_empty());
+    assert_eq!(zero.3, vec![0.0; 2]);
+
+    assert!(lstsq_svd_multi(&[1.0], &[], 1, 1, 1, None).is_err());
+    assert!(lstsq_svd_multi(&[], &[], usize::MAX, 2, 0, None).is_err());
+    assert!(lstsq_svd_multi(&[], &[], 0, usize::MAX, 2, None).is_err());
+    assert!(lstsq_svd_multi(&[1.0], &[1.0], 1, 1, 1, Some(f64::NAN)).is_err());
+    for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(lstsq_svd_multi(&[nonfinite], &[1.0], 1, 1, 1, None).is_err());
+        assert!(lstsq_svd_multi(&[1.0], &[nonfinite], 1, 1, 1, None).is_err());
+        assert!(lstsq_svd_multi(&[nonfinite], &[], 1, 1, 0, None).is_err());
+    }
+}
+
+#[test]
+fn complex_multi_rhs_solve_matches_numpy() {
+    let mut cases = Vec::new();
+    for n in [0, 1, 2, 5] {
+        for nrhs in [0, 1, 3] {
+            let mut base_a = vec![0.0; 2 * n * n];
+            for row in 0..n {
+                for col in 0..n {
+                    let at = 2 * (row * n + col);
+                    base_a[at] = (((row * 7 + col * 5 + 3) % 11) as f64 - 5.0) / 5.0;
+                    base_a[at + 1] = (((row * 3 + col + 2) % 7) as f64 - 3.0) / 5.0;
+                    if row == col {
+                        base_a[at] += (n + 3) as f64;
+                    }
+                }
+            }
+            if n > 1 {
+                // Force pivoting so the row permutation must affect every RHS.
+                for at in 0..2 * n {
+                    base_a.swap(at, 2 * n + at);
+                }
+            }
+            let base_b: Vec<f64> = (0..2 * n * nrhs)
+                .map(|index| ((index * 3 + 1) % 11) as f64 - 5.0)
+                .collect();
+            for scale in [1e-120, 1.0, 1e120] {
+                let a: Vec<f64> = base_a.iter().map(|value| value * scale).collect();
+                let b: Vec<f64> = base_b.iter().map(|value| value * scale).collect();
+                let x = complex_solve_nxn_multi(&a, &b, n, nrhs).unwrap();
+                cases.push(format!(
+                    r#"{{"n":{n},"nrhs":{nrhs},"a":{a:?},"b":{b:?},"x":{x:?}}}"#
+                ));
+            }
+        }
+    }
+    assert_numpy_multi_rhs_cases(
+        r#"
+import json, sys
+import numpy as np
+for case in json.load(sys.stdin):
+    n, nrhs = case['n'], case['nrhs']
+    decode = lambda values: np.array(values, dtype=np.float64).view(np.complex128)
+    a, b = decode(case['a']).reshape(n, n), decode(case['b']).reshape(n, nrhs)
+    got = decode(case['x']).reshape(n, nrhs)
+    expected = np.linalg.solve(a, b)
+    np.testing.assert_allclose(got, expected, rtol=2e-12, atol=2e-13)
+"#,
+        &cases,
+    );
+}
+
+#[test]
+fn complex_multi_rhs_solve_handles_empty_extreme_and_invalid_systems() {
+    let result =
+        complex_solve_nxn_multi(&[1e308, 1e308], &[1e308, 1e308, -1e308, 1e308], 1, 2).unwrap();
+    assert_vec_close(
+        "extreme complex solve",
+        &result,
+        &[1.0, 0.0, 0.0, 1.0],
+        1e-14,
+        1e-14,
+    );
+    assert!(complex_solve_nxn_multi(&[], &[], 0, 3).unwrap().is_empty());
+    assert!(
+        complex_solve_nxn_multi(&[0.0; 8], &[], 2, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        complex_solve_nxn_multi(&[0.0; 8], &[0.0; 8], 2, 2),
+        Err(LinAlgError::SolverSingularity)
+    ));
+    assert!(complex_solve_nxn_multi(&[1.0, 0.0], &[1.0], 1, 1).is_err());
+    assert!(complex_solve_nxn_multi(&[], &[], usize::MAX, 0).is_err());
+    assert!(complex_solve_nxn_multi(&[1.0, 0.0], &[], 1, usize::MAX).is_err());
+    for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(complex_solve_nxn_multi(&[1.0, nonfinite], &[1.0, 0.0], 1, 1).is_err());
+        assert!(complex_solve_nxn_multi(&[1.0, 0.0], &[1.0, nonfinite], 1, 1).is_err());
+        assert!(complex_solve_nxn_multi(&[1.0, nonfinite], &[], 1, 0).is_err());
+    }
 }

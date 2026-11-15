@@ -8900,6 +8900,157 @@ pub fn lstsq_svd(
     Ok((x, residuals, rank, s))
 }
 
+/// Minimum-norm real least squares with one shared SVD for all right-hand sides.
+///
+/// A is m-by-n, B is m-by-nrhs, and X is n-by-nrhs in row-major storage.
+/// Returns (X, residual sums of squares, rank, singular values). Residuals have
+/// one entry per right-hand side only when m > n and rank == n. Empty matrix
+/// dimensions and zero right-hand-side columns retain those same shape rules.
+///
+/// None selects epsilon*max(m,n). Explicit cutoffs outside (0,1) follow LAPACK's
+/// machine-precision convention (epsilon/2); NaN cutoffs are rejected. This is
+/// the NumPy-facing cutoff contract, distinct from [`lstsq_svd`]'s legacy
+/// convention in which every negative cutoff requests the dimension-scaled default.
+pub fn lstsq_svd_multi(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    nrhs: usize,
+    rcond: Option<f64>,
+) -> Result<LstsqResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || Some(b.len()) != m.checked_mul(nrhs) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lstsq_svd_multi: A and B must contain m*n and m*nrhs entries",
+        ));
+    }
+    if a.iter().chain(b).any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "lstsq_svd_multi: matrix and right-hand sides must be finite",
+        ));
+    }
+    if rcond.is_some_and(f64::is_nan) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "lstsq_svd_multi: rcond must not be NaN",
+        ));
+    }
+    let result_len = n
+        .checked_mul(nrhs)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "lstsq_svd_multi: output shape overflowed",
+        ))?;
+    let mut x = Vec::new();
+    x.try_reserve_exact(result_len).map_err(|_| {
+        LinAlgError::ShapeContractViolation("lstsq_svd_multi: unable to allocate result")
+    })?;
+    x.resize(result_len, 0.0);
+
+    // The real SVD forms squared norms. Normalize the matrix once so its
+    // Householder and QR steps neither overflow nor underflow for uniformly
+    // scaled inputs. Keep the divisor factored below: sigma * input_scale can
+    // exceed f64 even when the solution is finite.
+    let largest_entry = a.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let input_scale = if largest_entry == 0.0 {
+        1.0
+    } else {
+        largest_entry
+    };
+    let (u, singular_values, vt) = if m == 0 || n == 0 {
+        (Vec::new(), Vec::new(), Vec::new())
+    } else {
+        if m.checked_mul(m).is_none() || n.checked_mul(n).is_none() {
+            return Err(LinAlgError::ShapeContractViolation(
+                "lstsq_svd_multi: singular factor shape overflowed",
+            ));
+        }
+        let normalized: Vec<f64> = a.iter().map(|value| value / input_scale).collect();
+        svd_mxn_full(&normalized, m, n)?
+    };
+    let relative_cutoff = match rcond {
+        None => f64::EPSILON * m.max(n) as f64,
+        Some(value) if value <= 0.0 || value >= 1.0 => f64::EPSILON / 2.0,
+        Some(value) => value,
+    };
+    let cutoff = relative_cutoff * singular_values.first().copied().unwrap_or(0.0);
+    let rank = singular_values
+        .iter()
+        .filter(|&&value| value > cutoff)
+        .count();
+    let scale = ScaledReal::new(input_scale);
+    let values = singular_values
+        .iter()
+        .map(|&value| ScaledReal::new(value).multiply(scale).value())
+        .collect();
+    if nrhs == 0 || m == 0 {
+        return Ok((x, Vec::new(), rank, values));
+    }
+
+    let k = singular_values.len();
+    let coefficient_len = k
+        .checked_mul(nrhs)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "lstsq_svd_multi: coefficient shape overflowed",
+        ))?;
+    let zero = ScaledReal::new(0.0);
+    let mut coefficients = Vec::new();
+    coefficients
+        .try_reserve_exact(coefficient_len)
+        .map_err(|_| {
+            LinAlgError::ShapeContractViolation("lstsq_svd_multi: unable to allocate coefficients")
+        })?;
+    coefficients.resize(coefficient_len, zero);
+    for (index, &value) in singular_values.iter().enumerate() {
+        if value <= cutoff {
+            continue;
+        }
+        let divisor = ScaledReal::new(value).multiply(scale);
+        for rhs in 0..nrhs {
+            let mut projection = zero;
+            for row in 0..m {
+                projection = projection.sum(
+                    ScaledReal::new(u[row * m + index])
+                        .multiply(ScaledReal::new(b[row * nrhs + rhs])),
+                );
+            }
+            coefficients[index * nrhs + rhs] = projection.quotient(divisor);
+        }
+    }
+    for row in 0..n {
+        for rhs in 0..nrhs {
+            let mut value = zero;
+            for index in 0..k {
+                value = value.sum(
+                    ScaledReal::new(vt[index * n + row]).multiply(coefficients[index * nrhs + rhs]),
+                );
+            }
+            x[row * nrhs + rhs] = value.value();
+        }
+    }
+
+    let mut residuals = Vec::new();
+    if m > n && rank == n {
+        residuals.try_reserve_exact(nrhs).map_err(|_| {
+            LinAlgError::ShapeContractViolation("lstsq_svd_multi: unable to allocate residuals")
+        })?;
+        for rhs in 0..nrhs {
+            let mut squared_norm = zero;
+            for row in 0..m {
+                let mut predicted = zero;
+                for col in 0..n {
+                    predicted = predicted.sum(
+                        ScaledReal::new(a[row * n + col])
+                            .multiply(ScaledReal::new(x[col * nrhs + rhs])),
+                    );
+                }
+                let residual = ScaledReal::new(b[row * nrhs + rhs]).sum(predicted.negated());
+                squared_norm = squared_norm.sum(residual.multiply(residual));
+            }
+            residuals.push(squared_norm.value());
+        }
+    }
+    Ok((x, residuals, rank, values))
+}
+
 /// Least squares for a full-rank tall-skinny (m ≥ n) system via TSQR.
 ///
 /// Matches `numpy.linalg.lstsq`'s `(x, residuals, rank, singular_values)` return.
@@ -12758,6 +12909,88 @@ pub fn complex_solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, Lin
 
     let (lu, perm, _, _) = complex_lu_decompose(a, n)?;
     Ok(complex_lu_forward_back(&lu, &perm, b, n))
+}
+
+/// Solve A*X = B for complex matrices using one LU factorization for every RHS.
+///
+/// A is n-by-n and B and X are n-by-nrhs in row-major interleaved storage.
+/// Finite inputs are required. Zero rows or zero RHS columns return an empty
+/// result after shape and finite-value validation; as in NumPy, a zero-column
+/// solve does not factor A and therefore does not reject a singular matrix.
+pub fn complex_solve_nxn_multi(
+    a: &[f64],
+    b: &[f64],
+    n: usize,
+    nrhs: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n).and_then(|count| count.checked_mul(2))
+        || Some(b.len()) != n.checked_mul(nrhs).and_then(|count| count.checked_mul(2))
+    {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_solve_nxn_multi: A and B must contain 2*n*n and 2*n*nrhs components",
+        ));
+    }
+    if b.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex rhs entries must be finite",
+        ));
+    }
+    if n == 0 || nrhs == 0 {
+        if a.iter().any(|value| !value.is_finite()) {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "complex matrix entries must be finite for LU",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+
+    let (lu, perm, _, _) = complex_lu_decompose(a, n)?;
+    let mut x = Vec::new();
+    x.try_reserve_exact(b.len()).map_err(|_| {
+        LinAlgError::ShapeContractViolation("complex_solve_nxn_multi: unable to allocate result")
+    })?;
+    x.resize(b.len(), 0.0);
+    let row_width = 2 * nrhs;
+    for (row, &source_row) in perm.iter().enumerate() {
+        x[row * row_width..(row + 1) * row_width]
+            .copy_from_slice(&b[source_row * row_width..(source_row + 1) * row_width]);
+    }
+
+    // Preserve each column's scalar recurrence while reusing each LU entry
+    // across a contiguous row of RHS values. No column gather or refactorization
+    // is needed, and the unit diagonal of L requires no divisions.
+    for row in 1..n {
+        for previous in 0..row {
+            let at_l = 2 * (row * n + previous);
+            for rhs in 0..nrhs {
+                let source = 2 * (previous * nrhs + rhs);
+                let target = 2 * (row * nrhs + rhs);
+                let (real, imag) = cmul(lu[at_l], lu[at_l + 1], x[source], x[source + 1]);
+                x[target] -= real;
+                x[target + 1] -= imag;
+            }
+        }
+    }
+    for row in (0..n).rev() {
+        for following in (row + 1)..n {
+            let at_u = 2 * (row * n + following);
+            for rhs in 0..nrhs {
+                let source = 2 * (following * nrhs + rhs);
+                let target = 2 * (row * nrhs + rhs);
+                let (real, imag) = cmul(lu[at_u], lu[at_u + 1], x[source], x[source + 1]);
+                x[target] -= real;
+                x[target + 1] -= imag;
+            }
+        }
+        let diagonal = 2 * (row * n + row);
+        for rhs in 0..nrhs {
+            let target = 2 * (row * nrhs + rhs);
+            let (real, imag) = cdiv(x[target], x[target + 1], lu[diagonal], lu[diagonal + 1]);
+            x[target] = real;
+            x[target + 1] = imag;
+        }
+    }
+    Ok(x)
 }
 
 /// Determinant of a complex NxN matrix.
