@@ -2466,7 +2466,28 @@ fn normalize_reduction_where_mask(
     mask: &UFuncArray,
     shape: &[usize],
 ) -> Result<UFuncArray, UFuncError> {
-    let expected = element_count(shape).map_err(UFuncError::Shape)?;
+    // The Rust API accepts truth-valued numeric masks. Convert at the declared
+    // source precision before broadcasting, with one truth value per logical
+    // complex element rather than one per physical component.
+    let typed_mask = if (mask.dtype.is_numeric() || mask.dtype == DType::Bool)
+        && !matches!(mask.dtype, DType::Bool | DType::F64)
+    {
+        Some(if mask.dtype.is_integer() {
+            // Keep the integer cast API's exact-sidecar and raw wide-cell
+            // behavior; the strict storage bridge rejects the latter.
+            mask.astype(DType::Bool)
+        } else {
+            mask.cast_numeric_storage(DType::Bool, false)?
+        })
+    } else {
+        None
+    };
+    let mask = typed_mask.as_ref().unwrap_or(mask);
+    let expected = if shape.contains(&0) {
+        0
+    } else {
+        element_count(shape).map_err(UFuncError::Shape)?
+    };
     if mask.shape() == shape {
         if mask.values().len() != expected {
             return Err(UFuncError::ReductionContractViolation {
@@ -9193,6 +9214,25 @@ impl UFuncArray {
         product: bool,
         buffered: bool,
     ) -> f64 {
+        Self::reduce_float_lane_from(
+            values,
+            dtype,
+            product,
+            buffered,
+            if product { 1.0 } else { 0.0 },
+        )
+    }
+
+    /// Resume an inner reduction loop from an already-cast accumulator. In
+    /// particular, `initial` participates before any multiplication or addition
+    /// and masked runs resume the prior run without inserting an extra identity.
+    fn reduce_float_lane_from(
+        values: &[f64],
+        dtype: DType,
+        product: bool,
+        buffered: bool,
+        mut result: f64,
+    ) -> f64 {
         const CONVERSION_BUFFER_LEN: usize = 8192;
 
         // Match DOUBLE_pairwise_sum in NumPy's loops_utils.h.src. Default
@@ -9224,7 +9264,6 @@ impl UFuncArray {
             pairwise_sum_f64(&values[..split]) + pairwise_sum_f64(&values[split..])
         }
 
-        let mut result = if product { 1.0 } else { 0.0 };
         let chunk_len = if buffered {
             CONVERSION_BUFFER_LEN
         } else {
@@ -9234,10 +9273,9 @@ impl UFuncArray {
             result = match dtype {
                 DType::F16 => {
                     let accumulator = if product {
-                        chunk
-                            .iter()
-                            .copied()
-                            .fold(result as f32, |acc, value| acc * value as f32)
+                        chunk.iter().copied().fold(result as f32, |acc, value| {
+                            acc * fnp_dtype::f16_from_f64(value).to_f32()
+                        })
                     } else {
                         // HALF_add adds the unrounded f32 partial to the prior
                         // half accumulator and rounds only the combined value.
@@ -9598,96 +9636,30 @@ impl UFuncArray {
 
     /// Sum with initial value (`np.sum(initial=...)`).
     ///
-    /// The initial value is added to the sum result. For empty arrays,
-    /// the result is the initial value itself.
+    /// The scalar is cast to the reduction dtype before seeding every output
+    /// accumulator. A real initial value has a zero imaginary component in a
+    /// complex reduction. Empty arrays return the initial value itself.
     pub fn reduce_sum_initial(
         &self,
         axis: Option<isize>,
         keepdims: bool,
         initial: f64,
     ) -> Result<Self, UFuncError> {
-        let mut result = self.reduce_sum(axis, keepdims)?;
-        match (&mut result.integer_sidecar, result.dtype) {
-            (Some(IntegerSidecar::I64(sidecar)), DType::I64) => {
-                let initial = initial as i64;
-                for v in sidecar.iter_mut() {
-                    *v = v.wrapping_add(initial);
-                }
-                result.values = sidecar.iter().map(|&v| v as f64).collect();
-            }
-            (Some(IntegerSidecar::U64(sidecar)), DType::U64) => {
-                let initial = initial as u64;
-                for v in sidecar.iter_mut() {
-                    *v = v.wrapping_add(initial);
-                }
-                result.values = sidecar.iter().map(|&v| v as f64).collect();
-            }
-            (_, DType::F16) => {
-                let initial = f16::from_f64(initial);
-                for v in &mut result.values {
-                    *v = f16::from_f32(initial.to_f32() + f16::from_f64(*v).to_f32()).to_f64();
-                }
-            }
-            (_, DType::F32) => {
-                let initial = initial as f32;
-                for v in &mut result.values {
-                    *v = f64::from(initial + (*v as f32));
-                }
-            }
-            _ => {
-                for v in &mut result.values {
-                    *v += initial;
-                }
-            }
-        }
-        Ok(result)
+        self.reduce_selected_arithmetic(None, axis, keepdims, Some(initial), false)
     }
 
     /// Product with initial value (`np.prod(initial=...)`).
     ///
-    /// The initial value is multiplied into the product result. For empty arrays,
-    /// the result is the initial value itself.
+    /// The scalar seeds every output accumulator before the first product,
+    /// preserving floating-point evaluation order and precision. For empty
+    /// arrays, the result is the initial value itself.
     pub fn reduce_prod_initial(
         &self,
         axis: Option<isize>,
         keepdims: bool,
         initial: f64,
     ) -> Result<Self, UFuncError> {
-        let mut result = self.reduce_prod(axis, keepdims)?;
-        match (&mut result.integer_sidecar, result.dtype) {
-            (Some(IntegerSidecar::I64(sidecar)), DType::I64) => {
-                let initial = initial as i64;
-                for v in sidecar.iter_mut() {
-                    *v = v.wrapping_mul(initial);
-                }
-                result.values = sidecar.iter().map(|&v| v as f64).collect();
-            }
-            (Some(IntegerSidecar::U64(sidecar)), DType::U64) => {
-                let initial = initial as u64;
-                for v in sidecar.iter_mut() {
-                    *v = v.wrapping_mul(initial);
-                }
-                result.values = sidecar.iter().map(|&v| v as f64).collect();
-            }
-            (_, DType::F16) => {
-                let initial = f16::from_f64(initial);
-                for v in &mut result.values {
-                    *v = f16::from_f32(initial.to_f32() * f16::from_f64(*v).to_f32()).to_f64();
-                }
-            }
-            (_, DType::F32) => {
-                let initial = initial as f32;
-                for v in &mut result.values {
-                    *v = f64::from(initial * (*v as f32));
-                }
-            }
-            _ => {
-                for v in &mut result.values {
-                    *v *= initial;
-                }
-            }
-        }
-        Ok(result)
+        self.reduce_selected_arithmetic(None, axis, keepdims, Some(initial), true)
     }
 
     pub fn reduce_prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
@@ -10858,89 +10830,232 @@ impl UFuncArray {
 
     /// Sum with a boolean mask (where parameter).
     ///
-    /// Mimics `np.sum(a, where=mask)`. Only elements where mask is nonzero
-    /// are included in the sum. Mask must be broadcastable to self's shape.
+    /// Mimics `np.sum(a, where=mask)`. Only logical elements where the mask
+    /// is nonzero are included. Numeric masks are converted to truth values at
+    /// their source precision and must broadcast to the logical array shape.
     pub fn reduce_sum_where(
         &self,
         mask: &Self,
         axis: Option<isize>,
         keepdims: bool,
     ) -> Result<Self, UFuncError> {
-        let mask = normalize_reduction_where_mask(mask, &self.shape)?;
-        let source_sidecar = self.synthesized_integer_sidecar("sum_where")?;
-        let masked_values: Vec<f64> = self
-            .values
-            .iter()
-            .zip(mask.values.iter())
-            .map(|(&v, &m)| if m != 0.0 { v } else { 0.0 })
-            .collect();
-        let masked_sidecar = source_sidecar.map(|sidecar| match sidecar {
-            IntegerSidecar::I64(values) => IntegerSidecar::I64(
-                values
-                    .into_iter()
-                    .zip(mask.values.iter())
-                    .map(|(v, &m)| if m != 0.0 { v } else { 0 })
-                    .collect(),
-            ),
-            IntegerSidecar::U64(values) => IntegerSidecar::U64(
-                values
-                    .into_iter()
-                    .zip(mask.values.iter())
-                    .map(|(v, &m)| if m != 0.0 { v } else { 0 })
-                    .collect(),
-            ),
-        });
-        let masked = Self {
-            shape: self.shape.clone(),
-            values: masked_values,
-            dtype: self.dtype,
-            integer_sidecar: masked_sidecar,
-        };
-        let mut result = masked.reduce_sum(axis, keepdims)?;
-        if self.dtype != DType::F64 || self.values.is_empty() {
+        self.reduce_selected_arithmetic(Some(mask), axis, keepdims, None, false)
+    }
+
+    /// Product over selected logical elements (`np.prod(a, where=mask)`).
+    ///
+    /// The mask follows [`Self::reduce_sum_where`]. Entire complex values are
+    /// selected or excluded together, and an empty selection returns one.
+    pub fn reduce_prod_where(
+        &self,
+        mask: &Self,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_selected_arithmetic(Some(mask), axis, keepdims, None, true)
+    }
+
+    /// Arithmetic reductions with an optional selection and initial scalar.
+    /// The shared traversal keeps a single accumulator per logical output and
+    /// calls the numeric loop once per selected contiguous run, as NumPy does.
+    fn reduce_selected_arithmetic(
+        &self,
+        mask: Option<&Self>,
+        axis: Option<isize>,
+        keepdims: bool,
+        initial: Option<f64>,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if product { "prod" } else { "sum" };
+        if !(self.dtype.is_numeric() || self.dtype == DType::Bool) {
+            // Existing initial/sum_where entry points also accept legacy
+            // temporal and opaque working cells. Keep their established
+            // default-reducer behavior outside the numeric accumulator path.
+            if product && mask.is_some() {
+                return Err(UFuncError::Msg(format!(
+                    "prod_where: unsupported input dtype {:?}",
+                    self.dtype
+                )));
+            }
+            let masked = if let Some(mask) = mask {
+                let mask = normalize_reduction_where_mask(mask, &self.shape)?;
+                let mut masked = self.clone();
+                for (value, &selected) in masked.values.iter_mut().zip(&mask.values) {
+                    if selected == 0.0 {
+                        *value = 0.0;
+                    }
+                }
+                if let Some(sidecar) = &mut masked.integer_sidecar {
+                    match sidecar {
+                        IntegerSidecar::I64(values) => {
+                            for (value, &selected) in values.iter_mut().zip(&mask.values) {
+                                if selected == 0.0 {
+                                    *value = 0;
+                                }
+                            }
+                        }
+                        IntegerSidecar::U64(values) => {
+                            for (value, &selected) in values.iter_mut().zip(&mask.values) {
+                                if selected == 0.0 {
+                                    *value = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(masked)
+            } else {
+                None
+            };
+            let input = masked.as_ref().unwrap_or(self);
+            let mut result = if product {
+                input.reduce_prod(axis, keepdims)?
+            } else {
+                input.reduce_sum(axis, keepdims)?
+            };
+            if let Some(initial) = initial {
+                for value in &mut result.values {
+                    *value = if product {
+                        *value * initial
+                    } else {
+                        *value + initial
+                    };
+                }
+            }
             return Ok(result);
         }
-        let axis = if self.shape.is_empty() && matches!(axis, Some(0 | -1)) {
+        let shape = self.complex_logical_shape(operation)?;
+        let axis = if shape.is_empty() && matches!(axis, Some(0 | -1)) {
             None
         } else {
             axis
         };
-        let lane_len = match axis {
-            None => self.values.len(),
-            Some(axis) => {
-                let axis = normalize_axis(axis, self.shape.len())?;
-                let inner = element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                if inner != 1 {
-                    return Ok(result);
-                }
-                self.shape[axis]
-            }
+        let axes: Vec<isize> = match axis {
+            None => (0..shape.len()).map(|axis| axis as isize).collect(),
+            Some(axis) => vec![axis],
         };
-        // NumPy's where loop invokes the sum kernel once per unmasked run.
-        // Replacing masked values with zero changes the pairwise tree.
-        for ((values, selected), output) in self
-            .values
-            .chunks(lane_len)
-            .zip(mask.values.chunks(lane_len))
-            .zip(&mut result.values)
+        let plan = AxesReductionPlan::new(&shape, &axes, keepdims)?;
+        let dtype = promote_for_sum_reduction(self.dtype);
+        if dtype.is_complex()
+            && plan.output_count > isize::MAX as usize / std::mem::size_of::<(f64, f64)>()
         {
-            let mut sum = 0.0;
-            let mut index = 0;
-            while index < lane_len {
-                while index < lane_len && selected[index] == 0.0 {
-                    index += 1;
-                }
-                let start = index;
-                while index < lane_len && selected[index] != 0.0 {
-                    index += 1;
-                }
-                if start != index {
-                    sum += reduce_sum_values(&values[start..index]);
-                }
-            }
-            *output = sum;
+            return Err(UFuncError::Shape(ShapeError::Overflow));
         }
-        Ok(result)
+        let mask = mask
+            .map(|mask| normalize_reduction_where_mask(mask, &shape))
+            .transpose()?;
+        let selected = mask.as_ref().map(|mask| mask.values.as_slice());
+        // Python-style scalar packing rejects invalid/out-of-range integer
+        // initials even for empty output arrays. Floating overflow is reported
+        // through the same scalar conversion path used by assignments.
+        let initial = Self::pack_python_float_values(
+            &[initial.unwrap_or(if product { 1.0 } else { 0.0 })],
+            dtype,
+            operation,
+        )?;
+
+        if dtype.is_complex() {
+            let values = self.complex_reduction_values(dtype)?;
+            let mut result = vec![(initial.values[0], initial.values[1]); plan.output_count];
+            let fused = product && plan.vector_product && Self::complex_multiply_uses_fma();
+            plan.for_each_selected_run(values.len(), selected, |output, range| {
+                let accumulator = &mut result[output];
+                if product {
+                    for &value in &values[range] {
+                        *accumulator = if fused {
+                            Self::complex_cumulative_fused_multiply(*accumulator, value, dtype)
+                        } else {
+                            Self::complex_reduction_multiply(*accumulator, value, dtype)
+                        };
+                    }
+                } else {
+                    *accumulator = Self::complex_reduction_add(
+                        *accumulator,
+                        Self::complex_pairwise_sum(&values[range], dtype),
+                        dtype,
+                    );
+                }
+            });
+            let mut shape = plan.output_shape;
+            shape.push(2);
+            return Self::new(
+                shape,
+                result.into_iter().flat_map(|(re, im)| [re, im]).collect(),
+                dtype,
+            );
+        }
+
+        if matches!(dtype, DType::F16 | DType::F32 | DType::F64) {
+            // The raw constructor can retain f64 cells tagged as float16.
+            // Round them directly to half before the pairwise f32 tree: the
+            // half crate's f64 conversion can double-round midpoint neighbors.
+            let half_values = (dtype == DType::F16).then(|| {
+                self.values
+                    .iter()
+                    .map(|&value| fnp_dtype::f16_from_f64(value).to_f64())
+                    .collect::<Vec<_>>()
+            });
+            let values = half_values.as_deref().unwrap_or(&self.values);
+            let mut result = vec![initial.values[0]; plan.output_count];
+            plan.for_each_selected_run(values.len(), selected, |output, range| {
+                result[output] = Self::reduce_float_lane_from(
+                    &values[range],
+                    dtype,
+                    product,
+                    false,
+                    result[output],
+                );
+            });
+            return Self::new(plan.output_shape, result, dtype);
+        }
+
+        // Normalize narrow source widths and Boolean truth before promotion.
+        // Wide sources keep both their exact sidecars and the established
+        // promoting-reduction conversion of raw f64 working cells.
+        let source = if matches!(self.dtype, DType::I64 | DType::U64) {
+            match self
+                .promoting_reduction_sidecar()
+                .expect("wide integer input has a reduction representation")
+            {
+                IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+                IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+            }
+        } else {
+            self.to_storage()?
+        };
+        let storage = source
+            .cast_to(dtype)
+            .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?;
+        let storage = match storage {
+            ArrayStorage::I64(values) => {
+                let mut result = vec![initial.values[0] as i64; plan.output_count];
+                plan.for_each_selected_run(values.len(), selected, |output, range| {
+                    for &value in &values[range] {
+                        result[output] = if product {
+                            result[output].wrapping_mul(value)
+                        } else {
+                            result[output].wrapping_add(value)
+                        };
+                    }
+                });
+                ArrayStorage::I64(result)
+            }
+            ArrayStorage::U64(values) => {
+                let mut result = vec![initial.values[0] as u64; plan.output_count];
+                plan.for_each_selected_run(values.len(), selected, |output, range| {
+                    for &value in &values[range] {
+                        result[output] = if product {
+                            result[output].wrapping_mul(value)
+                        } else {
+                            result[output].wrapping_add(value)
+                        };
+                    }
+                });
+                ArrayStorage::U64(result)
+            }
+            _ => unreachable!("numeric sum/prod promote integer accumulators to i64/u64"),
+        };
+        Self::from_storage(plan.output_shape, storage)
     }
 
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
@@ -46839,6 +46954,39 @@ impl AxesReductionPlan {
             })
             .sum()
     }
+
+    /// Visit selected contiguous input runs without compacting the input or
+    /// replacing excluded values with identities. Both would change the
+    /// floating reduction tree; compaction also changes half-product rounding.
+    fn for_each_selected_run(
+        &self,
+        input_count: usize,
+        selected: Option<&[f64]>,
+        mut visit: impl FnMut(usize, std::ops::Range<usize>),
+    ) {
+        debug_assert!(selected.is_none_or(|mask| mask.len() == input_count));
+        for start in (0..input_count).step_by(self.contiguous_run_len) {
+            let end = start + self.contiguous_run_len;
+            let output = self.output_index(start);
+            let Some(selected) = selected else {
+                visit(output, start..end);
+                continue;
+            };
+            let mut index = start;
+            while index < end {
+                while index < end && selected[index] == 0.0 {
+                    index += 1;
+                }
+                let selected_start = index;
+                while index < end && selected[index] != 0.0 {
+                    index += 1;
+                }
+                if selected_start != index {
+                    visit(output, selected_start..index);
+                }
+            }
+        }
+    }
 }
 
 // ── numpy datetime/timedelta arithmetic ─────────────────────────────────
@@ -48329,6 +48477,30 @@ impl MaskedArray {
         })
     }
 
+    /// Preserve this container's existing physical-component mask contract.
+    /// Public where reductions instead accept one mask per logical element.
+    fn sum_valid_values(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> Result<UFuncArray, UFuncError> {
+        match self.valid_mask() {
+            None => self.data.reduce_sum(axis, keepdims),
+            Some(mask) if self.data.dtype().is_complex() => {
+                let values = self
+                    .data
+                    .values()
+                    .iter()
+                    .zip(mask.values())
+                    .map(|(&value, &selected)| if selected != 0.0 { value } else { 0.0 })
+                    .collect();
+                UFuncArray::new(self.data.shape().to_vec(), values, self.data.dtype())?
+                    .reduce_sum(axis, keepdims)
+            }
+            Some(mask) => self.data.reduce_sum_where(&mask, axis, keepdims),
+        }
+    }
+
     // ── Arithmetic with mask propagation ────────────────────────────
 
     /// Apply a binary operation, propagating masks (OR).
@@ -48377,10 +48549,7 @@ impl MaskedArray {
             });
         }
 
-        let result_data = match self.valid_mask() {
-            None => self.data.reduce_sum(axis, keepdims)?,
-            Some(vmask) => self.data.reduce_sum_where(&vmask, axis, keepdims)?,
-        };
+        let result_data = self.sum_valid_values(axis, keepdims)?;
         Ok(Self {
             data: result_data,
             mask: None,
@@ -48404,10 +48573,7 @@ impl MaskedArray {
 
     /// Mean of non-masked elements.
     pub fn mean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
-        let sum_result = match self.valid_mask() {
-            None => self.data.reduce_sum(axis, keepdims)?,
-            Some(vmask) => self.data.reduce_sum_where(&vmask, axis, keepdims)?,
-        };
+        let sum_result = self.sum_valid_values(axis, keepdims)?;
         let count_result = self.count(axis)?;
         let count_broadcast = if keepdims {
             let target: Vec<isize> = sum_result

@@ -28,7 +28,7 @@
 ## GROUP 3: sum/prod `initial` parameter
 - [x] Add `reduce_sum_initial(&self, axis, keepdims, initial: f64)` method
 - [x] Add `reduce_prod_initial(&self, axis, keepdims, initial: f64)` method
-- [x] Initial value added to sum / multiplied into product
+- [~] Numeric accumulators now start with the typed initial value before arithmetic, preserving complex real-only seeds, source precision, integer wrapping, signed zero and reduction order. Regression coverage is authored; execution is pending the unavailable Rust workspace.
 - [x] Add tests: sum with initial, prod with initial
 
 ## GROUP 4: sum/prod/mean/var/std `dtype` parameter
@@ -170,3 +170,9 @@
 - [x] `complex_pinv_mxn` forms a rectangular complex pseudoinverse from reduced factors. `complex_lstsq_mxn` solves minimum-norm systems with multiple right-hand sides, returns rank/singular values and the conditional residual tuple, and handles zero dimensions. Extended-exponent projections avoid overflowing U^H B when the final solution is finite. Reduced storage avoids a full m-by-m factor for tall systems.
 - [x] All nine new SVD/rectangular-solver tests passed, including 90 live NumPy 2.4.3 cases, dense factor reconstruction/unitarity, deficient/repeated spectra, subnormal and 1e-300 through 1e300 directions, and malformed/empty cases. The complete `fnp-linalg` library suite passed 399 tests with zero failures and 18 existing performance benchmarks ignored. Strict all-target Clippy, workspace formatting and diff checks passed for the changed source.
 - [D] These are native Rust-core APIs; existing Python NumPy fallback dispatch is unchanged. Native general complex eigendecomposition, general matrix balancing, and full backend-identical numerical/parameter parity remain open. The Rust pinv APIs retain their existing negative-rcond default convention; complex least squares explicitly rejects NaN rcond instead of reproducing LAPACK's undefined scaling path.
+
+## Seeded and masked numeric reductions (2026-11-15)
+- [~] `reduce_sum_where` broadcasts truth masks over logical complex elements and retains selected contiguous runs for numeric accumulation. New `reduce_prod_where` supports numeric/Boolean input with product identities for excluded lanes. Existing `reduce_sum_initial` and `reduce_prod_initial` seed typed accumulators before arithmetic.
+- [~] The shared numeric path preserves canonical float16 source rounding, float32/64 and complex reduction order, exact wide-integer sidecars, raw wide-integer working-cell conversion, and narrow integer/Boolean normalization. MaskedArray retains its physical-component mask contract, and preexisting temporal/opaque entry points retain their compatibility path.
+- [~] Eight new regression tests in `complex_reductions.rs` generate 13,120 NumPy differential cases plus direct precision, mask, invalid-layout/capacity and compatibility checks. Independent source review is complete. Rust compilation, test execution, Clippy and formatting are pending because the execution workspace disconnected; these cases are not recorded as passed.
+- [D] These Rust-core APIs retain one optional axis and the default accumulator dtype. Combined where/initial controls, tuple-axis masks, explicit dtype with masks, and complex-valued initial arguments remain separate work.
