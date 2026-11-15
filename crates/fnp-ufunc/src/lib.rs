@@ -21247,7 +21247,30 @@ impl UFuncArray {
 
     /// Eigenvalue decomposition for symmetric/Hermitian matrices (np.linalg.eigh).
     /// Returns (eigenvalues, eigenvectors) with eigenvalues sorted ascending.
+    /// Complex inputs use the lower Hermitian triangle, ignore imaginary diagonal
+    /// components, and retain component precision in the real spectrum and vectors.
     pub fn eigh(&self) -> Result<(Self, Self), UFuncError> {
+        if self.dtype.is_complex() {
+            let shape = self.complex_logical_shape("eigh")?;
+            if shape.len() != 2 || shape[0] != shape[1] {
+                return Err(UFuncError::Msg(
+                    "eigh: input must be a square logical 2-D array".into(),
+                ));
+            }
+            let n = shape[0];
+            let source = self.cast_numeric_storage(self.dtype, false)?;
+            let (values, vectors) = fnp_linalg::complex_eigh_nxn(&source.values, n, "L")
+                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            let real_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            let values = Self::from_values_with_dtype(vec![n], values, real_dtype)?;
+            let mut vectors = Self::complex_matrix_from_interleaved(n, n, vectors, self.dtype)?;
+            vectors.round_complex_transform_components();
+            return Ok((values, vectors));
+        }
         if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
             return Err(UFuncError::Msg(
                 "eigh: input must be a square 2-D array".into(),
@@ -21274,6 +21297,24 @@ impl UFuncArray {
 
     /// Eigenvalues of a symmetric/Hermitian matrix (np.linalg.eigvalsh).
     pub fn eigvalsh(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let shape = self.complex_logical_shape("eigvalsh")?;
+            if shape.len() != 2 || shape[0] != shape[1] {
+                return Err(UFuncError::Msg(
+                    "eigvalsh: input must be a square logical 2-D array".into(),
+                ));
+            }
+            let n = shape[0];
+            let source = self.cast_numeric_storage(self.dtype, false)?;
+            let values = fnp_linalg::complex_eigvalsh_nxn(&source.values, n, "L")
+                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            let real_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            return Self::from_values_with_dtype(vec![n], values, real_dtype);
+        }
         if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
             return Err(UFuncError::Msg(
                 "eigvalsh: input must be a square 2-D array".into(),
@@ -21295,7 +21336,47 @@ impl UFuncArray {
     /// When `full_matrices` is `true` (default), returns (U, S, Vt) where
     /// U is m×m and Vt is n×n. When `false`, returns reduced SVD where
     /// U is m×k and Vt is k×n with k = min(m, n).
+    /// For complex inputs the right factor is V^H, factors retain the input
+    /// precision, and singular values have the corresponding real dtype.
     pub fn svd_full(&self, full_matrices: bool) -> Result<(Self, Self, Self), UFuncError> {
+        if self.dtype.is_complex() {
+            let shape = self.complex_logical_shape("svd")?;
+            if shape.len() != 2 {
+                return Err(UFuncError::Msg(
+                    "svd: input must be a logical 2-D array".into(),
+                ));
+            }
+            let (m, n) = (shape[0], shape[1]);
+            let k = m.min(n);
+            let source = self.cast_numeric_storage(self.dtype, false)?;
+            let (u, values, vh) = if full_matrices {
+                fnp_linalg::complex_svd_mxn_full(&source.values, m, n)
+            } else {
+                fnp_linalg::complex_svd_mxn_reduced(&source.values, m, n)
+            }
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            let real_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            let mut u = Self::complex_matrix_from_interleaved(
+                m,
+                if full_matrices { m } else { k },
+                u,
+                self.dtype,
+            )?;
+            let mut vh = Self::complex_matrix_from_interleaved(
+                if full_matrices { n } else { k },
+                n,
+                vh,
+                self.dtype,
+            )?;
+            u.round_complex_transform_components();
+            vh.round_complex_transform_components();
+            let values = Self::from_values_with_dtype(vec![k], values, real_dtype)?;
+            return Ok((u, values, vh));
+        }
         if self.shape.len() != 2 {
             return Err(UFuncError::Msg("svd: input must be a 2-D array".into()));
         }
@@ -21365,6 +21446,23 @@ impl UFuncArray {
 
     /// Singular values only (np.linalg.svdvals).
     pub fn svdvals(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            let shape = self.complex_logical_shape("svdvals")?;
+            if shape.len() != 2 {
+                return Err(UFuncError::Msg(
+                    "svdvals: input must be a logical 2-D array".into(),
+                ));
+            }
+            let source = self.cast_numeric_storage(self.dtype, false)?;
+            let values = fnp_linalg::complex_svd_mxn(&source.values, shape[0], shape[1])
+                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            let real_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            return Self::from_values_with_dtype(vec![shape[0].min(shape[1])], values, real_dtype);
+        }
         if self.shape.len() != 2 {
             return Err(UFuncError::Msg("svdvals: input must be a 2-D array".into()));
         }
