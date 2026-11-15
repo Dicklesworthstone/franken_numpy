@@ -1409,3 +1409,30 @@ fn complex_multi_rhs_solve_handles_empty_extreme_and_invalid_systems() {
         assert!(complex_solve_nxn_multi(&[1.0, nonfinite], &[], 1, 0).is_err());
     }
 }
+
+#[test]
+fn matrix_power_one_preserves_stored_bits_without_an_identity_product() {
+    let payload_nan = f64::from_bits(0x7ff8_0000_0000_1234);
+    for source in [
+        [1.0, -0.0, 0.0, -2.0],
+        [payload_nan, -0.0, f64::INFINITY, f64::NEG_INFINITY],
+    ] {
+        let first = fnp_linalg::matrix_power_nxn(&source, 2, 1).unwrap();
+        for (actual, expected) in first.iter().zip(source) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        assert_eq!(
+            fnp_linalg::matrix_power_nxn(&source, 2, 0).unwrap(),
+            vec![1.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    let inverse = fnp_linalg::matrix_power_nxn(&[2.0, 1.0, 1.0, 1.0], 2, -1).unwrap();
+    assert_vec_close(
+        "matrix_power inverse",
+        &inverse,
+        &[1.0, -1.0, -1.0, 2.0],
+        1e-14,
+        1e-14,
+    );
+}

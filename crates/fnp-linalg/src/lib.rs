@@ -8470,6 +8470,12 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
     }
 
     let base = if p < 0 { inv_nxn(a, n)? } else { a.to_vec() };
+    if p.unsigned_abs() == 1 {
+        // NumPy returns A (or its inverse) directly for these exponents.
+        // Multiplication by an identity can spread nonfinite entries and
+        // erase signed zeros even though no matrix product is required.
+        return Ok(base);
+    }
 
     // The square-and-multiply ladder seeds `result = I` and folds in `result @ cur`
     // at each set bit. The FIRST such fold is `I @ cur`, which equals `cur` exactly

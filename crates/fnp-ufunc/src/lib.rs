@@ -18428,23 +18428,151 @@ impl UFuncArray {
             .map_err(|e| UFuncError::Msg(format!("{e}")))
     }
 
-    /// Compute matrix power (np.linalg.matrix_power).
-    /// Raises a square matrix to integer power `p`.
+    /// Raise the final two logical dimensions to an integer matrix power.
+    ///
+    /// Leading dimensions identify independent matrices. Nonnegative powers
+    /// preserve the input dtype, including exact integer storage and complete
+    /// complex elements. Negative powers invert each matrix first, promoting
+    /// Boolean/integer inputs to float64; float16 inversion is unsupported.
+    /// Products use the existing portable matmul kernels, whose rounding can
+    /// differ from vendor BLAS. Each intermediate retains its declared precision.
     pub fn matrix_power(&self, p: i64) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+        let shape = self.complex_logical_shape("matrix_power")?;
+        let ndim = shape.len();
+        if ndim < 2 || shape[ndim - 2] != shape[ndim - 1] {
             return Err(UFuncError::Msg(
-                "matrix_power: input must be a square 2-D array".into(),
+                "matrix_power: the final two dimensions must form a square matrix".into(),
             ));
         }
-        let n = self.shape[0];
-        let result = fnp_linalg::matrix_power_nxn(&self.values, n, p)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n, n],
-            values: result,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        if !(self.dtype.is_numeric() || self.dtype == DType::Bool) {
+            return Err(UFuncError::Msg(format!(
+                "matrix_power: unsupported input dtype {:?}",
+                self.dtype
+            )));
+        }
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        let logical_count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = logical_count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if physical_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: physical_count,
+                actual: self.values.len(),
+            });
+        }
+        let n = shape[ndim - 1];
+        if p == 0 {
+            let mut values = try_zeroed_f64(physical_count, "matrix_power")?;
+            if physical_count != 0 {
+                let matrix_size = n * n * components;
+                for matrix in values.chunks_exact_mut(matrix_size) {
+                    for diagonal in 0..n {
+                        matrix[(diagonal * n + diagonal) * components] = 1.0;
+                    }
+                }
+            }
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
+
+        if p < 0 && self.dtype == DType::F16 {
+            return Err(UFuncError::Msg(
+                "matrix_power: float16 is unsupported for negative powers".into(),
+            ));
+        }
+        let dtype = if p < 0 && (self.dtype.is_integer() || self.dtype == DType::Bool) {
+            DType::F64
+        } else {
+            self.dtype
+        };
+        // Empty matrices and empty stacks require no inverse or multiplication.
+        // Returning before core-size products also preserves valid empty shapes
+        // whose unused matrix dimensions exceed the allocation limit.
+        if physical_count == 0 {
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values: Vec::new(),
+                dtype,
+                integer_sidecar: None,
+            });
+        }
+
+        let mut base = if matches!(self.dtype, DType::I64 | DType::U64) {
+            // Preserve exact sidecars, and retain the established interpretation
+            // of raw wide-integer working cells used by promoting reductions.
+            let source = match self
+                .promoting_reduction_sidecar()
+                .expect("wide integer input has an integer representation")
+            {
+                IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+                IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+            };
+            let converted = source
+                .cast_to(dtype)
+                .map_err(|error| UFuncError::Msg(format!("matrix_power: {error}")))?;
+            Self::from_storage(shape, converted)?
+        } else {
+            self.cast_numeric_storage(dtype, false)?
+        };
+        if p < 0 {
+            let matrix_size = n * n * components;
+            for matrix in base.values.chunks_exact_mut(matrix_size) {
+                let inverse = if dtype.is_complex() {
+                    fnp_linalg::complex_inv_nxn(matrix, n)
+                } else {
+                    fnp_linalg::inv_nxn(matrix, n)
+                }
+                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+                matrix.copy_from_slice(&inverse);
+            }
+            // NumPy computes low-precision inverses in double precision, then
+            // narrows before applying the positive-power multiplication schedule.
+            base = base.cast_numeric_storage(dtype, false)?;
+        }
+
+        let multiply = |left: &Self, right: &Self| -> Result<Self, UFuncError> {
+            let product = left.matmul(right)?;
+            if matches!(product.dtype, DType::F16 | DType::F32) {
+                product.cast_numeric_storage(product.dtype, false)
+            } else {
+                Ok(product)
+            }
+        };
+        let mut exponent = p.unsigned_abs();
+        match exponent {
+            1 => return Ok(base),
+            2 => return multiply(&base, &base),
+            3 => return multiply(&multiply(&base, &base)?, &base),
+            _ => {}
+        }
+
+        // Seed from the first set bit, never from an identity product. Identity
+        // multiplication can change signed zeros and spread NaNs/infinities.
+        // unsigned_abs also handles i64::MIN without overflowing.
+        while exponent & 1 == 0 {
+            base = multiply(&base, &base)?;
+            exponent >>= 1;
+        }
+        let mut result = base.clone();
+        exponent >>= 1;
+        while exponent != 0 {
+            base = multiply(&base, &base)?;
+            if exponent & 1 != 0 {
+                result = multiply(&result, &base)?;
+            }
+            exponent >>= 1;
+        }
+        Ok(result)
     }
 
     /// Solve a tensor equation (np.linalg.tensorsolve).

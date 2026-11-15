@@ -133,6 +133,13 @@ impl OracleBatch {
         self.actual.push(UFuncArray::multi_dot(arrays));
     }
 
+    fn power_case(&mut self, array: &UFuncArray, power: i64) {
+        self.cases.push(json!({
+            "op": "matrix_power", "lhs": oracle_input(array), "power": power
+        }));
+        self.actual.push(array.matrix_power(power));
+    }
+
     fn statistics_case(&mut self, op: &str, array: &UFuncArray) {
         self.cases
             .push(json!({"op": op, "lhs": oracle_input(array)}));
@@ -195,6 +202,32 @@ def chain_bounds(arrays):
 rows = []
 for case in json.load(sys.stdin):
     try:
+        if case['op'] == 'matrix_power':
+            source = load(case['lhs'])
+            power = case['power']
+            result = np.asarray(np.linalg.matrix_power(source, power))
+            base = np.linalg.inv(source) if power < 0 else source
+            magnitude = (np.abs(base.real.astype(np.float64))
+                         + np.abs(base.imag.astype(np.float64)))
+            bounds = np.linalg.matrix_power(magnitude, abs(power))
+            if power < 0 and base.size:
+                # Include inverse conditioning in the forward-error bound.
+                # The finite oracle cases use well-conditioned matrices.
+                condition = (np.linalg.norm(source, ord=np.inf, axis=(-2, -1))
+                             * np.linalg.norm(base, ord=np.inf, axis=(-2, -1)))
+                bounds = bounds * np.maximum(1.0, condition)[..., None, None]
+            bounds = np.nan_to_num(bounds, nan=0.0, posinf=np.finfo(np.float64).max,
+                                   neginf=np.finfo(np.float64).max)
+            parts = np.empty(result.size * 2, dtype=np.float64)
+            parts[0::2] = result.real.ravel()
+            parts[1::2] = result.imag.ravel()
+            rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                             bits=parts.view(np.uint64).tolist(),
+                             bounds=np.repeat(bounds.ravel(), 2).tolist(),
+                             contracted=2*max(1, source.shape[-1])*max(1, abs(power)),
+                             integers=[str(int(x)) for x in result.ravel()]
+                             if result.dtype.kind in 'biu' else None))
+            continue
         if case['op'] in ('cov', 'corrcoef'):
             source = load(case['lhs'])
             result = np.asarray(getattr(np, case['op'])(source))
@@ -1887,4 +1920,334 @@ fn complex_multi_dot_rejects_malformed_storage_and_impossible_intermediates() {
         UFuncArray::multi_dot(&[&empty, &row, &column, &row]),
         Err(UFuncError::Shape(ShapeError::Overflow))
     ));
+}
+
+fn matrix_power_source(shape: &[usize], dtype: DType) -> UFuncArray {
+    let n = shape[shape.len() - 1];
+    let count: usize = shape.iter().product();
+    let values = (0..count)
+        .map(|index| {
+            let row = (index / n) % n;
+            let column = index % n;
+            let lane = index / (n * n);
+            if row == column {
+                if dtype.is_integer() {
+                    2.0 + (lane % 3) as f64
+                } else {
+                    1.0 + (lane % 3) as f64 * 0.25
+                }
+            } else if dtype == DType::Bool {
+                0.0
+            } else if column == (row + 1) % n {
+                0.125
+            } else {
+                -0.0625
+            }
+        })
+        .collect::<Vec<_>>();
+    let storage = if dtype.is_complex() {
+        ArrayStorage::Complex128(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, real)| {
+                    let imaginary = if (index / n) % n == index % n {
+                        0.0625
+                    } else {
+                        0.125
+                    };
+                    (real, imaginary)
+                })
+                .collect(),
+        )
+    } else {
+        ArrayStorage::F64(values)
+    };
+    UFuncArray::from_storage(shape.to_vec(), storage.cast_to(dtype).unwrap()).unwrap()
+}
+
+#[test]
+fn matrix_power_numeric_dtypes_and_matrix_stacks_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for shape in [&[2, 2][..], &[3, 3], &[2, 2, 2], &[2, 3, 2, 2]] {
+            let input = matrix_power_source(shape, dtype);
+            for power in [-3, -1, 0, 1, 2, 3, 4, 5, 13] {
+                batch.power_case(&input, power);
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn matrix_power_preserves_exact_integer_sidecars_and_boolean_products() {
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::Bool(vec![true, true, true, false]),
+        ArrayStorage::I8(vec![i8::MIN, i8::MAX, -3, 2]),
+        ArrayStorage::U8(vec![u8::MAX, 128, 3, 2]),
+        ArrayStorage::I64(vec![i64::MAX, i64::MIN, (1_i64 << 53) + 1, -3]),
+        ArrayStorage::U64(vec![u64::MAX, (1_u64 << 63) + 1, (1_u64 << 53) + 1, 3]),
+    ] {
+        let input = UFuncArray::from_storage(vec![2, 2], storage).unwrap();
+        for power in [0, 1, 2, 3, 5, 17] {
+            batch.power_case(&input, power);
+        }
+    }
+    let boolean = UFuncArray::from_storage(
+        vec![2, 2],
+        ArrayStorage::Bool(vec![true, true, true, false]),
+    )
+    .unwrap();
+    let squared = boolean.matrix_power(2).unwrap();
+    assert_eq!(squared.dtype(), DType::Bool);
+    assert_eq!(squared.values(), &[1.0, 1.0, 1.0, 1.0]);
+
+    // Raw wide working cells still have a defined integer interpretation.
+    // Normalize them before powers so modular arithmetic never passes through
+    // the lossy float64 representation of an intermediate integer result.
+    for (dtype, value, inverse) in [
+        (DType::I64, 2.0_f64.powi(60), 2.0_f64.powi(-60)),
+        (DType::I64, -2.0_f64.powi(60), -2.0_f64.powi(-60)),
+        (DType::U64, 2.0_f64.powi(63), 2.0_f64.powi(-63)),
+    ] {
+        let input = UFuncArray::new(vec![1, 1], vec![value], dtype).unwrap();
+        assert!(!input.has_integer_sidecar());
+        let squared = input.matrix_power(2).unwrap();
+        assert_eq!(squared.dtype(), dtype);
+        assert_eq!(squared.to_storage().unwrap().get_i128(0), Some(0));
+        for (power, expected) in [(-1, inverse), (-2, inverse * inverse)] {
+            let negative = input.matrix_power(power).unwrap();
+            assert_eq!(negative.dtype(), DType::F64);
+            assert_eq!(negative.values(), &[expected]);
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn matrix_power_quantizes_sources_and_each_narrow_intermediate() {
+    let mut batch = OracleBatch::default();
+    for (dtype, raw, rounded) in [
+        (DType::F16, 1.0 + 2.0_f64.powi(-11), 1.0),
+        (DType::F32, 16_777_217.0, 16_777_216.0),
+    ] {
+        let input = UFuncArray::new(vec![1, 1], vec![raw], dtype).unwrap();
+        let output = input.matrix_power(1).unwrap();
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.values(), &[rounded]);
+        batch.power_case(&input, 1);
+    }
+    // Exact scalar witnesses distinguish rounding each selected product from
+    // computing all powers in float64 and narrowing only the final result.
+    for (dtype, value, cubed) in [
+        (DType::F16, 1.013671875, 1.041015625),
+        (DType::F32, 1.0003000497817993, 1.0009005069732666),
+    ] {
+        let input = UFuncArray::new(vec![1, 1], vec![value], dtype).unwrap();
+        let output = input.matrix_power(3).unwrap();
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.values(), &[cubed]);
+        batch.power_case(&input, 3);
+    }
+    let complex = UFuncArray::new(
+        vec![1, 1, 2],
+        vec![16_777_217.0, 1.0 + 2.0_f64.powi(-24)],
+        DType::Complex64,
+    )
+    .unwrap();
+    assert_eq!(
+        complex.matrix_power(1).unwrap().values(),
+        &[16_777_216.0, 1.0]
+    );
+    batch.power_case(&complex, 1);
+    let near_one = UFuncArray::new(
+        vec![1, 1, 2],
+        vec![1.0 + 2.0_f64.powi(-24), 1.0e-50],
+        DType::Complex64,
+    )
+    .unwrap();
+    let inverse_power = near_one.matrix_power(-3).unwrap();
+    assert_eq!(inverse_power.dtype(), DType::Complex64);
+    assert_eq!(inverse_power.values(), &[1.0, 0.0]);
+    batch.power_case(&near_one, -3);
+    batch.finish();
+}
+
+#[test]
+fn matrix_power_one_preserves_nonfinite_payloads_and_signed_zeros() {
+    let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    let real = UFuncArray::new(
+        vec![2, 2],
+        vec![nan, -0.0, f64::INFINITY, f64::NEG_INFINITY],
+        DType::F64,
+    )
+    .unwrap();
+    let complex = UFuncArray::new(
+        vec![2, 2, 2],
+        vec![-0.0, -0.0, nan, f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0, nan],
+        DType::Complex128,
+    )
+    .unwrap();
+    for input in [&real, &complex] {
+        let output = input.matrix_power(1).unwrap();
+        assert_eq!(output.shape(), input.shape());
+        assert_eq!(output.dtype(), input.dtype());
+        assert_eq!(
+            output
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            input
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let identity = input.matrix_power(0).unwrap();
+        assert_eq!(identity.dtype(), input.dtype());
+        let expected = if input.dtype().is_complex() {
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        } else {
+            vec![1.0, 0.0, 0.0, 1.0]
+        };
+        assert_eq!(identity.values(), expected);
+    }
+}
+
+#[test]
+fn matrix_power_handles_minimum_exponent_and_empty_stacks() {
+    for dtype in [
+        DType::Bool,
+        DType::I64,
+        DType::U64,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let input = UFuncArray::from_storage_with_dtype(
+            vec![2, 2],
+            ArrayStorage::F64(vec![0.0, 1.0, 1.0, 0.0]),
+            dtype,
+        )
+        .unwrap();
+        for (power, identity) in [(i64::MIN, true), (i64::MIN + 1, false), (i64::MAX, false)] {
+            let output = input.matrix_power(power).unwrap();
+            let expected_dtype = if power < 0 && (dtype.is_integer() || dtype == DType::Bool) {
+                DType::F64
+            } else {
+                dtype
+            };
+            assert_eq!(output.dtype(), expected_dtype);
+            let expected = if identity {
+                vec![1.0, 0.0, 0.0, 1.0]
+            } else {
+                vec![0.0, 1.0, 1.0, 0.0]
+            };
+            let expected = if dtype.is_complex() {
+                expected.into_iter().flat_map(|value| [value, 0.0]).collect()
+            } else {
+                expected
+            };
+            assert_eq!(output.values(), expected);
+        }
+    }
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for shape in [&[0, 0][..], &[2, 0, 0], &[0, 3, 3], &[2, 0, 3, 3]] {
+            let input = matrix_power_source(shape, dtype);
+            for power in [-3, -1, 0, 1, 2, 5] {
+                batch.power_case(&input, power);
+            }
+        }
+    }
+    batch.finish();
+
+    // Unused core dimensions must not overflow when the batch has no lanes.
+    for dtype in [DType::F64, DType::Complex128] {
+        let mut shape = vec![0, usize::MAX, usize::MAX];
+        if dtype.is_complex() {
+            shape.push(2);
+        }
+        let input = UFuncArray::new(shape.clone(), vec![], dtype).unwrap();
+        for power in [-1, 0, 1, 2] {
+            let output = input.matrix_power(power).unwrap();
+            assert_eq!(output.shape(), shape);
+            assert_eq!(output.dtype(), dtype);
+            assert!(output.values().is_empty());
+        }
+    }
+}
+
+#[test]
+fn matrix_power_rejects_singular_lanes_and_invalid_logical_shapes() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F64, DType::Complex64, DType::Complex128] {
+        let singular = UFuncArray::from_storage_with_dtype(
+            vec![2, 2],
+            ArrayStorage::F64(vec![1.0, 2.0, 2.0, 4.0]),
+            dtype,
+        )
+        .unwrap();
+        let stacked = UFuncArray::from_storage_with_dtype(
+            vec![2, 2, 2],
+            ArrayStorage::F64(vec![1.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0]),
+            dtype,
+        )
+        .unwrap();
+        for input in [&singular, &stacked] {
+            for power in [-3, -1, 0, 1, 2] {
+                batch.power_case(input, power);
+            }
+        }
+        for shape in [
+            &[][..],
+            &[2],
+            &[2, 3],
+            &[2, 2, 3],
+            &[0, 2, 3],
+            &[2, 0],
+        ] {
+            let input = source(shape, dtype, 1);
+            for power in [-1, 0, 1, 2] {
+                batch.power_case(&input, power);
+            }
+        }
+    }
+    batch.finish();
+    for malformed in [
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
+    ] {
+        for power in [-1, 0, 1, 2] {
+            assert!(malformed.matrix_power(power).is_err());
+        }
+    }
 }
