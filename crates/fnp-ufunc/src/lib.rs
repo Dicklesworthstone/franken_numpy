@@ -18374,44 +18374,102 @@ impl UFuncArray {
         })
     }
 
-    /// Solve a linear system (np.linalg.lstsq) using least-squares.
-    /// `self` is the coefficient matrix A, `b` is the RHS.
-    /// Returns the least-squares solution x.
     /// Least-squares solution (`np.linalg.lstsq`).
     ///
-    /// Returns `(x, residuals, rank, singular_values)` matching NumPy's 4-tuple:
-    /// - `x`: least-squares solution (shape `[n]`)
-    /// - `residuals`: sum of squared residuals (shape `[1]` if `m > n` and full rank, else `[0]`)
-    /// - `rank`: effective rank of A
-    /// - `singular_values`: singular values of A in descending order
+    /// The coefficient matrix has logical shape `[m, n]`; the right-hand side
+    /// has shape `[m]` or `[m, k]`. Real and complex inputs share one SVD across
+    /// all right-hand sides. The default rank cutoff is epsilon * max(m, n).
+    /// Returns `(x, residuals, rank, singular_values)`, with a solution of shape
+    /// `[n]` or `[n, k]`, real residuals, and a descending real spectrum.
     pub fn lstsq(&self, b: &Self) -> Result<(Self, Self, usize, Self), UFuncError> {
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("lstsq: A must be 2-D".into()));
+        self.lstsq_with_rcond(b, None)
+    }
+
+    /// Least squares with an explicit relative singular-value cutoff.
+    ///
+    /// `None` uses NumPy's dimension-scaled default. Explicit cutoffs outside
+    /// `(0, 1)` use the LAPACK machine-precision convention; NaN is rejected.
+    /// Complex storage retains its internal trailing component axis, while
+    /// shape validation and right-hand-side classification use logical axes.
+    /// Float16 and nonnumeric dtypes are unsupported by NumPy's linalg contract.
+    pub fn lstsq_with_rcond(
+        &self,
+        b: &Self,
+        rcond: Option<f64>,
+    ) -> Result<(Self, Self, usize, Self), UFuncError> {
+        let a_shape = self.complex_logical_shape("lstsq")?;
+        let b_shape = b.complex_logical_shape("lstsq")?;
+        let [m, n] = a_shape.as_slice() else {
+            return Err(UFuncError::Msg(
+                "lstsq: A must be a logical 2-D array".into(),
+            ));
+        };
+        let (nrhs, vector_rhs) = match b_shape.as_slice() {
+            [rows] if rows == m => (1, true),
+            [rows, columns] if rows == m => (*columns, false),
+            [_] | [_, _] => {
+                return Err(UFuncError::Msg("lstsq: B rows must match A rows".into()));
+            }
+            _ => {
+                return Err(UFuncError::Msg(
+                    "lstsq: B must be a logical 1-D or 2-D array".into(),
+                ));
+            }
+        };
+        for input in [self, b] {
+            if input.dtype == DType::F16
+                || !(input.dtype.is_numeric() || input.dtype == DType::Bool)
+            {
+                return Err(UFuncError::Msg(format!(
+                    "lstsq: unsupported input dtype {:?}",
+                    input.dtype
+                )));
+            }
         }
-        let m = self.shape[0];
-        let n = self.shape[1];
-        let (x, residuals, rank, s) = fnp_linalg::lstsq_svd(&self.values, &b.values, m, n, -1.0)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
+
+        // Linalg's common type differs from ufunc promotion: any integer or
+        // double-precision operand selects double precision, even when a narrow
+        // integer would otherwise promote with complex64 to complex64.
+        let complex = self.dtype.is_complex() || b.dtype.is_complex();
+        let single = [self.dtype, b.dtype]
+            .iter()
+            .all(|dtype| matches!(dtype, DType::F32 | DType::Complex64));
+        let real_dtype = if single { DType::F32 } else { DType::F64 };
+        let output_dtype = match (complex, single) {
+            (true, true) => DType::Complex64,
+            (true, false) => DType::Complex128,
+            (false, _) => real_dtype,
+        };
+        let working_dtype = if complex {
+            DType::Complex128
+        } else {
+            DType::F64
+        };
+        // Read the original typed storage before widening. This rounds raw
+        // single-precision cells and preserves exact wide-integer sidecars.
+        let a = self.cast_numeric_storage(working_dtype, false)?;
+        let b = b.cast_numeric_storage(working_dtype, false)?;
+        let (x, residuals, rank, spectrum) = if complex {
+            fnp_linalg::complex_lstsq_mxn(&a.values, &b.values, *m, *n, nrhs, rcond)
+        } else {
+            fnp_linalg::lstsq_svd_multi(&a.values, &b.values, *m, *n, nrhs, rcond)
+        }
+        .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+        let x_shape = if vector_rhs { vec![*n] } else { vec![*n, nrhs] };
+        let solution = if complex {
+            let mut physical_shape = x_shape;
+            physical_shape.push(2);
+            let mut solution = Self::new(physical_shape, x, output_dtype)?;
+            solution.round_complex_transform_components();
+            solution
+        } else {
+            Self::from_values_with_dtype(x_shape, x, output_dtype)?
+        };
         Ok((
-            Self {
-                shape: vec![x.len()],
-                values: x,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
-            Self {
-                shape: vec![residuals.len()],
-                values: residuals,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
+            solution,
+            Self::from_values_with_dtype(vec![residuals.len()], residuals, real_dtype)?,
             rank,
-            Self {
-                shape: vec![s.len()],
-                values: s,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
+            Self::from_values_with_dtype(vec![spectrum.len()], spectrum, real_dtype)?,
         ))
     }
 
@@ -21199,50 +21257,117 @@ impl UFuncArray {
         })
     }
 
-    /// Eigenvalue decomposition (np.linalg.eig).
-    /// Returns (eigenvalues, eigenvectors) where eigenvalues is 1-D
-    /// and eigenvectors is n x n (columns are right eigenvectors).
+    /// Eigenvalue decomposition of real square matrices (np.linalg.eig).
+    ///
+    /// Leading dimensions identify independent matrices. Eigenvectors are
+    /// columns in row-major array storage. Real spectra retain a real dtype;
+    /// a nonreal eigenvalue promotes both outputs to the matching complex
+    /// precision, including all matrices in a batch.
     pub fn eig(&self) -> Result<(Self, Self), UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "eig: input must be a square 2-D array".into(),
-            ));
-        }
-        let n = self.shape[0];
-        let (eigenvalues, eigenvectors) = fnp_linalg::eig_nxn_full(&self.values, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok((
-            Self {
-                shape: vec![eigenvalues.len()],
-                values: eigenvalues,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
-            Self {
-                shape: vec![n, n],
-                values: eigenvectors,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
-        ))
+        let (values, vectors) = self.real_eigensystem(true)?;
+        Ok((values, vectors.expect("eigenvectors were requested")))
     }
 
-    /// Eigenvalues only (np.linalg.eigvals).
+    /// Eigenvalues of real square matrices, with the dtype and batch semantics
+    /// of [`Self::eig`] and without computing eigenvectors (np.linalg.eigvals).
     pub fn eigvals(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "eigvals: input must be a square 2-D array".into(),
-            ));
+        Ok(self.real_eigensystem(false)?.0)
+    }
+
+    fn real_eigensystem(&self, with_vectors: bool) -> Result<(Self, Option<Self>), UFuncError> {
+        let operation = if with_vectors { "eig" } else { "eigvals" };
+        let shape = self.complex_logical_shape(operation)?;
+        if shape.len() < 2 || shape[shape.len() - 2] != shape[shape.len() - 1] {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: the final two dimensions must form a square matrix"
+            )));
         }
-        let n = self.shape[0];
-        let vals =
-            fnp_linalg::eig_nxn(&self.values, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![vals.len()],
-            values: vals,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        if !(self.dtype.is_integer() || matches!(self.dtype, DType::Bool | DType::F32 | DType::F64))
+        {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: unsupported input dtype {:?}",
+                self.dtype
+            )));
+        }
+
+        // NumPy's real linalg path computes in double precision, but first
+        // reads each element at its declared source precision. Typed casting
+        // also preserves wide integer sidecars rather than trusting f64 cells.
+        let source = self.cast_numeric_storage(DType::F64, false)?;
+        let n = shape[shape.len() - 1];
+        let value_count = if n == 0 { 0 } else { source.values.len() / n };
+        let mut values = Vec::new();
+        let mut vectors = Vec::new();
+        let value_capacity = value_count
+            .checked_mul(2)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        values
+            .try_reserve_exact(value_capacity)
+            .map_err(|_| UFuncError::Msg(format!("{operation}: unable to allocate eigenvalues")))?;
+        if with_vectors {
+            let vector_capacity = source
+                .values
+                .len()
+                .checked_mul(2)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            vectors.try_reserve_exact(vector_capacity).map_err(|_| {
+                UFuncError::Msg(format!("{operation}: unable to allocate eigenvectors"))
+            })?;
+        }
+        // Empty matrices and empty batches are valid. Avoid multiplying large
+        // unoccupied dimensions or passing n=0 to the scalar kernel.
+        if !source.values.is_empty() {
+            let matrix_len = n
+                .checked_mul(n)
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+            for matrix in source.values.chunks_exact(matrix_len) {
+                if with_vectors {
+                    let (spectrum, column_major) = fnp_linalg::eig_nxn_full(matrix, n)
+                        .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+                    values.extend(spectrum);
+                    for row in 0..n {
+                        for column in 0..n {
+                            let offset = 2 * (column * n + row);
+                            vectors.extend_from_slice(&column_major[offset..offset + 2]);
+                        }
+                    }
+                } else {
+                    values.extend(
+                        fnp_linalg::eig_nxn(matrix, n)
+                            .map_err(|error| UFuncError::Msg(format!("{error}")))?,
+                    );
+                }
+            }
+        }
+
+        let complex = values.chunks_exact(2).any(|value| value[1] != 0.0);
+        let dtype = match (self.dtype == DType::F32, complex) {
+            (true, false) => DType::F32,
+            (true, true) => DType::Complex64,
+            (false, false) => DType::F64,
+            (false, true) => DType::Complex128,
+        };
+        let output = |mut logical_shape: Vec<usize>, interleaved: Vec<f64>| {
+            if complex {
+                logical_shape.push(2);
+                let mut array = Self::new(logical_shape, interleaved, dtype)?;
+                array.round_complex_transform_components();
+                Ok(array)
+            } else {
+                Self::from_values_with_dtype(
+                    logical_shape,
+                    interleaved.into_iter().step_by(2).collect(),
+                    dtype,
+                )
+            }
+        };
+        let values = output(shape[..shape.len() - 1].to_vec(), values)?;
+        let vectors = if with_vectors {
+            Some(output(shape, vectors)?)
+        } else {
+            None
+        };
+        Ok((values, vectors))
     }
 
     /// Eigenvalue decomposition for symmetric/Hermitian matrices (np.linalg.eigh).
@@ -91218,27 +91343,25 @@ print(json.dumps(rows))
     fn eigvals_diagonal() {
         let a = UFuncArray::new(vec![2, 2], vec![3.0, 0.0, 0.0, 5.0], DType::F64).unwrap();
         let vals = a.eigvals().unwrap();
-        // eig_nxn returns interleaved [real, imag, real, imag, ...] for 2 eigenvalues = 4 values
-        let v = vals.values();
-        assert_eq!(v.len(), 4);
-        // Extract real parts (indices 0, 2)
-        let mut reals = [v[0], v[2]];
+        assert_eq!(vals.shape(), &[2]);
+        assert_eq!(vals.dtype(), DType::F64);
+        assert_eq!(vals.values().len(), 2);
+        let mut reals = vals.values().to_vec();
         reals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!((reals[0] - 3.0).abs() < 1e-6);
         assert!((reals[1] - 5.0).abs() < 1e-6);
-        // Imaginary parts should be zero for real eigenvalues
-        assert!(v[1].abs() < 1e-6);
-        assert!(v[3].abs() < 1e-6);
     }
 
     #[test]
     fn eig_diagonal() {
         let a = UFuncArray::new(vec![2, 2], vec![3.0, 0.0, 0.0, 5.0], DType::F64).unwrap();
         let (vals, vecs) = a.eig().unwrap();
+        assert_eq!(vals.shape(), &[2]);
         assert_eq!(vecs.shape(), &[2, 2]);
-        // Eigenvalues in interleaved real/imag format
-        let v = vals.values();
-        let mut reals = [v[0], v[2]];
+        assert_eq!(vals.dtype(), DType::F64);
+        assert_eq!(vecs.dtype(), DType::F64);
+        assert_eq!(vecs.values().len(), 4);
+        let mut reals = vals.values().to_vec();
         reals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!((reals[0] - 3.0).abs() < 1e-6);
         assert!((reals[1] - 5.0).abs() < 1e-6);
@@ -95899,9 +96022,9 @@ print(json.dumps(rows))
         // Eigenvalues of a diagonal matrix are the diagonal entries.
         let a = UFuncArray::new(vec![2, 2], vec![3.0, 0.0, 0.0, 5.0], DType::F64).unwrap();
         let (vals, _vecs) = a.eig().unwrap();
-        // eig returns interleaved (real, imag) pairs
-        let real_vals: Vec<f64> = vals.values().iter().step_by(2).copied().collect();
-        let mut sorted = real_vals.clone();
+        assert_eq!(vals.shape(), &[2]);
+        assert_eq!(vals.dtype(), DType::F64);
+        let mut sorted = vals.values().to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!((sorted[0] - 3.0).abs() < 1e-10, "eigenvalue should be 3");
         assert!((sorted[1] - 5.0).abs() < 1e-10, "eigenvalue should be 5");

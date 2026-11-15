@@ -5,6 +5,9 @@
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::UFuncArray;
+use serde_json::json;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 type Complex = (f64, f64);
 
@@ -217,7 +220,11 @@ fn hermitian_repeated_eigenvalues_return_an_orthonormal_basis() {
         (1.0, 0.0),
     ];
     for dtype in [DType::Complex64, DType::Complex128] {
-        assert_eigenpairs(&matrix(3, 3, &hermitian, dtype), &hermitian, &[1.0, 1.0, 4.0]);
+        assert_eigenpairs(
+            &matrix(3, 3, &hermitian, dtype),
+            &hermitian,
+            &[1.0, 1.0, 4.0],
+        );
     }
 }
 
@@ -346,5 +353,178 @@ fn complex_spectral_bridges_handle_empty_shapes_and_reject_invalid_layouts() {
             assert!(invalid.svd_full(true).is_err());
             assert!(invalid.svdvals().is_err());
         }
+    }
+}
+
+#[test]
+fn general_real_eigen_bridges_match_numpy_shapes_dtypes_and_eigenpairs() {
+    let fixtures = [
+        (vec![2, 2], vec![3.0, 0.0, 0.0, 5.0]),
+        (vec![2, 2], vec![2.0, 7.0, 0.0, 5.0]),
+        (vec![2, 2], vec![0.0, -1.0, 1.0, 0.0]),
+        // Nontrivial eigenvectors for a coupled real Schur block. The core
+        // returns columns contiguously; the array bridge must transpose that
+        // storage while preserving the real/imaginary pair in each element.
+        (
+            vec![3, 3],
+            vec![0.0, -1.0, 2.0, 1.0, 0.0, 3.0, 0.0, 0.0, 4.0],
+        ),
+        (vec![2, 2, 2], vec![2.0, 7.0, 0.0, 5.0, 0.0, -1.0, 1.0, 0.0]),
+        (
+            vec![1, 2, 2, 2],
+            vec![2.0, 7.0, 0.0, 5.0, 3.0, 0.0, 0.0, 8.0],
+        ),
+    ];
+    let mut cases = Vec::new();
+    for (dtype, name) in [
+        (DType::F32, "float32"),
+        (DType::F64, "float64"),
+        (DType::I32, "int32"),
+    ] {
+        for (shape, entries) in &fixtures {
+            let input = UFuncArray::new(shape.clone(), entries.clone(), dtype).unwrap();
+            let (values, vectors) = input.eig().unwrap();
+            let values_only = input.eigvals().unwrap();
+            let serialize = |output: &UFuncArray| {
+                let mut shape = output.shape().to_vec();
+                assert_eq!(shape.iter().product::<usize>(), output.values().len());
+                if output.dtype().is_complex() {
+                    assert_eq!(shape.pop(), Some(2));
+                }
+                assert_eq!(
+                    output.to_storage().unwrap().len(),
+                    shape.iter().product::<usize>()
+                );
+                assert_declared_precision(output);
+                let dtype = match output.dtype() {
+                    DType::F32 => "float32",
+                    DType::F64 => "float64",
+                    DType::Complex64 => "complex64",
+                    DType::Complex128 => "complex128",
+                    other => panic!("unexpected spectral output dtype {other:?}"),
+                };
+                json!({"shape": shape, "dtype": dtype, "values": output.values()})
+            };
+            cases.push(json!({
+                "shape": shape, "input": entries, "dtype": name,
+                "eigenvalues": serialize(&values),
+                "eigenvectors": serialize(&vectors),
+                "values_only": serialize(&values_only),
+            }));
+        }
+    }
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = r#"
+import json, sys
+import numpy as np
+
+def array(record):
+    values = np.array(record['values'], dtype=np.float64)
+    if record['dtype'].startswith('complex'):
+        values = values[::2] + 1j * values[1::2]
+    return values.astype(record['dtype']).reshape(record['shape'])
+
+def spectra_close(actual, expected, tolerance):
+    for left, right in zip(actual.reshape(-1, actual.shape[-1]),
+                           expected.reshape(-1, expected.shape[-1])):
+        remaining = list(right)
+        for value in left:
+            nearest = min(range(len(remaining)), key=lambda i: abs(value - remaining[i]))
+            np.testing.assert_allclose(value, remaining.pop(nearest), rtol=tolerance, atol=tolerance)
+
+cases = json.load(sys.stdin)
+for case in cases:
+    source = np.array(case['input'], dtype=case['dtype']).reshape(case['shape'])
+    expected_values, expected_vectors = np.linalg.eig(source)
+    expected_only = np.linalg.eigvals(source)
+    values, vectors, only = [array(case[key]) for key in
+                            ('eigenvalues', 'eigenvectors', 'values_only')]
+    for actual, expected in ((values, expected_values), (vectors, expected_vectors),
+                             (only, expected_only)):
+        assert actual.shape == expected.shape, (actual.shape, expected.shape)
+        assert actual.dtype == expected.dtype, (actual.dtype, expected.dtype)
+    tolerance = 2e-5 if case['dtype'] == 'float32' else 2e-10
+    spectra_close(values, expected_values, tolerance)
+    spectra_close(only, expected_only, tolerance)
+    np.testing.assert_allclose(source @ vectors, vectors * values[..., None, :],
+                               rtol=tolerance, atol=tolerance)
+    np.testing.assert_allclose(np.linalg.vector_norm(vectors, axis=-2), 1,
+                               rtol=tolerance, atol=tolerance)
+print(f"NumPy {np.__version__}: {len(cases)} eigen bridge cases passed")
+"#;
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("NumPy oracle interpreter must be available");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&cases).unwrap().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "NumPy oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn general_eigen_bridges_materialize_source_precision_and_support_empty_batches() {
+    let input = UFuncArray::new(
+        vec![2, 2],
+        vec![16_777_217.0, 16_777_216.0, 16_777_216.0, 16_777_217.0],
+        DType::F32,
+    )
+    .unwrap();
+    for values in [input.eig().unwrap().0, input.eigvals().unwrap()] {
+        assert_eq!(values.dtype(), DType::F32);
+        assert_eq!(values.shape(), &[2]);
+        let mut sorted = values.values().to_vec();
+        sorted.sort_by(f64::total_cmp);
+        close(sorted[0], 0.0, 1e-7);
+        assert_eq!(sorted[1], 33_554_432.0);
+    }
+    for dtype in [DType::F32, DType::F64, DType::I64, DType::Bool] {
+        for shape in [vec![0, 0], vec![2, 0, 0], vec![0, 2, 2], vec![2, 0, 3, 3]] {
+            let input = UFuncArray::new(shape.clone(), vec![], dtype).unwrap();
+            let (values, vectors) = input.eig().unwrap();
+            let only = input.eigvals().unwrap();
+            let expected_dtype = if dtype == DType::F32 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            for output in [&values, &vectors, &only] {
+                assert_eq!(output.dtype(), expected_dtype);
+                assert!(output.values().is_empty());
+                assert!(output.to_storage().unwrap().is_empty());
+            }
+            assert_eq!(values.shape(), &shape[..shape.len() - 1]);
+            assert_eq!(only.shape(), values.shape());
+            assert_eq!(vectors.shape(), shape);
+        }
+    }
+}
+
+#[test]
+fn general_eigen_bridges_reject_invalid_shapes_nonfinite_values_and_unsupported_types() {
+    for input in [
+        UFuncArray::new(vec![], vec![1.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap(),
+        UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F16).unwrap(),
+        UFuncArray::new(vec![2, 2], vec![f64::NAN, 0.0, 0.0, 1.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![2, 2], vec![1.0, f64::INFINITY, 0.0, 1.0], DType::F64).unwrap(),
+        matrix(2, 2, &[(1.0, 0.0); 4], DType::Complex128),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::Complex128).unwrap(),
+    ] {
+        assert!(input.eig().is_err());
+        assert!(input.eigvals().is_err());
     }
 }
