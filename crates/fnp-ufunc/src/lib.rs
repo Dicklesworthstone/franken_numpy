@@ -18729,63 +18729,64 @@ impl UFuncArray {
         Ok((Self::interleave_real_values(&self.values), rows, cols))
     }
 
-    fn as_complex_vector_input(
-        &self,
-        op: &str,
-        expected_len: usize,
-    ) -> Result<Vec<f64>, UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            if self.shape.len() != 2 || self.shape[1] != 2 {
+    /// NumPy linalg widens every operand to double precision internally, then
+    /// returns single precision only when every source is float32/complex64.
+    /// Integer and Boolean operands therefore force a double-precision result.
+    fn linalg_output_dtype(inputs: &[&Self], operation: &str) -> Result<DType, UFuncError> {
+        for input in inputs {
+            if input.dtype == DType::F16
+                || !(input.dtype.is_numeric() || input.dtype == DType::Bool)
+            {
                 return Err(UFuncError::Msg(format!(
-                    "{op}: complex rhs must have shape [n, 2]"
+                    "{operation}: unsupported input dtype {:?}",
+                    input.dtype
                 )));
             }
-            if self.shape[0] != expected_len {
-                return Err(UFuncError::Msg(format!(
-                    "{op}: rhs length must match A dimension"
-                )));
-            }
-            return Ok(self.values.clone());
         }
-
-        if self.shape.len() != 1 || self.values.len() != expected_len {
-            return Err(UFuncError::Msg(format!(
-                "{op}: rhs must be 1-D with length matching A dimension"
-            )));
-        }
-
-        Ok(Self::interleave_real_values(&self.values))
+        let complex = inputs.iter().any(|input| input.dtype.is_complex());
+        let single = inputs
+            .iter()
+            .all(|input| matches!(input.dtype, DType::F32 | DType::Complex64));
+        Ok(match (complex, single) {
+            (false, false) => DType::F64,
+            (false, true) => DType::F32,
+            (true, false) => DType::Complex128,
+            (true, true) => DType::Complex64,
+        })
     }
 
-    fn as_complex_matrix_rhs_input(
-        &self,
-        op: &str,
-        expected_rows: usize,
-    ) -> Result<(Vec<f64>, usize), UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            if self.shape.len() != 3 || self.shape[2] != 2 {
-                return Err(UFuncError::Msg(format!(
-                    "{op}: complex B must have shape [n, m, 2]"
-                )));
+    /// Materialize native linalg output using logical shapes and source precision.
+    fn from_linalg_values(
+        mut shape: Vec<usize>,
+        mut values: Vec<f64>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if dtype.is_complex() {
+            shape.push(2);
+        }
+        // An unoccupied batch/core never needs the product of its other axes.
+        let expected = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        if values.len() != expected {
+            return Err(UFuncError::InvalidInputLength {
+                expected,
+                actual: values.len(),
+            });
+        }
+        if matches!(dtype, DType::F32 | DType::Complex64) {
+            for value in &mut values {
+                *value = f64::from(*value as f32);
             }
-            if self.shape[0] != expected_rows {
-                return Err(UFuncError::Msg(format!(
-                    "{op}: B rows must match A dimension"
-                )));
-            }
-            return Ok((self.values.clone(), self.shape[1]));
         }
-
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg(format!("{op}: B must be 2-D")));
-        }
-        if self.shape[0] != expected_rows {
-            return Err(UFuncError::Msg(format!(
-                "{op}: B rows must match A dimension"
-            )));
-        }
-
-        Ok((Self::interleave_real_values(&self.values), self.shape[1]))
+        Ok(Self {
+            shape,
+            values,
+            dtype,
+            integer_sidecar: None,
+        })
     }
 
     fn complex_output_dtype(&self, rhs: Option<&Self>) -> DType {
@@ -21168,93 +21169,143 @@ impl UFuncArray {
         })
     }
 
-    /// Solve linear system Ax = b (np.linalg.solve).
-    /// A must be square 2-D; b must be 1-D with matching length.
+    /// Solve linear systems with NumPy 2.x logical shape and dtype semantics.
+    ///
+    /// The final two axes of A must be square. A strictly one-dimensional b is
+    /// a vector; every other b has matrix core shape [n, nrhs]. Leading matrix
+    /// dimensions broadcast, and all RHS columns share one LU factorization
+    /// per system. Complex arrays retain their trailing physical component axis.
     pub fn solve(&self, b: &Self) -> Result<Self, UFuncError> {
-        if self.uses_complex_interleaved_storage() || b.uses_complex_interleaved_storage() {
-            let (a_values, n, _) = self.as_complex_matrix_input("solve", true)?;
-            let rhs = b.as_complex_vector_input("solve", n)?;
-            let x = fnp_linalg::complex_solve_nxn(&a_values, &rhs, n)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-            return Self::complex_vector_from_interleaved(n, x, self.complex_output_dtype(Some(b)));
-        }
-
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "solve: A must be a square 2-D array".into(),
-            ));
-        }
-        let n = self.shape[0];
-        if b.values.len() != n {
-            return Err(UFuncError::Msg(
-                "solve: b length must match A dimension".into(),
-            ));
-        }
-        let x = fnp_linalg::solve_nxn(&self.values, &b.values, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n],
-            values: x,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        self.solve_impl(b, false)
     }
 
-    /// Solve linear system AX = B for multiple RHS columns (np.linalg.solve).
-    /// A is n x n, B is n x m. Returns X with shape [n, m].
+    /// Solve AX = B with a matrix RHS, including broadcasted matrix stacks.
+    /// Unlike [`Self::solve`], this entry point requires at least two logical
+    /// RHS dimensions, even when there is only one RHS column.
     pub fn solve_multi(&self, b: &Self) -> Result<Self, UFuncError> {
-        if self.uses_complex_interleaved_storage() || b.uses_complex_interleaved_storage() {
-            let (a_values, n, _) = self.as_complex_matrix_input("solve_multi", true)?;
-            let (rhs_values, m) = b.as_complex_matrix_rhs_input("solve_multi", n)?;
-            let mut x = vec![0.0; 2 * n * m];
+        self.solve_impl(b, true)
+    }
 
-            for col in 0..m {
-                let mut rhs = vec![0.0; 2 * n];
-                for row in 0..n {
-                    let src = 2 * (row * m + col);
-                    rhs[2 * row] = rhs_values[src];
-                    rhs[2 * row + 1] = rhs_values[src + 1];
-                }
-                let solution = fnp_linalg::complex_solve_nxn(&a_values, &rhs, n)
-                    .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-                for row in 0..n {
-                    let dst = 2 * (row * m + col);
-                    x[dst] = solution[2 * row];
-                    x[dst + 1] = solution[2 * row + 1];
+    fn solve_impl(&self, b: &Self, require_matrix_rhs: bool) -> Result<Self, UFuncError> {
+        let operation = if require_matrix_rhs {
+            "solve_multi"
+        } else {
+            "solve"
+        };
+        let a_shape = self.complex_logical_shape(operation)?;
+        let a_ndim = a_shape.len();
+        if a_ndim < 2 || a_shape[a_ndim - 2] != a_shape[a_ndim - 1] {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: the final two dimensions of A must form a square matrix"
+            )));
+        }
+        let dtype = Self::linalg_output_dtype(&[self, b], operation)?;
+        let b_shape = b.complex_logical_shape(operation)?;
+        let n = a_shape[a_ndim - 1];
+        let vector_rhs = b_shape.len() == 1 && !require_matrix_rhs;
+        let (b_batch, nrhs) = if vector_rhs {
+            if b_shape[0] != n {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: RHS length must match A dimension"
+                )));
+            }
+            (&b_shape[..0], 1)
+        } else {
+            if b_shape.len() < 2 {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: RHS has too few logical dimensions"
+                )));
+            }
+            let b_ndim = b_shape.len();
+            if b_shape[b_ndim - 2] != n {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: RHS rows must match A dimension"
+                )));
+            }
+            (&b_shape[..b_ndim - 2], b_shape[b_ndim - 1])
+        };
+        let a_batch = &a_shape[..a_ndim - 2];
+        let out_batch = broadcast_shape(a_batch, b_batch).map_err(UFuncError::Shape)?;
+        let mut out_shape = out_batch.clone();
+        out_shape.push(n);
+        if !vector_rhs {
+            out_shape.push(nrhs);
+        }
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let count = if out_shape.contains(&0) {
+            0
+        } else {
+            element_count(&out_shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        // NumPy does not factor a singular/nonfinite matrix when there are no
+        // result elements. Validate shapes and dtypes first, then avoid unused
+        // core products, source casts and numerical kernels altogether.
+        if physical_count == 0 {
+            return Self::from_linalg_values(out_shape, Vec::new(), dtype);
+        }
+        let matrix_size = n
+            .checked_mul(n)
+            .and_then(|count| count.checked_mul(components))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let rhs_size = n
+            .checked_mul(nrhs)
+            .and_then(|count| count.checked_mul(components))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let working_dtype = if dtype.is_complex() {
+            DType::Complex128
+        } else {
+            DType::F64
+        };
+        // Read typed source storage before widening: this preserves exact
+        // integer sidecars and rounds raw single-precision working cells.
+        let a = self.cast_numeric_storage(working_dtype, false)?;
+        let b = b.cast_numeric_storage(working_dtype, false)?;
+        let mut values = try_zeroed_f64(physical_count, operation)?;
+        let a_steps = aligned_broadcast_axis_steps(
+            out_batch.len(),
+            a_batch,
+            &contiguous_strides_elems(a_batch),
+        );
+        let b_steps = aligned_broadcast_axis_steps(
+            out_batch.len(),
+            b_batch,
+            &contiguous_strides_elems(b_batch),
+        );
+        let mut coordinates = vec![0usize; out_batch.len()];
+        let (mut a_flat, mut b_flat) = (0usize, 0usize);
+        let batches = physical_count / rhs_size;
+        for batch in 0..batches {
+            let a_start = a_flat * matrix_size;
+            let b_start = b_flat * rhs_size;
+            let a_matrix = &a.values[a_start..a_start + matrix_size];
+            let b_matrix = &b.values[b_start..b_start + rhs_size];
+            let solution = if dtype.is_complex() {
+                fnp_linalg::complex_solve_nxn_multi(a_matrix, b_matrix, n, nrhs)
+            } else {
+                fnp_linalg::solve_nxn_multi(a_matrix, b_matrix, n, nrhs)
+            }
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            let start = batch * rhs_size;
+            values[start..start + rhs_size].copy_from_slice(&solution);
+            if batch + 1 < batches {
+                for axis in (0..out_batch.len()).rev() {
+                    coordinates[axis] += 1;
+                    a_flat += a_steps[axis];
+                    b_flat += b_steps[axis];
+                    if coordinates[axis] < out_batch[axis] {
+                        break;
+                    }
+                    coordinates[axis] = 0;
+                    a_flat -= a_steps[axis] * out_batch[axis];
+                    b_flat -= b_steps[axis] * out_batch[axis];
                 }
             }
-
-            return Self::complex_matrix_from_interleaved(
-                n,
-                m,
-                x,
-                self.complex_output_dtype(Some(b)),
-            );
         }
-
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "solve_multi: A must be a square 2-D array".into(),
-            ));
-        }
-        if b.shape.len() != 2 {
-            return Err(UFuncError::Msg("solve_multi: B must be 2-D".into()));
-        }
-        let n = self.shape[0];
-        let m = b.shape[1];
-        if b.shape[0] != n {
-            return Err(UFuncError::Msg(
-                "solve_multi: B rows must match A dimension".into(),
-            ));
-        }
-        let x = fnp_linalg::solve_nxn_multi(&self.values, &b.values, n, m)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n, m],
-            values: x,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        Self::from_linalg_values(out_shape, values, dtype)
     }
 
     /// Eigenvalue decomposition of real square matrices (np.linalg.eig).

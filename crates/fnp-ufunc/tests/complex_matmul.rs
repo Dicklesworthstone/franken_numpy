@@ -133,6 +133,18 @@ impl OracleBatch {
         self.actual.push(UFuncArray::multi_dot(arrays));
     }
 
+    fn solve_case(&mut self, lhs: &UFuncArray, rhs: &UFuncArray, matrix_rhs: bool) {
+        self.cases.push(json!({
+            "op": if matrix_rhs { "solve_multi" } else { "solve" },
+            "lhs": oracle_input(lhs), "rhs": oracle_input(rhs)
+        }));
+        self.actual.push(if matrix_rhs {
+            lhs.solve_multi(rhs)
+        } else {
+            lhs.solve(rhs)
+        });
+    }
+
     fn power_case(&mut self, array: &UFuncArray, power: i64) {
         self.cases.push(json!({
             "op": "matrix_power", "lhs": oracle_input(array), "power": power
@@ -202,6 +214,34 @@ def chain_bounds(arrays):
 rows = []
 for case in json.load(sys.stdin):
     try:
+        if case['op'] in ('solve', 'solve_multi'):
+            left, right = load(case['lhs']), load(case['rhs'])
+            if case['op'] == 'solve_multi' and right.ndim < 2:
+                raise ValueError("solve_multi requires a matrix RHS")
+            result = np.asarray(np.linalg.solve(left, right))
+            bounds = np.zeros(result.shape, dtype=np.float64)
+            if result.size:
+                # These finite systems are diagonally dominant. Account for
+                # factorization conditioning and source-precision rounding,
+                # without expecting vendor LAPACK's exact operation order.
+                work = left.astype(np.complex128 if left.dtype.kind == 'c' else np.float64)
+                inverse = np.linalg.inv(work)
+                condition = (np.linalg.norm(work, ord=np.inf, axis=(-2, -1))
+                             * np.linalg.norm(inverse, ord=np.inf, axis=(-2, -1)))
+                condition = np.maximum(1.0, condition)
+                if right.ndim == 1:
+                    condition = condition[..., None]
+                else:
+                    condition = condition[..., None, None]
+                bounds = np.maximum(1.0, np.abs(result)) * condition
+            parts = np.empty(result.size * 2, dtype=np.float64)
+            parts[0::2] = result.real.ravel()
+            parts[1::2] = result.imag.ravel()
+            rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
+                             bits=parts.view(np.uint64).tolist(),
+                             bounds=np.repeat(bounds.ravel(), 2).tolist(),
+                             contracted=2*max(1, left.shape[-1]), integers=None))
+            continue
         if case['op'] == 'matrix_power':
             source = load(case['lhs'])
             power = case['power']
@@ -2250,4 +2290,261 @@ fn matrix_power_rejects_singular_lanes_and_invalid_logical_shapes() {
             assert!(malformed.matrix_power(power).is_err());
         }
     }
+}
+
+#[test]
+fn solve_numeric_types_and_broadcasted_rhs_match_numpy() {
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let mut pairs = dtypes.iter().map(|&dtype| (dtype, dtype)).collect::<Vec<_>>();
+    pairs.extend([
+        (DType::F32, DType::Complex64),
+        (DType::Complex64, DType::F32),
+        (DType::Complex64, DType::I8),
+        (DType::I8, DType::Complex64),
+        (DType::F32, DType::F64),
+        (DType::Complex128, DType::F32),
+        (DType::U64, DType::F32),
+    ]);
+    let shapes: &[(&[usize], &[usize])] = &[
+        (&[3, 3], &[3]),
+        (&[3, 3], &[3, 2]),
+        (&[2, 3, 3], &[3]),
+        (&[2, 3, 3], &[3, 2]),
+        (&[2, 1, 3, 3], &[1, 4, 3, 2]),
+        (&[3, 3], &[2, 4, 3, 2]),
+        (&[2, 1, 1, 3, 3], &[4, 1, 3, 1]),
+    ];
+    let mut batch = OracleBatch::default();
+    for (a_dtype, b_dtype) in pairs {
+        for &(a_shape, b_shape) in shapes {
+            let a = matrix_power_source(a_shape, a_dtype);
+            let b = source(b_shape, b_dtype, 3);
+            batch.solve_case(&a, &b, false);
+            if b_shape.len() >= 2 {
+                batch.solve_case(&a, &b, true);
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
+fn solve_distinguishes_one_dimensional_vectors_from_matrix_rhs() {
+    let a = UFuncArray::new(
+        vec![2, 2, 2],
+        vec![2.0, 0.0, 0.0, 4.0, 4.0, 0.0, 0.0, 8.0],
+        DType::F64,
+    )
+    .unwrap();
+    let vector = UFuncArray::new(vec![2], vec![8.0, 16.0], DType::F64).unwrap();
+    let solved = a.solve(&vector).unwrap();
+    assert_eq!(solved.shape(), &[2, 2]);
+    assert_eq!(solved.values(), &[4.0, 4.0, 2.0, 2.0]);
+    assert!(a.solve_multi(&vector).is_err());
+
+    let matrix = UFuncArray::new(
+        vec![2, 2],
+        vec![8.0, 16.0, 24.0, 32.0],
+        DType::F64,
+    )
+    .unwrap();
+    for solved in [a.solve(&matrix).unwrap(), a.solve_multi(&matrix).unwrap()] {
+        assert_eq!(solved.shape(), &[2, 2, 2]);
+        assert_eq!(solved.values(), &[4.0, 8.0, 6.0, 8.0, 2.0, 4.0, 3.0, 4.0]);
+    }
+
+    // Equal flattened lengths cannot disguise an incompatible matrix core.
+    let wrong_rows = UFuncArray::new(vec![1, 2], vec![8.0, 16.0], DType::F64).unwrap();
+    assert!(a.solve(&wrong_rows).is_err());
+    assert!(a.solve_multi(&wrong_rows).is_err());
+}
+
+#[test]
+fn solve_normalizes_source_storage_and_returns_declared_precision() {
+    let rounded_singular = UFuncArray::new(
+        vec![2, 2],
+        vec![16_777_217.0, 16_777_216.0, 16_777_216.0, 16_777_217.0],
+        DType::F32,
+    )
+    .unwrap();
+    let b = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+    assert!(rounded_singular.solve(&b).is_err());
+
+    let a = UFuncArray::new(vec![1, 1], vec![16_777_217.0], DType::F32).unwrap();
+    let b = UFuncArray::new(vec![1, 2], vec![1.0, 0.0], DType::Complex128).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+    assert_eq!(result.values(), &[2.0_f64.powi(-24), 0.0]);
+
+    let a = UFuncArray::new(vec![1, 1], vec![3.0], DType::F32).unwrap();
+    let b = UFuncArray::new(vec![1], vec![1.0], DType::F32).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::F32);
+    assert_eq!(result.values(), &[f64::from(1.0_f32 / 3.0)]);
+    let b = UFuncArray::new(vec![1, 2], vec![1.0, 1.0], DType::Complex64).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+    assert_eq!(result.values(), &[f64::from(1.0_f32 / 3.0); 2]);
+
+    let a = UFuncArray::new(vec![1, 1], vec![257.0], DType::I8).unwrap();
+    let b = UFuncArray::new(vec![1], vec![259.0], DType::I8).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+    assert_eq!(result.values(), &[3.0]);
+    let b = UFuncArray::new(vec![1, 2], vec![3.0, 2.0], DType::Complex64).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+    assert_eq!(result.values(), &[3.0, 2.0]);
+
+    let a = UFuncArray::new(
+        vec![2, 2],
+        vec![2.0, 0.0, 0.0, -3.0],
+        DType::Bool,
+    )
+    .unwrap();
+    let b = UFuncArray::new(vec![2], vec![4.0, -5.0], DType::Bool).unwrap();
+    assert_eq!(a.solve(&b).unwrap().values(), &[1.0, 1.0]);
+
+    let exact = 9_007_199_254_740_995u64;
+    let a = UFuncArray::from_storage(vec![1, 1], ArrayStorage::U64(vec![exact])).unwrap();
+    let b = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::Complex64).unwrap();
+    let result = a.solve(&b).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+    for (&actual, expected) in result
+        .values()
+        .iter()
+        .zip([1.0 / exact as f64, 2.0 / exact as f64])
+    {
+        assert!((actual - expected).abs() <= 4.0 * f64::EPSILON * expected.abs());
+    }
+}
+
+#[test]
+fn solve_empty_systems_preserve_shapes_and_skip_unvisited_factorizations() {
+    let shapes: &[(&[usize], &[usize])] = &[
+        (&[0, 0], &[0]),
+        (&[0, 0], &[0, 3]),
+        (&[2, 0, 0], &[0]),
+        (&[0, 3, 3], &[3]),
+        (&[0, 3, 3], &[1, 3, 2]),
+        (&[2, 0, 3, 3], &[2, 1, 3, 2]),
+        (&[0, 3, 3], &[3, 3, 2]),
+        (&[0, 3, 3], &[2, 0]),
+        (&[3, 3], &[3, 0]),
+    ];
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for &(a_shape, b_shape) in shapes {
+            let a = matrix_power_source(a_shape, dtype);
+            let b = source(b_shape, dtype, 1);
+            batch.solve_case(&a, &b, false);
+            if b_shape.len() >= 2 {
+                batch.solve_case(&a, &b, true);
+            }
+        }
+    }
+    for dtype in [DType::F64, DType::Complex64, DType::Complex128] {
+        for values in [
+            vec![1.0, 2.0, 2.0, 4.0],
+            vec![f64::NAN; 4],
+            vec![f64::INFINITY; 4],
+        ] {
+            let a = UFuncArray::from_storage_with_dtype(
+                vec![2, 2],
+                ArrayStorage::F64(values),
+                dtype,
+            )
+            .unwrap();
+            let b = source(&[2, 0], dtype, 1);
+            batch.solve_case(&a, &b, false);
+            batch.solve_case(&a, &b, true);
+        }
+    }
+    batch.finish();
+
+    for dtype in [DType::F64, DType::Complex128] {
+        let mut a_shape = vec![0, usize::MAX, usize::MAX];
+        let mut b_shape = vec![0, usize::MAX, 0];
+        if dtype.is_complex() {
+            a_shape.push(2);
+            b_shape.push(2);
+        }
+        let a = UFuncArray::new(a_shape, vec![], dtype).unwrap();
+        let b = UFuncArray::new(b_shape.clone(), vec![], dtype).unwrap();
+        for result in [a.solve(&b).unwrap(), a.solve_multi(&b).unwrap()] {
+            assert_eq!(result.shape(), b_shape);
+            assert_eq!(result.dtype(), dtype);
+            assert!(result.values().is_empty());
+        }
+    }
+}
+
+#[test]
+fn solve_rejects_singular_batches_and_invalid_core_shapes() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        let singular = UFuncArray::from_storage_with_dtype(
+            vec![2, 2, 2],
+            ArrayStorage::F64(vec![1.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0]),
+            dtype,
+        )
+        .unwrap();
+        for b_shape in [&[2][..], &[2, 3]] {
+            let b = source(b_shape, dtype, 3);
+            batch.solve_case(&singular, &b, false);
+        }
+        for &(a_shape, b_shape) in [
+            (&[][..], &[1][..]),
+            (&[2][..], &[2][..]),
+            (&[2, 3][..], &[2][..]),
+            (&[2, 2][..], &[][..]),
+            (&[2, 2][..], &[1, 2][..]),
+            (&[2, 2][..], &[3][..]),
+            (&[2, 2, 2][..], &[3, 2, 1][..]),
+        ]
+        .iter()
+        {
+            let a = source(a_shape, dtype, 1);
+            let b = source(b_shape, dtype, 2);
+            batch.solve_case(&a, &b, false);
+            batch.solve_case(&a, &b, true);
+        }
+    }
+    batch.finish();
+
+    let good = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
+    let rhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+    for malformed in [
+        UFuncArray::new(vec![], vec![1.0], DType::Complex128).unwrap(),
+        UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::Complex64).unwrap(),
+        UFuncArray::new(vec![0, 1], vec![], DType::Complex128).unwrap(),
+    ] {
+        assert!(malformed.solve(&rhs).is_err());
+        assert!(good.solve(&malformed).is_err());
+        assert!(good.solve_multi(&malformed).is_err());
+    }
+    let opaque = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::Str).unwrap();
+    assert!(opaque.solve(&rhs).is_err());
 }
