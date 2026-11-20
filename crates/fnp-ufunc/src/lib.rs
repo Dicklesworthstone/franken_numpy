@@ -21152,21 +21152,117 @@ impl UFuncArray {
         })
     }
 
-    /// Moore-Penrose pseudo-inverse (np.linalg.pinv).
+    /// Moore-Penrose pseudoinverse of a matrix or stack of matrices.
+    ///
+    /// The final two logical axes are transposed in the result. Numeric inputs
+    /// follow NumPy's linalg promotion rules, including complex factors and
+    /// single-precision results. The default relative cutoff is `1e-15`.
     pub fn pinv(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("pinv: input must be a 2-D array".into()));
+        self.pinv_with_options(1.0e-15, false)
+    }
+
+    /// Pseudoinverse with a scalar relative cutoff and a Hermitian fast path.
+    ///
+    /// Singular values at or below `rcond * largest_singular_value` are
+    /// discarded independently in each matrix. `hermitian` uses the lower
+    /// triangle and ignores imaginary diagonal components. Unlike the native
+    /// low-level kernels' negative-cutoff sentinel, an explicit negative
+    /// cutoff is used literally; retaining a zero singular value can therefore
+    /// produce nonfinite results. NaN cutoffs discard every singular value.
+    /// This API accepts one scalar cutoff; array-valued cutoffs and the `rtol`
+    /// alias remain separate interfaces.
+    pub fn pinv_with_options(&self, rcond: f64, hermitian: bool) -> Result<Self, UFuncError> {
+        let mut shape = self.complex_logical_shape("pinv")?;
+        let ndim = shape.len();
+        if ndim < 2 {
+            return Err(UFuncError::Msg(
+                "pinv: input must have at least two logical dimensions".into(),
+            ));
         }
-        let m = self.shape[0];
-        let n = self.shape[1];
-        let result = fnp_linalg::pinv_nxn(&self.values, m, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n, m],
-            values: result,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        let (m, n) = (shape[ndim - 2], shape[ndim - 1]);
+        shape.swap(ndim - 2, ndim - 1);
+
+        // NumPy returns a transposed empty core before dtype promotion and the
+        // Hermitian square check. An empty batch of nonempty matrix cores must
+        // still pass those checks. No product of unoccupied axes is needed.
+        if m == 0 || n == 0 {
+            return Ok(self.copy_with_logical_shape(shape));
+        }
+        if hermitian && m != n {
+            return Err(UFuncError::Msg(
+                "pinv: Hermitian matrix cores must be square".into(),
+            ));
+        }
+        let dtype = Self::linalg_output_dtype(&[self], "pinv")?;
+        if self.values.is_empty() {
+            return Self::from_linalg_values(shape, Vec::new(), dtype);
+        }
+
+        // Use the same typed, batched decompositions as the public spectral
+        // APIs. Their factors already have the source's declared precision.
+        // Keeping cutoff selection here avoids reinterpreting a negative
+        // NumPy cutoff as the low-level kernels' automatic-default sentinel.
+        let source = self.cast_numeric_storage(dtype, false)?;
+        let (mut left, mut right, spectrum) = if hermitian {
+            let (values, vectors) = source.eigh()?;
+            let right = vectors.matrix_transpose()?;
+            (vectors, right, values)
+        } else {
+            let (u, values, vh) = source.svd_full(false)?;
+            (vh.matrix_transpose()?, u.matrix_transpose()?, values)
+        };
+        let complex = dtype.is_complex();
+        let components = if complex { 2 } else { 1 };
+        if complex {
+            for pair in right.values.chunks_exact_mut(2) {
+                pair[1] = -pair[1];
+            }
+            if !hermitian {
+                for pair in left.values.chunks_exact_mut(2) {
+                    pair[1] = -pair[1];
+                }
+            }
+        }
+        let k = m.min(n);
+        let single = matches!(dtype, DType::F32 | DType::Complex64);
+        for (batch, values) in spectrum.values.chunks_exact(k).enumerate() {
+            let largest = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+            let cutoff = rcond * largest;
+            for (index, &value) in values.iter().enumerate() {
+                let magnitude = value.abs();
+                let reciprocal = if magnitude > cutoff {
+                    if single {
+                        f64::from(1.0_f32 / magnitude as f32)
+                    } else {
+                        1.0 / magnitude
+                    }
+                } else {
+                    0.0
+                };
+                if hermitian {
+                    // Move the eigenvalue's sign into the left factor, as in
+                    // a Hermitian SVD. In particular sign(0) is zero: combining
+                    // it with an explicitly retained 1/0 keeps IEEE behavior.
+                    let sign = if value == 0.0 { 0.0 } else { value.signum() };
+                    for row in 0..n {
+                        let at = ((batch * n + row) * k + index) * components;
+                        for component in &mut left.values[at..at + components] {
+                            *component *= sign;
+                        }
+                    }
+                }
+                let start = (batch * k + index) * m * components;
+                for component in &mut right.values[start..start + m * components] {
+                    *component = if single {
+                        f64::from((*component as f32) * reciprocal as f32)
+                    } else {
+                        *component * reciprocal
+                    };
+                }
+            }
+        }
+        let result = left.matmul(&right)?;
+        Self::from_linalg_values(shape, result.values, dtype)
     }
 
     /// Solve linear systems with NumPy 2.x logical shape and dtype semantics.
@@ -21421,198 +21517,178 @@ impl UFuncArray {
         Ok((values, vectors))
     }
 
-    /// Eigenvalue decomposition for symmetric/Hermitian matrices (np.linalg.eigh).
-    /// Returns (eigenvalues, eigenvectors) with eigenvalues sorted ascending.
-    /// Complex inputs use the lower Hermitian triangle, ignore imaginary diagonal
-    /// components, and retain component precision in the real spectrum and vectors.
+    /// Eigenvalue decomposition for stacks of symmetric/Hermitian matrices.
+    ///
+    /// The final two logical axes form a square matrix. The default lower
+    /// triangle defines each matrix, imaginary diagonal components are ignored,
+    /// and eigenvalues are sorted ascending. Leading batch axes and declared
+    /// floating/complex precision are retained in the outputs.
     pub fn eigh(&self) -> Result<(Self, Self), UFuncError> {
-        if self.dtype.is_complex() {
-            let shape = self.complex_logical_shape("eigh")?;
-            if shape.len() != 2 || shape[0] != shape[1] {
-                return Err(UFuncError::Msg(
-                    "eigh: input must be a square logical 2-D array".into(),
-                ));
+        self.eigh_with_uplo("L")
+    }
+
+    /// Hermitian eigendecomposition using the lower (`L`) or upper (`U`)
+    /// triangle, case-insensitively. The unselected triangle is never read by
+    /// the numeric kernel and may contain unrelated or nonfinite values.
+    pub fn eigh_with_uplo(&self, uplo: &str) -> Result<(Self, Self), UFuncError> {
+        let (values, vectors) = self.hermitian_eigensystem(uplo, true)?;
+        Ok((values, vectors.expect("eigenvectors were requested")))
+    }
+
+    /// Sorted real eigenvalues of symmetric/Hermitian matrix stacks, using
+    /// the lower triangle and avoiding eigenvector computation.
+    pub fn eigvalsh(&self) -> Result<Self, UFuncError> {
+        self.eigvalsh_with_uplo("L")
+    }
+
+    /// Hermitian eigenvalues using the selected triangle (`L` or `U`).
+    pub fn eigvalsh_with_uplo(&self, uplo: &str) -> Result<Self, UFuncError> {
+        Ok(self.hermitian_eigensystem(uplo, false)?.0)
+    }
+
+    fn hermitian_eigensystem(
+        &self,
+        uplo: &str,
+        with_vectors: bool,
+    ) -> Result<(Self, Option<Self>), UFuncError> {
+        let operation = if with_vectors { "eigh" } else { "eigvalsh" };
+        let lower = match uplo {
+            "L" | "l" => true,
+            "U" | "u" => false,
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: UPLO argument must be 'L' or 'U'"
+                )));
             }
-            let n = shape[0];
-            let source = self.cast_numeric_storage(self.dtype, false)?;
-            let (values, vectors) = fnp_linalg::complex_eigh_nxn(&source.values, n, "L")
-                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
-            let real_dtype = if self.dtype == DType::Complex64 {
-                DType::F32
-            } else {
-                DType::F64
-            };
-            let values = Self::from_values_with_dtype(vec![n], values, real_dtype)?;
-            let mut vectors = Self::complex_matrix_from_interleaved(n, n, vectors, self.dtype)?;
-            vectors.round_complex_transform_components();
-            return Ok((values, vectors));
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        let ndim = shape.len();
+        if ndim < 2 || shape[ndim - 2] != shape[ndim - 1] {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: the final two dimensions must form a square matrix"
+            )));
         }
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "eigh: input must be a square 2-D array".into(),
+        let dtype = Self::linalg_output_dtype(&[self], operation)?;
+        let real_dtype = if matches!(dtype, DType::F32 | DType::Complex64) {
+            DType::F32
+        } else {
+            DType::F64
+        };
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let logical_count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = logical_count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if physical_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: physical_count,
+                actual: self.values.len(),
+            });
+        }
+        let n = shape[ndim - 1];
+        let spectrum_shape = shape[..ndim - 1].to_vec();
+        // Both an empty stack and a zero-sized matrix have empty outputs. Do
+        // not multiply unoccupied core dimensions, or call n=0 scalar kernels.
+        if physical_count == 0 {
+            return Ok((
+                Self::from_linalg_values(spectrum_shape, Vec::new(), real_dtype)?,
+                if with_vectors {
+                    Some(Self::from_linalg_values(shape, Vec::new(), dtype)?)
+                } else {
+                    None
+                },
             ));
         }
-        let n = self.shape[0];
-        let (eigenvalues, eigenvectors) =
-            fnp_linalg::eigh_nxn(&self.values, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok((
-            Self {
-                shape: vec![n],
-                values: eigenvalues,
-                dtype: DType::F64,
-                integer_sidecar: None,
+
+        let source = self.cast_numeric_storage(
+            if dtype.is_complex() {
+                DType::Complex128
+            } else {
+                DType::F64
             },
-            Self {
-                shape: vec![n, n],
-                values: eigenvectors,
-                dtype: DType::F64,
-                integer_sidecar: None,
+            false,
+        )?;
+        let matrix_len = n
+            .checked_mul(n)
+            .and_then(|count| count.checked_mul(components))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(logical_count / n)
+            .map_err(|_| UFuncError::Msg(format!("{operation}: unable to allocate eigenvalues")))?;
+        let mut vectors = Vec::new();
+        if with_vectors {
+            vectors.try_reserve_exact(physical_count).map_err(|_| {
+                UFuncError::Msg(format!("{operation}: unable to allocate eigenvectors"))
+            })?;
+        }
+        let mut symmetric = Vec::new();
+        if !dtype.is_complex() {
+            symmetric.try_reserve_exact(matrix_len).map_err(|_| {
+                UFuncError::Msg(format!("{operation}: unable to allocate selected matrix"))
+            })?;
+            symmetric.resize(matrix_len, 0.0);
+        }
+        for matrix in source.values.chunks_exact(matrix_len) {
+            let (spectrum, basis) = if dtype.is_complex() {
+                if with_vectors {
+                    fnp_linalg::complex_eigh_nxn(matrix, n, uplo)
+                } else {
+                    fnp_linalg::complex_eigvalsh_nxn(matrix, n, uplo)
+                        .map(|values| (values, Vec::new()))
+                }
+            } else {
+                // The real kernels expect a complete symmetric matrix. Build
+                // it from only the selected triangle, just as the complex
+                // kernel does; the other half must not affect values or errors.
+                for row in 0..n {
+                    for column in 0..=row {
+                        let value = if lower {
+                            matrix[row * n + column]
+                        } else {
+                            matrix[column * n + row]
+                        };
+                        symmetric[row * n + column] = value;
+                        symmetric[column * n + row] = value;
+                    }
+                }
+                if with_vectors {
+                    fnp_linalg::eigh_nxn(&symmetric, n)
+                } else {
+                    fnp_linalg::eigvalsh_nxn(&symmetric, n).map(|values| (values, Vec::new()))
+                }
+            }
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            values.extend(spectrum);
+            vectors.extend(basis);
+        }
+        Ok((
+            Self::from_linalg_values(spectrum_shape, values, real_dtype)?,
+            if with_vectors {
+                Some(Self::from_linalg_values(shape, vectors, dtype)?)
+            } else {
+                None
             },
         ))
     }
 
-    /// Eigenvalues of a symmetric/Hermitian matrix (np.linalg.eigvalsh).
-    pub fn eigvalsh(&self) -> Result<Self, UFuncError> {
-        if self.dtype.is_complex() {
-            let shape = self.complex_logical_shape("eigvalsh")?;
-            if shape.len() != 2 || shape[0] != shape[1] {
-                return Err(UFuncError::Msg(
-                    "eigvalsh: input must be a square logical 2-D array".into(),
-                ));
-            }
-            let n = shape[0];
-            let source = self.cast_numeric_storage(self.dtype, false)?;
-            let values = fnp_linalg::complex_eigvalsh_nxn(&source.values, n, "L")
-                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
-            let real_dtype = if self.dtype == DType::Complex64 {
-                DType::F32
-            } else {
-                DType::F64
-            };
-            return Self::from_values_with_dtype(vec![n], values, real_dtype);
-        }
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "eigvalsh: input must be a square 2-D array".into(),
-            ));
-        }
-        let n = self.shape[0];
-        let vals = fnp_linalg::eigvalsh_nxn(&self.values, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n],
-            values: vals,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
-    }
-
     /// SVD decomposition (`np.linalg.svd`).
     ///
-    /// When `full_matrices` is `true` (default), returns (U, S, Vt) where
-    /// U is m×m and Vt is n×n. When `false`, returns reduced SVD where
-    /// U is m×k and Vt is k×n with k = min(m, n).
-    /// For complex inputs the right factor is V^H, factors retain the input
-    /// precision, and singular values have the corresponding real dtype.
+    /// The final two logical axes are the matrix dimensions; leading axes
+    /// identify independent matrices. With `full_matrices=true`, U is m×m
+    /// and Vh is n×n. Otherwise U is m×k and Vh is k×n, k = min(m, n).
+    /// Complex inputs return V^H rather than V^T. Single-precision inputs
+    /// retain their precision, integers/Booleans return float64, and singular
+    /// values always have the corresponding real dtype.
     pub fn svd_full(&self, full_matrices: bool) -> Result<(Self, Self, Self), UFuncError> {
-        if self.dtype.is_complex() {
-            let shape = self.complex_logical_shape("svd")?;
-            if shape.len() != 2 {
-                return Err(UFuncError::Msg(
-                    "svd: input must be a logical 2-D array".into(),
-                ));
-            }
-            let (m, n) = (shape[0], shape[1]);
-            let k = m.min(n);
-            let source = self.cast_numeric_storage(self.dtype, false)?;
-            let (u, values, vh) = if full_matrices {
-                fnp_linalg::complex_svd_mxn_full(&source.values, m, n)
-            } else {
-                fnp_linalg::complex_svd_mxn_reduced(&source.values, m, n)
-            }
-            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
-            let real_dtype = if self.dtype == DType::Complex64 {
-                DType::F32
-            } else {
-                DType::F64
-            };
-            let mut u = Self::complex_matrix_from_interleaved(
-                m,
-                if full_matrices { m } else { k },
-                u,
-                self.dtype,
-            )?;
-            let mut vh = Self::complex_matrix_from_interleaved(
-                if full_matrices { n } else { k },
-                n,
-                vh,
-                self.dtype,
-            )?;
-            u.round_complex_transform_components();
-            vh.round_complex_transform_components();
-            let values = Self::from_values_with_dtype(vec![k], values, real_dtype)?;
-            return Ok((u, values, vh));
-        }
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("svd: input must be a 2-D array".into()));
-        }
-        let m = self.shape[0];
-        let n = self.shape[1];
-        let k = m.min(n);
-        let (u_full, s, vt_full) = fnp_linalg::svd_mxn_full(&self.values, m, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-
-        if full_matrices {
-            Ok((
-                Self {
-                    shape: vec![m, m],
-                    values: u_full,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-                Self {
-                    shape: vec![s.len()],
-                    values: s,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-                Self {
-                    shape: vec![n, n],
-                    values: vt_full,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-            ))
-        } else {
-            // Truncate U to m×k (take first k columns)
-            let mut u_reduced = Vec::with_capacity(m * k);
-            for row in 0..m {
-                u_reduced.extend_from_slice(&u_full[row * m..row * m + k]);
-            }
-            // Truncate Vt to k×n (take first k rows)
-            let vt_reduced = vt_full[..k * n].to_vec();
-
-            Ok((
-                Self {
-                    shape: vec![m, k],
-                    values: u_reduced,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-                Self {
-                    shape: vec![s.len()],
-                    values: s,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-                Self {
-                    shape: vec![k, n],
-                    values: vt_reduced,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                },
-            ))
-        }
+        let (values, factors) = self.singular_value_decomposition(full_matrices, true)?;
+        let (u, vh) = factors.expect("singular vectors were requested");
+        Ok((u, values, vh))
     }
 
     /// Full SVD (convenience wrapper, equivalent to `svd_full(true)`).
@@ -21622,36 +21698,144 @@ impl UFuncArray {
 
     /// Singular values only (np.linalg.svdvals).
     pub fn svdvals(&self) -> Result<Self, UFuncError> {
-        if self.dtype.is_complex() {
-            let shape = self.complex_logical_shape("svdvals")?;
-            if shape.len() != 2 {
-                return Err(UFuncError::Msg(
-                    "svdvals: input must be a logical 2-D array".into(),
-                ));
+        Ok(self.singular_value_decomposition(false, false)?.0)
+    }
+
+    fn singular_value_decomposition(
+        &self,
+        full_matrices: bool,
+        with_vectors: bool,
+    ) -> Result<(Self, Option<(Self, Self)>), UFuncError> {
+        let operation = if with_vectors { "svd" } else { "svdvals" };
+        let shape = self.complex_logical_shape(operation)?;
+        if shape.len() < 2 {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: input must have at least two logical dimensions"
+            )));
+        }
+        let dtype = Self::linalg_output_dtype(&[self], operation)?;
+        let real_dtype = if matches!(dtype, DType::F32 | DType::Complex64) {
+            DType::F32
+        } else {
+            DType::F64
+        };
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let batch_shape = &shape[..shape.len() - 2];
+        let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+        let k = m.min(n);
+        let (u_cols, vh_rows) = if full_matrices { (m, n) } else { (k, k) };
+        let mut values_shape = batch_shape.to_vec();
+        values_shape.push(k);
+        let mut u_shape = batch_shape.to_vec();
+        u_shape.extend([m, u_cols]);
+        let mut vh_shape = batch_shape.to_vec();
+        vh_shape.extend([vh_rows, n]);
+        let capacity = |shape: &[usize], components: usize| {
+            let count = if shape.contains(&0) {
+                0
+            } else {
+                element_count(shape).map_err(UFuncError::Shape)?
+            };
+            count
+                .checked_mul(components)
+                .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        };
+        let mut values = try_zeroed_f64(capacity(&values_shape, 1)?, operation)?;
+        let mut u = Vec::new();
+        let mut vh = Vec::new();
+        if with_vectors {
+            // Check both shapes before reserving either factor. An empty input
+            // can still require a nonempty full factor, e.g. shape [m, 0].
+            let u_count = capacity(&u_shape, components)?;
+            let vh_count = capacity(&vh_shape, components)?;
+            u = try_zeroed_f64(u_count, operation)?;
+            vh = try_zeroed_f64(vh_count, operation)?;
+        }
+
+        if values.is_empty() {
+            // Zero-size cores have empty spectra and identity full factors.
+            // Empty batches need no core products, even for enormous extents.
+            for (factor, size) in [(&mut u, m), (&mut vh, n)] {
+                if !factor.is_empty() {
+                    let lane_len = capacity(&[size, size], components)?;
+                    for lane in factor.chunks_exact_mut(lane_len) {
+                        for diagonal in 0..size {
+                            lane[components * (diagonal * size + diagonal)] = 1.0;
+                        }
+                    }
+                }
             }
-            let source = self.cast_numeric_storage(self.dtype, false)?;
-            let values = fnp_linalg::complex_svd_mxn(&source.values, shape[0], shape[1])
-                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
-            let real_dtype = if self.dtype == DType::Complex64 {
-                DType::F32
+        } else {
+            let matrix_len = capacity(&[m, n], components)?;
+            let working_dtype = if dtype.is_complex() {
+                DType::Complex128
             } else {
                 DType::F64
             };
-            return Self::from_values_with_dtype(vec![shape[0].min(shape[1])], values, real_dtype);
+            // Widen typed storage rather than raw f64 working cells: otherwise
+            // float32 inputs and exact integer sidecars change the spectrum.
+            let source = self.cast_numeric_storage(working_dtype, false)?;
+            let u_len = if with_vectors {
+                capacity(&[m, u_cols], components)?
+            } else {
+                0
+            };
+            let vh_len = if with_vectors {
+                capacity(&[vh_rows, n], components)?
+            } else {
+                0
+            };
+            if with_vectors && !dtype.is_complex() {
+                // The real kernel currently forms full factors even when the
+                // caller requests reduced ones. Validate its workspace too.
+                capacity(&[m, m], 1)?;
+                capacity(&[n, n], 1)?;
+            }
+            for (batch, matrix) in source.values.chunks_exact(matrix_len).enumerate() {
+                let spectrum = if with_vectors {
+                    let (left, spectrum, right) = if dtype.is_complex() {
+                        if full_matrices {
+                            fnp_linalg::complex_svd_mxn_full(matrix, m, n)
+                        } else {
+                            fnp_linalg::complex_svd_mxn_reduced(matrix, m, n)
+                        }
+                    } else {
+                        fnp_linalg::svd_mxn_full(matrix, m, n)
+                    }
+                    .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+                    let left_out = &mut u[batch * u_len..(batch + 1) * u_len];
+                    if dtype.is_complex() || full_matrices {
+                        left_out.copy_from_slice(&left);
+                    } else {
+                        for row in 0..m {
+                            left_out[row * k..(row + 1) * k]
+                                .copy_from_slice(&left[row * m..row * m + k]);
+                        }
+                    }
+                    vh[batch * vh_len..(batch + 1) * vh_len].copy_from_slice(&right[..vh_len]);
+                    spectrum
+                } else {
+                    if dtype.is_complex() {
+                        fnp_linalg::complex_svd_mxn(matrix, m, n)
+                    } else {
+                        fnp_linalg::svd_mxn(matrix, m, n)
+                    }
+                    .map_err(|error| UFuncError::Msg(format!("{error}")))?
+                };
+                values[batch * k..(batch + 1) * k].copy_from_slice(&spectrum);
+            }
         }
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("svdvals: input must be a 2-D array".into()));
-        }
-        let m = self.shape[0];
-        let n = self.shape[1];
-        let s =
-            fnp_linalg::svd_mxn(&self.values, m, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![s.len()],
-            values: s,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        let values = Self::from_linalg_values(values_shape, values, real_dtype)?;
+        let factors = if with_vectors {
+            Some((
+                Self::from_linalg_values(u_shape, u, dtype)?,
+                Self::from_linalg_values(vh_shape, vh, dtype)?,
+            ))
+        } else {
+            None
+        };
+        Ok((values, factors))
     }
 
     /// QR decomposition (np.linalg.qr).

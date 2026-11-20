@@ -341,7 +341,7 @@ fn complex_spectral_bridges_handle_empty_shapes_and_reject_invalid_layouts() {
             UFuncArray::new(vec![2, 3], vec![1.0; 6], dtype).unwrap(),
             UFuncArray::new(vec![0, 1], vec![], dtype).unwrap(),
             UFuncArray::from_storage_with_dtype(
-                vec![1, 2, 2],
+                vec![4],
                 ArrayStorage::F64(vec![1.0, 0.0, 0.0, 1.0]),
                 dtype,
             )
@@ -526,5 +526,244 @@ fn general_eigen_bridges_reject_invalid_shapes_nonfinite_values_and_unsupported_
     ] {
         assert!(input.eig().is_err());
         assert!(input.eigvals().is_err());
+    }
+}
+
+fn svd_oracle_record(array: &UFuncArray, dtype: &str) -> serde_json::Value {
+    let mut shape = array.shape().to_vec();
+    if array.dtype().is_complex() {
+        assert_eq!(shape.pop(), Some(2));
+    }
+    json!({"shape": shape, "dtype": dtype, "values": array.values()})
+}
+
+#[test]
+fn typed_batched_svd_matches_numpy_spectra_shapes_and_factor_identities() {
+    let mut cases = Vec::new();
+    for (dtype, name) in [
+        (DType::Bool, "bool"),
+        (DType::I8, "int8"),
+        (DType::I16, "int16"),
+        (DType::I32, "int32"),
+        (DType::I64, "int64"),
+        (DType::U8, "uint8"),
+        (DType::U16, "uint16"),
+        (DType::U32, "uint32"),
+        (DType::U64, "uint64"),
+        (DType::F32, "float32"),
+        (DType::F64, "float64"),
+        (DType::Complex64, "complex64"),
+        (DType::Complex128, "complex128"),
+    ] {
+        for shape in [
+            vec![1, 1],
+            vec![3, 2],
+            vec![2, 4],
+            vec![4, 4],
+            vec![2, 3, 2],
+            vec![2, 1, 2, 4],
+            vec![0, 0],
+            vec![0, 3],
+            vec![3, 0],
+            vec![0, 3, 2],
+            vec![2, 0, 3],
+            vec![2, 3, 0],
+            vec![2, 0, 3, 4],
+        ] {
+            let count: usize = shape.iter().product();
+            let entries: Vec<_> = (0..count)
+                .map(|index| {
+                    (
+                        ((index * 17 + 3) % 29) as f64,
+                        ((index * 7 + 2) % 13) as f64 * 0.25 - 1.5,
+                    )
+                })
+                .collect();
+            let storage = if dtype.is_complex() {
+                ArrayStorage::Complex128(entries).cast_to(dtype).unwrap()
+            } else {
+                ArrayStorage::F64(entries.into_iter().map(|value| value.0).collect())
+                    .cast_to(dtype)
+                    .unwrap()
+            };
+            let input = UFuncArray::from_storage(shape, storage).unwrap();
+            for full in [false, true] {
+                let (u, values, vh) = input.svd_full(full).unwrap();
+                let only = input.svdvals().unwrap();
+                assert_eq!(vh.dtype(), u.dtype());
+                assert_eq!(only.dtype(), values.dtype());
+                for output in [&u, &values, &vh, &only] {
+                    assert_declared_precision(output);
+                }
+                let output_name = match u.dtype() {
+                    DType::F32 => "float32",
+                    DType::F64 => "float64",
+                    DType::Complex64 => "complex64",
+                    DType::Complex128 => "complex128",
+                    other => panic!("unexpected SVD output dtype {other:?}"),
+                };
+                let spectrum_name = if values.dtype() == DType::F32 {
+                    "float32"
+                } else {
+                    assert_eq!(values.dtype(), DType::F64);
+                    "float64"
+                };
+                cases.push(json!({
+                    "input": svd_oracle_record(&input, name), "full": full,
+                    "u": svd_oracle_record(&u, output_name),
+                    "s": svd_oracle_record(&values, spectrum_name),
+                    "vh": svd_oracle_record(&vh, output_name),
+                    "only": svd_oracle_record(&only, spectrum_name),
+                }));
+            }
+        }
+    }
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = r#"
+import json, sys
+import numpy as np
+
+def load(record):
+    values = np.array(record['values'], dtype=np.float64)
+    if record['dtype'].startswith('complex'):
+        values = values[::2] + 1j * values[1::2]
+    return values.astype(record['dtype']).reshape(record['shape'])
+
+cases = json.load(sys.stdin)
+for index, case in enumerate(cases):
+    source = load(case['input'])
+    u, s, vh, only = [load(case[key]) for key in ('u', 's', 'vh', 'only')]
+    expected = np.linalg.svd(source, full_matrices=case['full'])
+    expected_only = np.linalg.svd(source, compute_uv=False)
+    for actual, wanted in zip((u, s, vh, only), (*expected, expected_only)):
+        assert actual.shape == wanted.shape, (index, actual.shape, wanted.shape)
+        assert actual.dtype == wanted.dtype, (index, actual.dtype, wanted.dtype)
+    tolerance = 3e-5 if s.dtype == np.float32 else 3e-10
+    np.testing.assert_allclose(s, expected[1], rtol=tolerance, atol=tolerance,
+                               err_msg=f'spectrum case {index}')
+    np.testing.assert_allclose(only, expected_only, rtol=tolerance, atol=tolerance,
+                               err_msg=f'values-only case {index}')
+    k = s.shape[-1]
+    reconstructed = (u[..., :, :k] * s[..., None, :]) @ vh[..., :k, :]
+    scale = max(1, float(np.max(np.abs(source), initial=0)))
+    np.testing.assert_allclose(reconstructed, source.astype(u.dtype),
+                               rtol=tolerance, atol=tolerance * scale,
+                               err_msg=f'reconstruction case {index}')
+    left_gram = u.swapaxes(-1, -2).conj() @ u
+    right_gram = vh @ vh.swapaxes(-1, -2).conj()
+    for gram in (left_gram, right_gram):
+        identity = np.broadcast_to(np.eye(gram.shape[-1]), gram.shape)
+        np.testing.assert_allclose(gram, identity, rtol=tolerance, atol=tolerance,
+                                   err_msg=f'orthonormality case {index}')
+print(f'NumPy {np.__version__}: {len(cases)} typed/batched SVD cases passed')
+"#;
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("NumPy oracle interpreter must be available");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&cases).unwrap().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "NumPy SVD oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn real_svd_normalizes_single_precision_and_integer_sources() {
+    let raw = UFuncArray::new(
+        vec![2, 2],
+        vec![16_777_217.0, 16_777_216.0, 16_777_216.0, 16_777_217.0],
+        DType::F32,
+    )
+    .unwrap();
+    for full in [false, true] {
+        let (u, values, vh) = raw.svd_full(full).unwrap();
+        for output in [&u, &values, &vh] {
+            assert_eq!(output.dtype(), DType::F32);
+            assert_declared_precision(output);
+        }
+        assert_eq!(values.values()[0], 33_554_432.0);
+        close(values.values()[1], 0.0, 1.0e-7);
+    }
+    assert_eq!(raw.svdvals().unwrap().dtype(), DType::F32);
+    assert_eq!(raw.svdvals().unwrap().values()[0], 33_554_432.0);
+
+    let raw_integer = UFuncArray::new(vec![1, 1], vec![257.0], DType::I8).unwrap();
+    assert_eq!(raw_integer.svdvals().unwrap().values(), &[1.0]);
+    assert_eq!(raw_integer.svd().unwrap().1.values(), &[1.0]);
+    let raw_boolean = UFuncArray::new(vec![1, 1], vec![7.0], DType::Bool).unwrap();
+    assert_eq!(raw_boolean.svdvals().unwrap().values(), &[1.0]);
+
+    let exact = UFuncArray::from_storage(
+        vec![2, 2],
+        ArrayStorage::U64(vec![(1_u64 << 63) + 2049, 0, 0, (1_u64 << 63) - 1025]),
+    )
+    .unwrap();
+    let expected = vec![((1_u64 << 63) + 2049) as f64, ((1_u64 << 63) - 1025) as f64];
+    assert_eq!(exact.svdvals().unwrap().values(), expected);
+    assert_eq!(exact.svd_full(false).unwrap().1.values(), expected);
+}
+
+#[test]
+fn svd_empty_shapes_skip_unused_products_and_check_full_factor_capacity() {
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        for mut shape in [
+            vec![0, usize::MAX, usize::MAX],
+            vec![2, 0, usize::MAX, usize::MAX],
+        ] {
+            if dtype.is_complex() {
+                shape.push(2);
+            }
+            let array = UFuncArray::new(shape, vec![], dtype).unwrap();
+            assert!(array.svdvals().unwrap().values().is_empty());
+            for full in [false, true] {
+                let (u, s, vh) = array.svd_full(full).unwrap();
+                assert!(u.values().is_empty());
+                assert!(s.values().is_empty());
+                assert!(vh.values().is_empty());
+            }
+        }
+        for mut shape in [vec![usize::MAX, 0], vec![0, usize::MAX]] {
+            if dtype.is_complex() {
+                shape.push(2);
+            }
+            let array = UFuncArray::new(shape, vec![], dtype).unwrap();
+            assert!(array.svdvals().unwrap().values().is_empty());
+            let (u, s, vh) = array.svd_full(false).unwrap();
+            assert!(u.values().is_empty());
+            assert!(s.values().is_empty());
+            assert!(vh.values().is_empty());
+            assert!(array.svd_full(true).is_err());
+        }
+    }
+}
+
+#[test]
+fn svd_validates_dtype_logical_rank_and_each_nonempty_matrix() {
+    for input in [
+        UFuncArray::new(vec![], vec![1.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![1, 1], vec![1.0], DType::F16).unwrap(),
+        UFuncArray::new(vec![0, 1, 1], vec![], DType::F16).unwrap(),
+        UFuncArray::new(vec![1, 1], vec![1.0], DType::Str).unwrap(),
+        UFuncArray::new(vec![0, 1, 1], vec![], DType::Structured).unwrap(),
+        UFuncArray::new(vec![2, 1, 1], vec![1.0, f64::NAN], DType::F64).unwrap(),
+        UFuncArray::new(vec![2, 1, 1], vec![1.0, f64::INFINITY], DType::F32).unwrap(),
+        UFuncArray::new(vec![1, 3], vec![1.0; 3], DType::Complex128).unwrap(),
+    ] {
+        assert!(input.svdvals().is_err());
+        assert!(input.svd_full(false).is_err());
+        assert!(input.svd_full(true).is_err());
     }
 }
