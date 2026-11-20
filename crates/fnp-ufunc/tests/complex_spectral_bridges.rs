@@ -767,3 +767,45 @@ fn svd_validates_dtype_logical_rank_and_each_nonempty_matrix() {
         assert!(input.svd_full(true).is_err());
     }
 }
+
+#[test]
+fn reduced_real_svd_and_pseudoinverse_avoid_full_square_workspaces() {
+    // The former full-factor route would request an 80 GB square factor for
+    // either orientation, although each thin decomposition has only 100002
+    // result cells. This exercises the public array routing, including pinv.
+    let length = 100_000;
+    let values: Vec<_> = (0..length)
+        .map(|index| if index % 2 == 0 { 1.0 } else { -2.0 })
+        .collect();
+    let squared_norm = 250_000.0;
+    for dtype in [DType::F32, DType::F64] {
+        for shape in [vec![length, 1], vec![1, length]] {
+            let input = UFuncArray::new(shape.clone(), values.clone(), dtype).unwrap();
+            let (u, s, vh) = input.svd_full(false).unwrap();
+            assert_eq!(u.shape(), &[shape[0], 1]);
+            assert_eq!(s.shape(), &[1]);
+            assert_eq!(vh.shape(), &[1, shape[1]]);
+            assert_eq!(
+                u.values().len() + s.values().len() + vh.values().len(),
+                length + 2
+            );
+            assert_eq!(s.values(), &[500.0]);
+            let inverse = input.pinv().unwrap();
+            assert_eq!(inverse.shape(), &[shape[1], shape[0]]);
+            assert_eq!(inverse.dtype(), dtype);
+            assert_declared_precision(&inverse);
+            let epsilon = if dtype == DType::F32 {
+                f64::from(f32::EPSILON)
+            } else {
+                f64::EPSILON
+            };
+            for (&actual, &value) in inverse.values().iter().zip(&values) {
+                let expected: f64 = value / squared_norm;
+                assert!(
+                    (actual - expected).abs() <= 16.0 * epsilon * expected.abs(),
+                    "skinny pseudoinverse: {actual} differs from {expected}"
+                );
+            }
+        }
+    }
+}

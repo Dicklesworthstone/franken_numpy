@@ -20978,14 +20978,6 @@ impl UFuncArray {
         Self::new(vec![rows, cols, 2], values, dtype)
     }
 
-    fn complex_vector_from_interleaved(
-        len: usize,
-        values: Vec<f64>,
-        dtype: DType,
-    ) -> Result<Self, UFuncError> {
-        Self::new(vec![len, 2], values, dtype)
-    }
-
     fn reflect_upper_triangle_to_lower(values: &[f64], n: usize) -> Vec<f64> {
         let mut reflected = vec![0.0; n * n];
         for row in 0..n {
@@ -21786,12 +21778,6 @@ impl UFuncArray {
             } else {
                 0
             };
-            if with_vectors && !dtype.is_complex() {
-                // The real kernel currently forms full factors even when the
-                // caller requests reduced ones. Validate its workspace too.
-                capacity(&[m, m], 1)?;
-                capacity(&[n, n], 1)?;
-            }
             for (batch, matrix) in source.values.chunks_exact(matrix_len).enumerate() {
                 let spectrum = if with_vectors {
                     let (left, spectrum, right) = if dtype.is_complex() {
@@ -21800,20 +21786,16 @@ impl UFuncArray {
                         } else {
                             fnp_linalg::complex_svd_mxn_reduced(matrix, m, n)
                         }
-                    } else {
+                    } else if full_matrices {
                         fnp_linalg::svd_mxn_full(matrix, m, n)
+                    } else {
+                        fnp_linalg::svd_mxn_reduced(matrix, m, n)
                     }
                     .map_err(|error| UFuncError::Msg(format!("{error}")))?;
-                    let left_out = &mut u[batch * u_len..(batch + 1) * u_len];
-                    if dtype.is_complex() || full_matrices {
-                        left_out.copy_from_slice(&left);
-                    } else {
-                        for row in 0..m {
-                            left_out[row * k..(row + 1) * k]
-                                .copy_from_slice(&left[row * m..row * m + k]);
-                        }
-                    }
-                    vh[batch * vh_len..(batch + 1) * vh_len].copy_from_slice(&right[..vh_len]);
+                    // Reduced kernels return thin factors directly, avoiding
+                    // a larger square workspace for tall or wide matrices.
+                    u[batch * u_len..(batch + 1) * u_len].copy_from_slice(&left);
+                    vh[batch * vh_len..(batch + 1) * vh_len].copy_from_slice(&right);
                     spectrum
                 } else {
                     if dtype.is_complex() {

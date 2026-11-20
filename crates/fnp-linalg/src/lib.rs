@@ -3684,6 +3684,60 @@ pub fn svd_mxn_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinA
     svd_bidiag_full(a, m, n)
 }
 
+/// Reduced real SVD with bounded workspace and fallible allocation.
+///
+/// Returns row-major `(U, singular_values, Vt)` with U shaped m-by-k and Vt
+/// shaped k-by-n, where k = min(m, n). Singular values are sorted descending.
+/// Finite inputs and empty dimensions are supported. Workspace and returned
+/// factors occupy O(m*n + k*k) cells; no m-by-m or n-by-n factor is constructed
+/// when the corresponding dimension exceeds k.
+///
+/// This path reuses the extended-exponent one-sided Jacobi kernel with zero
+/// imaginary input. Real columns are an invariant subspace of its rotations
+/// and nullspace completion, so both factors remain exactly real; that
+/// invariant is checked before extracting their components. This avoids
+/// duplicating the kernel's convergence and extreme-scale handling. It is a
+/// memory-bounded path, not a measured throughput improvement over the real
+/// full-factor Golub-Reinsch implementation.
+pub fn svd_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "svd_mxn_reduced: input must contain m*n entries",
+        ));
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for SVD",
+        ));
+    }
+    if m == 0 || n == 0 {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+    let interleaved_len = a
+        .len()
+        .checked_mul(2)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "svd_mxn_reduced: input component dimensions overflow",
+        ))?;
+    let mut interleaved = complex_svd_buffer(interleaved_len, 0.0)?;
+    for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+        pair[0] = value;
+    }
+    let (u, values, vt) = complex_svd_mxn_reduced(&interleaved, m, n)?;
+    drop(interleaved);
+    let real_factor = |interleaved: Vec<f64>| -> Result<Vec<f64>, LinAlgError> {
+        let mut real = complex_svd_buffer(interleaved.len() / 2, 0.0)?;
+        for (output, pair) in real.iter_mut().zip(interleaved.chunks_exact(2)) {
+            if pair[1] != 0.0 || !pair[0].is_finite() {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            *output = pair[0];
+        }
+        Ok(real)
+    };
+    Ok((real_factor(u)?, values, real_factor(vt)?))
+}
+
 // ── Golub-Kahan Bidiagonalization SVD ────────────────────────────────────
 
 /// Compute the smaller singular value of a 2×2 upper triangular matrix
@@ -13776,15 +13830,29 @@ fn complex_svd_jacobi(
         }
     }
 
-    let norms: Vec<_> = (0..k)
-        .map(|col| complex_svd_column_norm(&matrix, rows, k, col))
-        .collect();
+    let mut norms = complex_svd_buffer(k, zero)?;
+    for (col, norm) in norms.iter_mut().enumerate() {
+        *norm = complex_svd_column_norm(&matrix, rows, k, col);
+    }
     if norms.iter().any(|norm| !norm.value().is_finite()) {
         return Err(LinAlgError::SvdNonConvergence);
     }
-    let mut indices: Vec<_> = (0..k).collect();
-    indices.sort_by(|&p, &q| norms[q].value().total_cmp(&norms[p].value()));
-    let values: Vec<_> = indices.iter().map(|&col| norms[col].value()).collect();
+    let mut indices = complex_svd_buffer(k, 0_usize)?;
+    for (index, slot) in indices.iter_mut().enumerate() {
+        *slot = index;
+    }
+    // The explicit source-index tie break preserves the former stable order,
+    // while the unstable sorter needs no additional infallible allocation.
+    indices.sort_unstable_by(|&p, &q| {
+        norms[q]
+            .value()
+            .total_cmp(&norms[p].value())
+            .then_with(|| p.cmp(&q))
+    });
+    let mut values = complex_svd_buffer(k, 0.0)?;
+    for (value, &col) in values.iter_mut().zip(&indices) {
+        *value = norms[col].value();
+    }
     if !compute_vectors {
         return Ok((Vec::new(), values, Vec::new()));
     }
@@ -24868,6 +24936,178 @@ np.testing.assert_allclose(actual / scale, values_only / scale, rtol=2e-12, atol
                         String::from_utf8_lossy(&output.stderr)
                     );
                 }
+            }
+        }
+    }
+
+    fn assert_reduced_real_svd(a: &[f64], m: usize, n: usize) -> Vec<f64> {
+        let (u, values, vt) = super::svd_mxn_reduced(a, m, n).expect("reduced real SVD");
+        let k = m.min(n);
+        assert_eq!(u.len(), m * k);
+        assert_eq!(values.len(), k);
+        assert_eq!(vt.len(), k * n);
+        assert!(
+            u.iter()
+                .chain(&values)
+                .chain(&vt)
+                .all(|value| value.is_finite())
+        );
+        assert!(values.iter().all(|&value| value >= 0.0));
+        assert!(values.windows(2).all(|pair| pair[0] >= pair[1]));
+        let scale = a.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        let tolerance = 128.0 * f64::EPSILON * m.max(n).max(1) as f64;
+        for row in 0..m {
+            for col in 0..n {
+                let reconstructed: f64 = (0..k)
+                    .map(|mode| u[row * k + mode] * (values[mode] / scale) * vt[mode * n + col])
+                    .sum();
+                assert!(
+                    (reconstructed - a[row * n + col] / scale).abs() <= tolerance,
+                    "real SVD reconstruction ({row},{col}), shape ({m},{n})"
+                );
+            }
+        }
+        for row in 0..k {
+            for col in 0..k {
+                let left: f64 = (0..m)
+                    .map(|index| u[index * k + row] * u[index * k + col])
+                    .sum();
+                let right: f64 = (0..n)
+                    .map(|index| vt[row * n + index] * vt[col * n + index])
+                    .sum();
+                let expected = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (left - expected).abs() <= tolerance,
+                    "left factor ({row},{col})"
+                );
+                assert!(
+                    (right - expected).abs() <= tolerance,
+                    "right factor ({row},{col})"
+                );
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn real_reduced_svd_rectangles_rank_deficiency_and_repeated_spectra() {
+        for (m, n) in [(1, 1), (7, 1), (1, 7), (5, 3), (3, 5), (8, 8)] {
+            let dense: Vec<_> = (0..m * n)
+                .map(|index| ((index * 7 + index / n) % 19) as f64 / 4.0 - 2.0)
+                .collect();
+            for scale in [1.0e-300, 1.0, 1.0e300] {
+                let a: Vec<_> = dense.iter().map(|value| value * scale).collect();
+                assert_reduced_real_svd(&a, m, n);
+            }
+        }
+        for (m, n) in [(5, 3), (3, 5), (4, 4)] {
+            let zero = vec![0.0; m * n];
+            assert_eq!(assert_reduced_real_svd(&zero, m, n), vec![0.0; m.min(n)]);
+            let rank_one: Vec<_> = (0..m * n).map(|index| (index / n + 1) as f64).collect();
+            let values = assert_reduced_real_svd(&rank_one, m, n);
+            assert!(values[1..].iter().all(|value| *value < 1.0e-12));
+        }
+        let repeated = [3.0, 0.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0, 0.5];
+        assert_eq!(assert_reduced_real_svd(&repeated, 3, 3), [3.0, 3.0, 0.5]);
+    }
+
+    #[test]
+    fn real_reduced_svd_retains_tiny_directions_without_global_rescaling() {
+        for (m, n, a) in [
+            (2, 2, vec![1.0e300, 1.0e300, 1.0e-300, -1.0e-300]),
+            (3, 2, vec![1.0e300, 1.0e300, 1.0e-300, -1.0e-300, 0.0, 0.0]),
+            (2, 3, vec![1.0e300, 1.0e300, 0.0, 1.0e-300, -1.0e-300, 0.0]),
+        ] {
+            let values = assert_reduced_real_svd(&a, m, n);
+            assert!((values[0] / 1.0e300 - 2.0_f64.sqrt()).abs() < 1.0e-13);
+            assert!((values[1] / 1.0e-300 - 2.0_f64.sqrt()).abs() < 1.0e-13);
+        }
+        for tiny in [f64::from_bits(1), 1.0e-320, 1.0e-300] {
+            let diagonal = [3.0 * tiny, 0.0, 0.0, 2.0 * tiny];
+            let values = assert_reduced_real_svd(&diagonal, 2, 2);
+            assert_eq!(values, [3.0 * tiny, 2.0 * tiny]);
+        }
+    }
+
+    #[test]
+    fn real_reduced_svd_handles_hundred_thousand_entry_vectors_with_thin_factors() {
+        // The former full-factor route needs 100000^2 doubles (~80 GB) for one
+        // factor. Both orientations here require only linear input/work/output.
+        let length = 100_000;
+        let a = vec![1.0; length];
+        for (m, n) in [(length, 1), (1, length)] {
+            let values = assert_reduced_real_svd(&a, m, n);
+            assert!((values[0] / (length as f64).sqrt() - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn real_reduced_svd_accepts_empty_shapes_and_rejects_invalid_inputs() {
+        for (m, n) in [(0, 0), (0, 3), (3, 0), (usize::MAX, 0), (0, usize::MAX)] {
+            let (u, values, vt) = super::svd_mxn_reduced(&[], m, n).unwrap();
+            assert!(u.is_empty() && values.is_empty() && vt.is_empty());
+        }
+        assert!(super::svd_mxn_reduced(&[], usize::MAX, 2).is_err());
+        assert!(super::svd_mxn_reduced(&[0.0; 5], 2, 3).is_err());
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(super::svd_mxn_reduced(&[1.0, bad], 2, 1).is_err());
+        }
+        assert_eq!(
+            super::svd_mxn_reduced(&[f64::MAX, f64::MAX], 2, 1),
+            Err(LinAlgError::SvdNonConvergence)
+        );
+    }
+
+    #[test]
+    fn real_reduced_svd_matches_numpy_thin_factors_and_spectra() {
+        let script = r#"
+import sys
+import numpy as np
+m, n = int(sys.argv[1]), int(sys.argv[2])
+a = np.fromstring(sys.argv[3], sep=',').reshape(m, n)
+u = np.fromstring(sys.argv[4], sep=',').reshape(m, min(m, n))
+s = np.fromstring(sys.argv[5], sep=',')
+vt = np.fromstring(sys.argv[6], sep=',').reshape(min(m, n), n)
+reference = np.linalg.svd(a, full_matrices=False)
+assert u.shape == reference[0].shape and vt.shape == reference[2].shape
+scale = float(np.max(np.abs(reference[1]), initial=0.0)) or 1.0
+np.testing.assert_allclose(s / scale, reference[1] / scale, rtol=3e-12, atol=3e-12)
+np.testing.assert_allclose(u.T @ u, np.eye(s.size), rtol=3e-12, atol=3e-12)
+np.testing.assert_allclose(vt @ vt.T, np.eye(s.size), rtol=3e-12, atol=3e-12)
+np.testing.assert_allclose((u * (s / scale)) @ vt, a / scale, rtol=3e-12, atol=3e-12)
+"#;
+        for (m, n) in [(1, 1), (5, 3), (3, 5), (4, 4), (0, 3), (3, 0)] {
+            for scale in [1.0e-100, 1.0, 1.0e100] {
+                let a: Vec<_> = (0..m * n)
+                    .map(|index| (((index * 7 + index / n) % 19) as f64 / 4.0 - 2.0) * scale)
+                    .collect();
+                let (u, values, vt) = super::svd_mxn_reduced(&a, m, n).unwrap();
+                let encode = |values: &[f64]| {
+                    values
+                        .iter()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let output = Command::new(oracle_python_bin())
+                    .env("OPENBLAS_NUM_THREADS", "1")
+                    .env("OMP_NUM_THREADS", "1")
+                    .arg("-c")
+                    .arg(script)
+                    .arg(m.to_string())
+                    .arg(n.to_string())
+                    .arg(encode(&a))
+                    .arg(encode(&u))
+                    .arg(encode(&values))
+                    .arg(encode(&vt))
+                    .output()
+                    .expect("NumPy reduced real SVD oracle should run");
+                assert!(
+                    output.status.success(),
+                    "shape ({m},{n}), scale={scale}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
     }

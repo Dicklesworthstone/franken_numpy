@@ -2141,7 +2141,16 @@ fn matrix_power_one_preserves_nonfinite_payloads_and_signed_zeros() {
     .unwrap();
     let complex = UFuncArray::new(
         vec![2, 2, 2],
-        vec![-0.0, -0.0, nan, f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0, nan],
+        vec![
+            -0.0,
+            -0.0,
+            nan,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            0.0,
+            nan,
+        ],
         DType::Complex128,
     )
     .unwrap();
@@ -2203,7 +2212,10 @@ fn matrix_power_handles_minimum_exponent_and_empty_stacks() {
                 vec![0.0, 1.0, 1.0, 0.0]
             };
             let expected = if dtype.is_complex() {
-                expected.into_iter().flat_map(|value| [value, 0.0]).collect()
+                expected
+                    .into_iter()
+                    .flat_map(|value| [value, 0.0])
+                    .collect()
             } else {
                 expected
             };
@@ -2266,14 +2278,7 @@ fn matrix_power_rejects_singular_lanes_and_invalid_logical_shapes() {
                 batch.power_case(input, power);
             }
         }
-        for shape in [
-            &[][..],
-            &[2],
-            &[2, 3],
-            &[2, 2, 3],
-            &[0, 2, 3],
-            &[2, 0],
-        ] {
+        for shape in [&[][..], &[2], &[2, 3], &[2, 2, 3], &[0, 2, 3], &[2, 0]] {
             let input = source(shape, dtype, 1);
             for power in [-1, 0, 1, 2] {
                 batch.power_case(&input, power);
@@ -2309,7 +2314,10 @@ fn solve_numeric_types_and_broadcasted_rhs_match_numpy() {
         DType::Complex64,
         DType::Complex128,
     ];
-    let mut pairs = dtypes.iter().map(|&dtype| (dtype, dtype)).collect::<Vec<_>>();
+    let mut pairs = dtypes
+        .iter()
+        .map(|&dtype| (dtype, dtype))
+        .collect::<Vec<_>>();
     pairs.extend([
         (DType::F32, DType::Complex64),
         (DType::Complex64, DType::F32),
@@ -2356,12 +2364,7 @@ fn solve_distinguishes_one_dimensional_vectors_from_matrix_rhs() {
     assert_eq!(solved.values(), &[4.0, 4.0, 2.0, 2.0]);
     assert!(a.solve_multi(&vector).is_err());
 
-    let matrix = UFuncArray::new(
-        vec![2, 2],
-        vec![8.0, 16.0, 24.0, 32.0],
-        DType::F64,
-    )
-    .unwrap();
+    let matrix = UFuncArray::new(vec![2, 2], vec![8.0, 16.0, 24.0, 32.0], DType::F64).unwrap();
     for solved in [a.solve(&matrix).unwrap(), a.solve_multi(&matrix).unwrap()] {
         assert_eq!(solved.shape(), &[2, 2, 2]);
         assert_eq!(solved.values(), &[4.0, 8.0, 6.0, 8.0, 2.0, 4.0, 3.0, 4.0]);
@@ -2410,12 +2413,7 @@ fn solve_normalizes_source_storage_and_returns_declared_precision() {
     assert_eq!(result.dtype(), DType::Complex128);
     assert_eq!(result.values(), &[3.0, 2.0]);
 
-    let a = UFuncArray::new(
-        vec![2, 2],
-        vec![2.0, 0.0, 0.0, -3.0],
-        DType::Bool,
-    )
-    .unwrap();
+    let a = UFuncArray::new(vec![2, 2], vec![2.0, 0.0, 0.0, -3.0], DType::Bool).unwrap();
     let b = UFuncArray::new(vec![2], vec![4.0, -5.0], DType::Bool).unwrap();
     assert_eq!(a.solve(&b).unwrap().values(), &[1.0, 1.0]);
 
@@ -2471,12 +2469,9 @@ fn solve_empty_systems_preserve_shapes_and_skip_unvisited_factorizations() {
             vec![f64::NAN; 4],
             vec![f64::INFINITY; 4],
         ] {
-            let a = UFuncArray::from_storage_with_dtype(
-                vec![2, 2],
-                ArrayStorage::F64(values),
-                dtype,
-            )
-            .unwrap();
+            let a =
+                UFuncArray::from_storage_with_dtype(vec![2, 2], ArrayStorage::F64(values), dtype)
+                    .unwrap();
             let b = source(&[2, 0], dtype, 1);
             batch.solve_case(&a, &b, false);
             batch.solve_case(&a, &b, true);

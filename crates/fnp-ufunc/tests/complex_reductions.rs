@@ -3699,7 +3699,10 @@ fn selected_reductions_keep_complex_elements_and_initial_components_together() {
             &[6.0, 8.0]
         );
         assert_eq!(
-            array.reduce_prod_where(&mask, None, false).unwrap().values(),
+            array
+                .reduce_prod_where(&mask, None, false)
+                .unwrap()
+                .values(),
             &[-7.0, 16.0]
         );
 
@@ -3710,14 +3713,16 @@ fn selected_reductions_keep_complex_elements_and_initial_components_together() {
             UFuncArray::new(vec![2, 2], vec![0.0, 1.0, 1.0, 0.0], DType::Bool).unwrap();
         assert!(data.reduce_sum_where(&component_mask, None, false).is_err());
         let masked = MaskedArray::new(data, Some(component_mask), None).unwrap();
-        assert_eq!(masked.sum(None, false).unwrap().data().values(), &[1.0, 4.0]);
+        assert_eq!(
+            masked.sum(None, false).unwrap().data().values(),
+            &[1.0, 4.0]
+        );
     }
 }
 
 #[test]
 fn initial_reductions_seed_arithmetic_before_rounding_or_overflow() {
-    let array =
-        UFuncArray::new(vec![2, 2], vec![-1e16, -1e16, 1.0, 1.0], DType::F64).unwrap();
+    let array = UFuncArray::new(vec![2, 2], vec![-1e16, -1e16, 1.0, 1.0], DType::F64).unwrap();
     assert_eq!(
         array
             .reduce_sum_initial(Some(0), false, 1e16)
@@ -3727,11 +3732,13 @@ fn initial_reductions_seed_arithmetic_before_rounding_or_overflow() {
     );
     let array = UFuncArray::new(vec![2], vec![1e308, 1e308], DType::F64).unwrap();
     assert_eq!(
-        array.reduce_prod_initial(None, false, 0.0).unwrap().values(),
+        array
+            .reduce_prod_initial(None, false, 0.0)
+            .unwrap()
+            .values(),
         &[0.0]
     );
-    let array =
-        UFuncArray::new(vec![3], vec![1000.0, 0.001, 0.001], DType::F32).unwrap();
+    let array = UFuncArray::new(vec![3], vec![1000.0, 0.001, 0.001], DType::F32).unwrap();
     assert_eq!(
         array
             .reduce_prod_initial(None, false, 1000.0)
@@ -3831,8 +3838,7 @@ fn selected_and_initial_numeric_reductions_match_numpy_shapes_dtypes_and_bits() 
                     .unwrap(),
                 );
             }
-            let mask_inputs: Vec<usize> =
-                masks.iter().map(|mask| batch.add_input(mask)).collect();
+            let mask_inputs: Vec<usize> = masks.iter().map(|mask| batch.add_input(mask)).collect();
             for axis in [None, Some(0), Some(-1), Some(1)] {
                 for keepdims in [false, true] {
                     for operation in ["sum", "prod"] {
@@ -3950,15 +3956,7 @@ fn selected_reduction_runs_keep_pairwise_and_half_precision_boundaries() {
                     }
                 }
                 for axis in [None, Some(0), Some(-1)] {
-                    batch.push_selected(
-                        input,
-                        &array,
-                        operation,
-                        axis,
-                        false,
-                        None,
-                        Some(-1.25),
-                    );
+                    batch.push_selected(input, &array, operation, axis, false, None, Some(-1.25));
                 }
             }
         }
@@ -4001,12 +3999,7 @@ fn selected_reductions_preserve_exact_integers_source_truth_and_special_values()
         ),
     ];
     let masks = [
-        UFuncArray::new(
-            vec![2, 3],
-            vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0],
-            DType::Bool,
-        )
-        .unwrap(),
+        UFuncArray::new(vec![2, 3], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap(),
         UFuncArray::new(vec![3], vec![1e-50, 1.0, -0.0], DType::F32).unwrap(),
         complex_array(
             &[3],
@@ -4032,15 +4025,7 @@ fn selected_reductions_preserve_exact_integers_source_truth_and_special_values()
                     );
                 }
                 for initial in [-0.0, 3.0, 9_007_199_254_740_992.0] {
-                    batch.push_selected(
-                        input,
-                        array,
-                        operation,
-                        axis,
-                        false,
-                        None,
-                        Some(initial),
-                    );
+                    batch.push_selected(input, array, operation, axis, false, None, Some(initial));
                 }
             }
         }
@@ -4092,15 +4077,7 @@ fn selected_reductions_preserve_exact_integers_source_truth_and_special_values()
         for operation in ["sum", "prod"] {
             for axis in [None, Some(0), Some(-1)] {
                 for initial in [0.0, 3.0] {
-                    batch.push_selected(
-                        input,
-                        &raw,
-                        operation,
-                        axis,
-                        false,
-                        None,
-                        Some(initial),
-                    );
+                    batch.push_selected(input, &raw, operation, axis, false, None, Some(initial));
                 }
                 batch.push_selected(
                     input,
@@ -4116,12 +4093,9 @@ fn selected_reductions_preserve_exact_integers_source_truth_and_special_values()
         // Wide masks must also accept raw cells without demanding exact
         // sidecars; sidecar-backed masks retain their own exact truth values.
         if matches!(raw.dtype(), DType::I64 | DType::U64) {
-            let values = UFuncArray::new(
-                vec![2, 3],
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                DType::F64,
-            )
-            .unwrap();
+            let values =
+                UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+                    .unwrap();
             let values_input = batch.add_input(&values);
             for mask in [&raw, &typed] {
                 for operation in ["sum", "prod"] {
@@ -4150,15 +4124,7 @@ fn selected_reductions_preserve_exact_integers_source_truth_and_special_values()
                     -1.0,
                     2.0_f64.powi(64),
                 ] {
-                    batch.push_selected(
-                        input,
-                        &array,
-                        operation,
-                        axis,
-                        false,
-                        None,
-                        Some(initial),
-                    );
+                    batch.push_selected(input, &array, operation, axis, false, None, Some(initial));
                 }
             }
         }
@@ -4221,8 +4187,7 @@ fn selected_half_reductions_round_midpoint_neighbors_once_before_arithmetic() {
     let input = batch.add_input(&array);
     let masks = [
         include,
-        UFuncArray::new(vec![6], vec![1.0, 1.0, 0.0, 1.0, 1.0, 0.0], DType::Bool)
-            .unwrap(),
+        UFuncArray::new(vec![6], vec![1.0, 1.0, 0.0, 1.0, 1.0, 0.0], DType::Bool).unwrap(),
     ];
     for operation in ["sum", "prod"] {
         for axis in [None, Some(0), Some(-1)] {
@@ -4239,15 +4204,7 @@ fn selected_half_reductions_round_midpoint_neighbors_once_before_arithmetic() {
                 );
             }
             for initial in [0.0, 1.0] {
-                batch.push_selected(
-                    input,
-                    &array,
-                    operation,
-                    axis,
-                    false,
-                    None,
-                    Some(initial),
-                );
+                batch.push_selected(input, &array, operation, axis, false, None, Some(initial));
             }
         }
     }
@@ -4256,12 +4213,7 @@ fn selected_half_reductions_round_midpoint_neighbors_once_before_arithmetic() {
 
 #[test]
 fn selected_reduction_refactor_preserves_legacy_temporal_entry_points() {
-    let array = UFuncArray::new(
-        vec![3],
-        vec![1.0, 2.0, 3.0],
-        DType::TimeDelta64,
-    )
-    .unwrap();
+    let array = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::TimeDelta64).unwrap();
     let mask = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::Bool).unwrap();
     for (result, expected) in [
         (array.reduce_sum_initial(None, false, 4.0).unwrap(), 10.0),
