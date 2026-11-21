@@ -8968,6 +8968,22 @@ pub fn lstsq_svd(
         ));
     }
 
+    lstsq_svd_with_legacy_cutoff(a, b, m, n, 1, rcond)
+}
+
+/// Shared minimum-norm kernel for the legacy scalar and TSQR entry points.
+/// Both callers validate finite entries and their nonempty matrix/RHS shapes.
+/// Unlike the NumPy-facing multi-RHS API, zero retains every positive singular
+/// value and cutoffs >= 1 discard every mode. No matrix-wide scaling is used,
+/// preserving tiny independent directions beside very large entries.
+fn lstsq_svd_with_legacy_cutoff(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    nrhs: usize,
+    rcond: f64,
+) -> Result<LstsqResult, LinAlgError> {
     let (u, s, vt) = svd_mxn_reduced(a, m, n)?;
     let k = s.len();
     let sigma_max = s.first().copied().unwrap_or(0.0);
@@ -8979,47 +8995,69 @@ pub fn lstsq_svd(
 
     let rank = s.iter().filter(|&&value| value > threshold).count();
     let zero = ScaledReal::new(0.0);
-    let mut coefficients = complex_svd_buffer(k, zero)?;
+    let coefficient_len = k
+        .checked_mul(nrhs)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "lstsq_svd: coefficient dimensions overflow",
+        ))?;
+    let mut coefficients = complex_svd_buffer(coefficient_len, zero)?;
     // Only the k columns of reduced U participate in S^+ U^T b. Keep the
     // projection and division factored so neither an overflowing U^T b nor
     // the reciprocal of a subnormal singular value destroys a finite answer.
     for (index, &value) in s.iter().enumerate() {
         if value > threshold {
-            let mut projection = zero;
-            for row in 0..m {
-                projection = projection
-                    .sum(ScaledReal::new(u[row * k + index]).multiply(ScaledReal::new(b[row])));
+            for rhs in 0..nrhs {
+                let mut projection = zero;
+                for row in 0..m {
+                    projection = projection.sum(
+                        ScaledReal::new(u[row * k + index])
+                            .multiply(ScaledReal::new(b[row * nrhs + rhs])),
+                    );
+                }
+                coefficients[index * nrhs + rhs] = projection.quotient(ScaledReal::new(value));
             }
-            coefficients[index] = projection.quotient(ScaledReal::new(value));
         }
     }
-    let mut x = complex_svd_buffer(n, 0.0)?;
+    let result_len = n
+        .checked_mul(nrhs)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "lstsq_svd: result dimensions overflow",
+        ))?;
+    let mut x = complex_svd_buffer(result_len, 0.0)?;
     for row in 0..n {
-        let mut sum = zero;
-        for index in 0..k {
-            sum = sum.sum(ScaledReal::new(vt[index * n + row]).multiply(coefficients[index]));
+        for rhs in 0..nrhs {
+            let mut sum = zero;
+            for index in 0..k {
+                sum = sum.sum(
+                    ScaledReal::new(vt[index * n + row]).multiply(coefficients[index * nrhs + rhs]),
+                );
+            }
+            x[row * nrhs + rhs] = sum.value();
         }
-        x[row] = sum.value();
     }
 
     // A thin U has no orthogonal-complement columns. Compute ||b-Ax||^2
     // directly instead of materializing those unused m-k columns for residuals.
     let mut residuals = Vec::new();
     if rank == n && m > n {
-        let mut sum_sq = zero;
-        for row in 0..m {
-            let mut predicted = zero;
-            for col in 0..n {
-                predicted = predicted
-                    .sum(ScaledReal::new(a[row * n + col]).multiply(ScaledReal::new(x[col])));
-            }
-            let residual = ScaledReal::new(b[row]).sum(predicted.negated());
-            sum_sq = sum_sq.sum(residual.multiply(residual));
-        }
-        residuals.try_reserve_exact(1).map_err(|_| {
+        residuals.try_reserve_exact(nrhs).map_err(|_| {
             LinAlgError::ShapeContractViolation("lstsq_svd: unable to allocate residual")
         })?;
-        residuals.push(sum_sq.value());
+        for rhs in 0..nrhs {
+            let mut sum_sq = zero;
+            for row in 0..m {
+                let mut predicted = zero;
+                for col in 0..n {
+                    predicted = predicted.sum(
+                        ScaledReal::new(a[row * n + col])
+                            .multiply(ScaledReal::new(x[col * nrhs + rhs])),
+                    );
+                }
+                let residual = ScaledReal::new(b[row * nrhs + rhs]).sum(predicted.negated());
+                sum_sq = sum_sq.sum(residual.multiply(residual));
+            }
+            residuals.push(sum_sq.value());
+        }
     }
 
     Ok((x, residuals, rank, s))
@@ -9186,8 +9224,9 @@ pub fn lstsq_svd_multi(
 /// this is `allclose` to numpy with no sign divergence.
 ///
 /// Rank-deficient inputs (rank < n by the same singular-value threshold
-/// [`lstsq_svd`] uses) fall back to [`lstsq_svd`], which handles the minimum-norm
-/// solution and truncated pseudo-inverse.
+/// [`lstsq_svd`] uses) fall back to the same reduced-SVD kernel as [`lstsq_svd`],
+/// sharing one decomposition across all right-hand sides. This returns the
+/// minimum-norm solution and an empty residual array when rank < n.
 ///
 /// The fallback uses reduced singular factors and O(m*n + n*n) workspace;
 /// rank deficiency does not force a full m-by-m factor allocation.
@@ -9202,13 +9241,8 @@ pub fn lstsq_tsqr(
     match lstsq_tsqr_full_rank(a, b, m, n, k, rcond)? {
         Some(result) => Ok(result),
         // Rank-deficient: back substitution against a singular R is invalid; defer
-        // to the SVD minimum-norm path (which also matches numpy for rank < n).
-        // That path is single-right-hand-side, so a multi-column rank-deficient
-        // input is reported rather than silently solved for its first column.
-        None if k == 1 => lstsq_svd(a, b, m, n, rcond),
-        None => Err(LinAlgError::NormDetRankPolicyViolation(
-            "lstsq_tsqr: rank-deficient multi-right-hand-side input needs a minimum-norm solver",
-        )),
+        // to the shared SVD minimum-norm path using TSQR's legacy cutoff meaning.
+        None => lstsq_svd_with_legacy_cutoff(a, b, m, n, k, rcond),
     }
 }
 
@@ -27575,6 +27609,106 @@ except Exception as exc:
     }
 
     #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_returns_minimum_norm() {
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
+        let b = [1.0, 0.5, 2.0, 1.0, 2.0, 0.25, 5.0, 3.0];
+        assert!(
+            super::lstsq_tsqr_full_rank(&a, &b, 4, 2, 2, 1e-6)
+                .unwrap()
+                .is_none()
+        );
+        let (x, residuals, rank, s) = super::lstsq_tsqr(&a, &b, 4, 2, 2, 1e-6).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        // A = [1,2,3,4]^T [1,2]. The minimum-norm coefficient vector is
+        // [1,2]^T * ([1,2,3,4] b) / (30*5), separately for both RHS columns.
+        assert_oracle_vec(
+            "rank-deficient multi-RHS minimum norm",
+            &x,
+            &[31.0 / 150.0, 15.25 / 150.0, 62.0 / 150.0, 30.5 / 150.0],
+        );
+        assert!((s[0] / 150.0_f64.sqrt() - 1.0).abs() < 1e-13);
+        assert!(s[1] < 1e-12);
+        for rhs in 0..2 {
+            let column: Vec<_> = b.chunks_exact(2).map(|row| row[rhs]).collect();
+            let scalar = super::lstsq_svd(&a, &column, 4, 2, 1e-6).unwrap();
+            assert_eq!(rank, scalar.2);
+            assert_eq!(s, scalar.3);
+            for row in 0..2 {
+                assert_eq!(x[row * 2 + rhs].to_bits(), scalar.0[row].to_bits());
+            }
+        }
+
+        // Rank deficiency must not reintroduce a square factor for a tall batch.
+        let rows = 20_000;
+        let a = vec![1.0; rows * 2];
+        let b: Vec<_> = (0..rows)
+            .flat_map(|row| {
+                if row % 2 == 0 {
+                    [2.0, -4.0]
+                } else {
+                    [4.0, -8.0]
+                }
+            })
+            .collect();
+        let (x, residuals, rank, _) = super::lstsq_tsqr(&a, &b, rows, 2, 2, -1.0).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        for (value, expected) in x.iter().zip([1.5, -3.0, 1.5, -3.0]) {
+            assert!((value - expected).abs() < 2e-10);
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_preserves_legacy_cutoffs() {
+        let a = [1.0, 0.0, 0.0, 0.0, 2e-16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [1.0, 2.0, 2e-16, 6e-16, 5.0, 7.0, 11.0, 13.0];
+        for (rcond, rank, expected) in [
+            (0.0, 2, [1.0, 2.0, 1.0, 3.0, 0.0, 0.0]),
+            (-1.0, 1, [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+            (0.5, 1, [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+            (1.0, 0, [0.0; 6]),
+            (f64::INFINITY, 0, [0.0; 6]),
+            (f64::NAN, 0, [0.0; 6]),
+        ] {
+            let result = super::lstsq_tsqr(&a, &b, 4, 3, 2, rcond).unwrap();
+            assert_eq!(result.2, rank, "rcond={rcond}");
+            assert!(result.1.is_empty(), "rcond={rcond}");
+            assert_oracle_vec("legacy TSQR cutoff", &result.0, &expected);
+        }
+    }
+
+    #[test]
+    fn lstsq_legacy_multi_rhs_keeps_extreme_independent_directions() {
+        // A global normalization erases the second mode. With rcond=0 it is
+        // explicitly requested, so the shared fallback must keep its exponent.
+        let a = [1e300, 0.0, 0.0, 0.0, 1e-300, 0.0, 0.0, 0.0, 0.0];
+        let b = [1e300, 2e300, 1e-300, -3e-300, 1.0, 2.0];
+        let (x, residuals, rank, s) =
+            super::lstsq_svd_with_legacy_cutoff(&a, &b, 3, 3, 2, 0.0).unwrap();
+        assert_eq!(rank, 2);
+        assert!(residuals.is_empty());
+        assert_eq!(s, [1e300, 1e-300, 0.0]);
+        assert_oracle_vec(
+            "independent extreme directions",
+            &x,
+            &[1.0, 2.0, 1.0, -3.0, 0.0, 0.0],
+        );
+
+        // Both RHS are finite, but U^T b for one overflows while the other
+        // solution is subnormal. Shared decomposition must preserve both.
+        let a = [1e308, 0.0, 1e308, 0.0];
+        let b = [1.7e308, 1.0, 1.7e308, 1.0];
+        let (x, residuals, rank, _) =
+            super::lstsq_svd_with_legacy_cutoff(&a, &b, 2, 2, 2, -1.0).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        assert!((x[0] - 1.7).abs() < 1e-13);
+        assert!((x[1] / 1e-308 - 1.0).abs() < 1e-13);
+        assert_eq!(x[2..], [0.0, 0.0]);
+    }
+
+    #[test]
     fn tsqr_qtb_and_lstsq_tsqr_reject_malformed_shapes() {
         // Wide (m < n).
         assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1.0, 2.0], 2, 3, 1).is_err());
@@ -27590,19 +27724,6 @@ except Exception as exc:
         );
         // a length must equal m*n.
         assert!(super::lstsq_tsqr(&[1.0, 2.0, 3.0], &[1.0, 2.0], 2, 2, 1, -1.0).is_err());
-        // Rank-deficient multi-RHS has no minimum-norm path here and must report,
-        // never silently solve only the first column.
-        assert!(
-            super::lstsq_tsqr(
-                &[1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0],
-                &[1.0, 0.5, 2.0, 1.0, 2.0, 0.25, 5.0, 3.0],
-                4,
-                2,
-                2,
-                1e-6,
-            )
-            .is_err()
-        );
     }
 
     /// The A-packed GEMM kernel must agree with the incumbent tiled kernel to the BIT.

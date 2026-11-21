@@ -1329,6 +1329,61 @@ fn real_multi_rhs_lstsq_preserves_scaled_projections_and_rejects_invalid_inputs(
 }
 
 #[test]
+fn real_tsqr_rank_deficient_multi_rhs_matches_numpy() {
+    let mut cases = Vec::new();
+    for (m, n, nrhs) in [(4, 2, 2), (11, 3, 4), (257, 4, 2)] {
+        let mut base_a = vec![0.0; m * n];
+        for row in 0..m {
+            for col in 0..n - 1 {
+                base_a[row * n + col] = (((row * 7 + col * 5 + 3) % 17) as f64 - 8.0) / 4.0;
+                if row == col {
+                    base_a[row * n + col] += 2.0;
+                }
+            }
+            base_a[row * n + n - 1] = base_a[row * n];
+        }
+        let base_b: Vec<_> = (0..m * nrhs)
+            .map(|index| ((index * 3 + 1) % 11) as f64 - 5.0)
+            .collect();
+        for scale in [1e-40, 1.0, 1e40] {
+            let a: Vec<_> = base_a.iter().map(|value| value * scale).collect();
+            let b: Vec<_> = base_b.iter().map(|value| value * scale).collect();
+            for rcond in [-1.0, 1e-4, 0.5] {
+                let (x, residuals, rank, values) =
+                    fnp_linalg::lstsq_tsqr(&a, &b, m, n, nrhs, rcond).unwrap();
+                assert!(rank < n);
+                assert!(residuals.is_empty());
+                cases.push(format!(
+                    r#"{{"m":{m},"n":{n},"nrhs":{nrhs},"a":{a:?},"b":{b:?},"x":{x:?},"residuals":{residuals:?},"rank":{rank},"values":{values:?},"rcond":{rcond}}}"#
+                ));
+            }
+        }
+    }
+    assert_numpy_multi_rhs_cases(
+        r#"
+import json, sys
+import numpy as np
+for case in json.load(sys.stdin):
+    m, n, nrhs = case['m'], case['n'], case['nrhs']
+    a = np.array(case['a'], dtype=np.float64).reshape(m, n)
+    b = np.array(case['b'], dtype=np.float64).reshape(m, nrhs)
+    # TSQR's legacy negative cutoff selects the dimension-scaled default.
+    rcond = None if case['rcond'] < 0 else case['rcond']
+    x, residuals, rank, values = np.linalg.lstsq(a, b, rcond=rcond)
+    assert case['rank'] == rank, (case, rank)
+    assert len(case['residuals']) == residuals.size == 0
+    got_x = np.array(case['x'], dtype=np.float64).reshape(n, nrhs)
+    xscale = float(np.max(np.abs(x), initial=0.0)) or 1.0
+    sscale = float(np.max(np.abs(values), initial=0.0)) or 1.0
+    np.testing.assert_allclose(got_x / xscale, x / xscale, rtol=2e-10, atol=2e-11)
+    np.testing.assert_allclose(np.array(case['values']) / sscale, values / sscale,
+                               rtol=2e-10, atol=2e-11)
+"#,
+        &cases,
+    );
+}
+
+#[test]
 fn complex_multi_rhs_solve_matches_numpy() {
     let mut cases = Vec::new();
     for n in [0, 1, 2, 5] {
