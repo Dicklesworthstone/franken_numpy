@@ -4384,8 +4384,21 @@ fn svd_bidiag_values_with_max_iters(
     match values_res {
         Ok(sigmas) => Ok(sigmas),
         Err(LinAlgError::SvdNonConvergence) => {
-            let (_, sigmas, _) = svd_via_jacobi_full(a, m, n)?;
-            Ok(sigmas)
+            // Singular values need no orthogonal-complement factors. The full
+            // Jacobi fallback both allocated m*m cells and used a dimensional
+            // sigma tolerance to complete unit vectors, failing at large scales.
+            // The extended-exponent values-only kernel avoids both hazards.
+            let components = a
+                .len()
+                .checked_mul(2)
+                .ok_or(LinAlgError::ShapeContractViolation(
+                    "svd: component dimensions overflow",
+                ))?;
+            let mut interleaved = complex_svd_buffer(components, 0.0)?;
+            for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+                pair[0] = value;
+            }
+            complex_svd_mxn(&interleaved, m, n)
         }
         Err(err) => Err(err),
     }
@@ -5079,8 +5092,8 @@ fn svd_values_from_bidiag(
 /// future gate would select is a single named function that can be tested as a unit.
 ///
 /// Same signature and same error contract as `svd_bidiag_qr_values`, deliberately: it returns
-/// `SvdNonConvergence` on failure, which is what the existing caller already catches to fall back
-/// to `svd_via_jacobi_full`. Swapping it in therefore keeps the Jacobi fallback intact for free.
+/// `SvdNonConvergence` on failure, which is what the existing caller catches to fall back
+/// to the bounded, extended-exponent Jacobi values-only kernel.
 ///
 /// Requires `m >= n`; the caller transposes wide inputs before reaching here.
 fn svd_values_blocked(
@@ -13678,6 +13691,44 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
     Ok((q, r))
 }
 
+/// Compensated accumulation with the projection's extended exponent range.
+/// A long column must not lose its small terms just because its leading
+/// entries have already accumulated a much larger partial sum.
+fn reduced_qr_accumulate(sum: &mut ScaledReal, correction: &mut ScaledReal, term: ScaledReal) {
+    let next = sum.sum(term);
+    let sum_is_larger = term.significand == 0.0
+        || (sum.significand != 0.0
+            && (sum.exponent > term.exponent
+                || (sum.exponent == term.exponent
+                    && sum.significand.abs() >= term.significand.abs())));
+    let error = if sum_is_larger {
+        sum.sum(next.negated()).sum(term)
+    } else {
+        term.sum(next.negated()).sum(*sum)
+    };
+    *correction = correction.sum(error);
+    *sum = next;
+}
+
+/// Norm of a reflector whose components have already been scaled. Keep the
+/// summation error separate: ordinary left-to-right sums distort a long
+/// reflector enough to lose reconstruction accuracy in its leading rows.
+fn reduced_qr_reflector_norm(components: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for &component in components {
+        let square = component * component;
+        let next = sum + square;
+        correction += if sum >= square {
+            (sum - next) + square
+        } else {
+            (square - next) + sum
+        };
+        sum = next;
+    }
+    (sum + correction).sqrt()
+}
+
 /// Apply I - 2*v*v^H to the trailing rows and columns of a row-major matrix.
 /// The reflector is unit length and stores a full column of interleaved values.
 /// Products and the subtraction keep separate binary exponents: even when the
@@ -13693,6 +13744,8 @@ fn reduced_qr_apply_reflector(
     for column in first..columns {
         let mut dot_re = ScaledReal::new(0.0);
         let mut dot_im = ScaledReal::new(0.0);
+        let mut correction_re = ScaledReal::new(0.0);
+        let mut correction_im = ScaledReal::new(0.0);
         for row in first..rows {
             let at = 2 * (row * columns + column);
             let (re, im) = complex_product_scaled(
@@ -13701,11 +13754,11 @@ fn reduced_qr_apply_reflector(
                 matrix[at],
                 matrix[at + 1],
             );
-            dot_re = dot_re.sum(re);
-            dot_im = dot_im.sum(im);
+            reduced_qr_accumulate(&mut dot_re, &mut correction_re, re);
+            reduced_qr_accumulate(&mut dot_im, &mut correction_im, im);
         }
-        dot_re = dot_re.multiply(two);
-        dot_im = dot_im.multiply(two);
+        dot_re = dot_re.sum(correction_re).multiply(two);
+        dot_im = dot_im.sum(correction_im).multiply(two);
         for row in first..rows {
             let at = 2 * (row * columns + column);
             let vr = ScaledReal::new(reflector[2 * row]);
@@ -13777,20 +13830,14 @@ pub fn complex_qr_mxn_reduced(
             let magnitude = re.hypot(im);
             (re / magnitude, im / magnitude)
         };
-        let mut norm_sq = 0.0;
         for pair in v[pivot..].chunks_exact_mut(2) {
             pair[0] /= scale;
             pair[1] /= scale;
-            norm_sq += cabs2(pair[0], pair[1]);
         }
-        let norm = norm_sq.sqrt();
+        let norm = reduced_qr_reflector_norm(&v[pivot..]);
         v[pivot] += phase_re * norm;
         v[pivot + 1] += phase_im * norm;
-        let vector_norm = v[pivot..]
-            .chunks_exact(2)
-            .map(|pair| cabs2(pair[0], pair[1]))
-            .sum::<f64>()
-            .sqrt();
+        let vector_norm = reduced_qr_reflector_norm(&v[pivot..]);
         for component in &mut v[pivot..] {
             *component /= vector_norm;
         }
@@ -23862,6 +23909,41 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
     }
 
     #[test]
+    fn svd_values_fallback_handles_extreme_scales_without_full_factors() {
+        for scale in [1e-300, 1e-100, 1.0, 1e100, 1e300] {
+            let a = [
+                3.0 * scale,
+                0.0,
+                0.0,
+                0.0,
+                4.0 * scale,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ];
+            for (matrix, m, n) in [(a.to_vec(), 4, 3), (super::transpose_mat(&a, 4, 3), 3, 4)] {
+                let values = super::svd_bidiag_values_with_max_iters(&matrix, m, n, 0)
+                    .expect("forced values-only Jacobi fallback");
+                assert_eq!(values.len(), 3);
+                assert!((values[0] / scale - 4.0).abs() < 1e-13);
+                assert!((values[1] / scale - 3.0).abs() < 1e-13);
+                assert_eq!(values[2], 0.0);
+            }
+        }
+        // A failed QR iteration must not change the memory contract of a
+        // values-only request. Full U here would require roughly 80 GB.
+        let length = 100_000;
+        let values =
+            super::svd_bidiag_values_with_max_iters(&vec![1.0; length], length, 1, 0).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!((values[0] / (length as f64).sqrt() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn svd_fallback_reconstructs_when_qr_budget_is_zero() {
         let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let (u, s, vt) = svd_bidiag_full_with_max_iters(&a, 3, 2, 0).expect("fallback svd");
@@ -25007,6 +25089,94 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
         let (dr, di) = complex_det_nxn(&a, 2).expect("det");
         assert!((dr - 11.0).abs() < 1e-12, "re={dr}");
         assert!((di - 10.0).abs() < 1e-12, "im={di}");
+    }
+
+    #[test]
+    fn complex_slogdet_preserves_phase_without_forming_the_determinant_product() {
+        assert_eq!(super::complex_slogdet_nxn(&[], 0), Ok(((1.0, 0.0), 0.0)));
+        let a = [1.0, 2.0, 3.0, -1.0, 0.0, 2.0, 4.0, 0.0];
+        let ((real, imag), logarithm) = super::complex_slogdet_nxn(&a, 2).unwrap();
+        assert_oracle("slogdet phase real", real, std::f64::consts::FRAC_1_SQRT_2);
+        assert_oracle("slogdet phase imag", imag, std::f64::consts::FRAC_1_SQRT_2);
+        assert_oracle("slogdet log magnitude", logarithm, 0.5 * 8.0_f64.ln());
+
+        for scale in [1e-200, 1e200] {
+            // det = -2*scale^2 would underflow/overflow; the logarithm is finite.
+            let a = [scale, scale, 0.0, 0.0, 0.0, 0.0, -scale, scale];
+            let ((real, imag), logarithm) = super::complex_slogdet_nxn(&a, 2).unwrap();
+            assert_oracle("scaled determinant phase real", real, -1.0);
+            assert_oracle("scaled determinant phase imag", imag, 0.0);
+            assert_oracle(
+                "scaled determinant logarithm",
+                logarithm,
+                2.0 * scale.ln() + 2.0_f64.ln(),
+            );
+        }
+        assert_eq!(
+            super::complex_slogdet_nxn(&[1.0, 1.0, 2.0, -1.0, 1.0, 1.0, 2.0, -1.0], 2),
+            Ok(((0.0, 0.0), f64::NEG_INFINITY))
+        );
+        assert!(super::complex_slogdet_nxn(&[1.0], 1).is_err());
+        assert!(super::complex_slogdet_nxn(&[], usize::MAX).is_err());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(super::complex_slogdet_nxn(&[value, 0.0], 1).is_err());
+            assert!(super::complex_slogdet_nxn(&[0.0, value], 1).is_err());
+        }
+    }
+
+    #[test]
+    fn complex_slogdet_matches_numpy_across_phases_and_extreme_magnitudes() {
+        assert!(
+            numpy_oracle_available(),
+            "complex slogdet parity requires NumPy; set FNP_ORACLE_PYTHON"
+        );
+        let tiny = f64::from_bits(1);
+        let mut inputs = vec![
+            (0, Vec::new()),
+            (1, vec![tiny, tiny]),
+            (1, vec![-tiny, tiny]),
+            (1, vec![f64::MAX, f64::MAX]),
+            (1, vec![0.0, 0.0]),
+            (2, vec![1.0, 1.0, 2.0, -1.0, 1.0, 1.0, 2.0, -1.0]),
+            (2, vec![0.0, 0.0, 1.0, 2.0, 3.0, -1.0, 4.0, 0.5]),
+        ];
+        for scale in [1e-200, 1.0, 1e200] {
+            inputs.push((2, vec![scale, scale, 0.0, 0.0, 0.0, 0.0, -scale, scale]));
+        }
+        for n in [2, 3, 7] {
+            let a = tsqr_test_matrix(2 * n, n, 0x431A);
+            inputs.push((n, a));
+        }
+        let mut cases = Vec::new();
+        for (n, a) in inputs {
+            let ((real, imag), logarithm) = super::complex_slogdet_nxn(&a, n).unwrap();
+            // Strings preserve nonfinite outputs while keeping valid JSON.
+            cases.push(format!("[{n},{a:?},\"{real}\",\"{imag}\",\"{logarithm}\"]"));
+        }
+        let script = r#"
+import json, sys
+import numpy as np
+with np.errstate(all='ignore'):
+    for n, values, real, imag, logarithm in json.loads(sys.argv[1]):
+        a = np.array(values, dtype=np.float64).view(np.complex128).reshape(n, n)
+        phase, expected_log = np.linalg.slogdet(a)
+        np.testing.assert_allclose([float(real), float(imag), float(logarithm)],
+                                   [phase.real, phase.imag, expected_log],
+                                   rtol=2e-12, atol=2e-12)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .arg("-c")
+            .arg(script)
+            .arg(format!("[{}]", cases.join(",")))
+            .output()
+            .expect("run complex slogdet NumPy oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -27524,6 +27694,213 @@ except Exception as exc:
         assert_eq!(s_t.len(), s_svd.len());
     }
 
+    #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_returns_minimum_norm() {
+        // A = [t, 2t]. The minimum-norm solution for each b is
+        // [1, 2] * (t^T b) / (5 * t^T t), including inconsistent columns.
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
+        let b = [1.0, 0.5, 2.0, 1.0, 2.0, 0.25, 5.0, 3.0];
+        assert!(
+            super::lstsq_tsqr_full_rank(&a, &b, 4, 2, 2, 1e-6)
+                .unwrap()
+                .is_none()
+        );
+        let (x, residuals, rank, values) = super::lstsq_tsqr(&a, &b, 4, 2, 2, 1e-6).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        assert_oracle_vec(
+            "rank-deficient multi-RHS minimum norm",
+            &x,
+            &[31.0 / 150.0, 15.25 / 150.0, 62.0 / 150.0, 30.5 / 150.0],
+        );
+        assert_oracle("rank-one singular value", values[0], 150.0_f64.sqrt());
+        assert!(values[1] < 1e-12);
+        for rhs in 0..2 {
+            let column: Vec<_> = b.chunks_exact(2).map(|row| row[rhs]).collect();
+            let scalar = super::lstsq_svd(&a, &column, 4, 2, 1e-6).unwrap();
+            assert_eq!(rank, scalar.2);
+            assert_eq!(values, scalar.3);
+            for row in 0..2 {
+                assert_eq!(x[row * 2 + rhs].to_bits(), scalar.0[row].to_bits());
+            }
+            // Orthogonality to the null vector [-2, 1] identifies the
+            // minimum-norm solution among the infinitely many minimizers.
+            assert!((x[2 + rhs] - 2.0 * x[rhs]).abs() < 1e-12);
+            for col in 0..2 {
+                let gradient: f64 = (0..4)
+                    .map(|row| {
+                        let predicted = a[2 * row] * x[rhs] + a[2 * row + 1] * x[2 + rhs];
+                        a[2 * row + col] * (b[2 * row + rhs] - predicted)
+                    })
+                    .sum();
+                assert!(gradient.abs() < 1e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_preserves_legacy_cutoffs() {
+        // The exact zero third direction forces the fallback at every cutoff.
+        // The tiny second direction distinguishes zero from the default cutoff.
+        let a = [1.0, 0.0, 0.0, 0.0, 2e-16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [1.0, 2.0, 6e-16, -8e-16, 3.0, 4.0, -2.0, 5.0];
+        for (cutoff, expected_rank) in [
+            (-1.0, 1),
+            (f64::NEG_INFINITY, 1),
+            (-0.0, 2),
+            (0.0, 2),
+            (1e-12, 1),
+            (1.0, 0),
+            (2.0, 0),
+            (f64::INFINITY, 0),
+            (f64::NAN, 0),
+        ] {
+            let (x, residuals, rank, _) = super::lstsq_tsqr(&a, &b, 4, 3, 2, cutoff).unwrap();
+            assert_eq!(rank, expected_rank, "cutoff={cutoff}");
+            assert!(residuals.is_empty());
+            let expected = match expected_rank {
+                2 => [1.0, 2.0, 3.0, -4.0, 0.0, 0.0],
+                1 => [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+                _ => [0.0; 6],
+            };
+            assert_oracle_vec("TSQR literal cutoff", &x, &expected);
+        }
+        // An infinite relative cutoff on an all-zero matrix gives 0*infinity
+        // in the threshold. Every mode is discarded; no 0/0 coefficient leaks.
+        let (x, residuals, rank, _) =
+            super::lstsq_tsqr(&[0.0; 12], &b, 4, 3, 2, f64::INFINITY).unwrap();
+        assert_eq!(x, [0.0; 6]);
+        assert!(residuals.is_empty());
+        assert_eq!(rank, 0);
+        for nrhs in [1, 2] {
+            let rhs = &b[..4 * nrhs];
+            let (x, residuals, rank, _) = super::lstsq_tsqr(&a, rhs, 4, 3, nrhs, f64::NAN).unwrap();
+            assert_eq!(x, vec![0.0; 3 * nrhs]);
+            assert!(residuals.is_empty());
+            assert_eq!(rank, 0);
+            assert!(
+                super::lstsq_tsqr_full_rank(&a, rhs, 4, 3, nrhs, f64::NAN)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn lstsq_legacy_multi_rhs_keeps_extreme_independent_directions() {
+        // A global normalization erases the second mode. With rcond=0 it is
+        // explicitly requested, so the shared fallback must keep its exponent.
+        let a = [1e300, 0.0, 0.0, 0.0, 1e-300, 0.0, 0.0, 0.0, 0.0];
+        let b = [1e300, 2e300, 1e-300, -3e-300, 1.0, 2.0];
+        let (x, residuals, rank, s) =
+            super::lstsq_svd_with_legacy_cutoff(&a, &b, 3, 3, 2, 0.0).unwrap();
+        assert_eq!(rank, 2);
+        assert!(residuals.is_empty());
+        assert_eq!(s, [1e300, 1e-300, 0.0]);
+        assert_oracle_vec(
+            "independent extreme directions",
+            &x,
+            &[1.0, 2.0, 1.0, -3.0, 0.0, 0.0],
+        );
+
+        // Both RHS are finite, but U^T b for one overflows while the other
+        // solution is subnormal. Shared decomposition must preserve both.
+        let a = [1e308, 0.0, 1e308, 0.0];
+        let b = [1.7e308, 1.0, 1.7e308, 1.0];
+        let (x, residuals, rank, _) =
+            super::lstsq_svd_with_legacy_cutoff(&a, &b, 2, 2, 2, -1.0).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        assert!((x[0] - 1.7).abs() < 1e-13);
+        assert!((x[1] / 1e-308 - 1.0).abs() < 1e-13);
+        assert_eq!(x[2..], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_stays_bounded_for_large_tall_inputs() {
+        // A full left singular factor would require 80 GB. Only linear-size
+        // inputs and reduced factors are needed for this rank-one problem.
+        let m = 100_000;
+        let a: Vec<_> = (0..m).flat_map(|_| [1.0, 2.0]).collect();
+        let b: Vec<_> = (0..m)
+            .flat_map(|row| {
+                let value = if row % 2 == 0 { 2.0 } else { 4.0 };
+                [value, -2.0 * value, value - 3.0]
+            })
+            .collect();
+        let (x, residuals, rank, values) = super::lstsq_tsqr(&a, &b, m, 2, 3, -1.0).unwrap();
+        assert_eq!(rank, 1);
+        assert!(residuals.is_empty());
+        assert_eq!(x.len(), 6);
+        for (&actual, expected) in x.iter().zip([0.6, -1.2, 0.0, 1.2, -2.4, 0.0]) {
+            assert!((actual - expected).abs() < 2e-10);
+        }
+        assert!((values[0] / (5.0 * m as f64).sqrt() - 1.0).abs() < 2e-10);
+        assert!(values[1] < 1e-10);
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_multi_rhs_matches_live_numpy() {
+        assert!(
+            numpy_oracle_available(),
+            "TSQR minimum-norm parity requires NumPy; set FNP_ORACLE_PYTHON"
+        );
+        let mut cases = Vec::new();
+        for (m, n, nrhs) in [(4, 2, 2), (6, 3, 3), (3, 3, 4), (4, 2, 1)] {
+            let mut base_a = tsqr_test_matrix(m, n, 0x4A53);
+            for row in 0..m {
+                base_a[row * n + n - 1] = base_a[row * n];
+            }
+            let base_b = tsqr_test_matrix(m, nrhs, 0x7BC9);
+            for scale in [1e-100, 1.0, 1e100] {
+                let a: Vec<_> = base_a.iter().map(|value| value * scale).collect();
+                let b: Vec<_> = base_b.iter().map(|value| value * scale).collect();
+                for cutoff in [-1.0, 1e-8, 0.1] {
+                    let (x, residuals, rank, values) = super::lstsq_tsqr(
+                        &a, &b, m, n, nrhs, cutoff,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "TSQR {m}x{n}, nrhs={nrhs}, scale={scale}, cutoff={cutoff}: {error:?}"
+                        )
+                    });
+                    cases.push(format!(
+                        "[{m},{n},{nrhs},{cutoff},{a:?},{b:?},{x:?},{residuals:?},{rank},{values:?}]"
+                    ));
+                }
+            }
+        }
+        let script = r#"
+import json, sys
+import numpy as np
+for m, n, nrhs, cutoff, a, b, x, residuals, rank, values in json.loads(sys.argv[1]):
+    a = np.array(a).reshape(m, n)
+    b = np.array(b).reshape(m, nrhs)
+    x = np.array(x).reshape(n, nrhs)
+    expected_x, expected_r, expected_rank, expected_s = np.linalg.lstsq(
+        a, b, rcond=None if cutoff < 0 else cutoff)
+    assert rank == expected_rank, (m, n, nrhs, cutoff, rank, expected_rank)
+    np.testing.assert_allclose(x, expected_x, rtol=2e-10, atol=2e-11)
+    np.testing.assert_allclose(residuals, expected_r, rtol=2e-10, atol=2e-11)
+    scale = max(expected_s, default=1.0)
+    np.testing.assert_allclose(np.array(values) / scale, expected_s / scale,
+                               rtol=2e-10, atol=2e-11)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .arg("-c")
+            .arg(script)
+            .arg(format!("[{}]", cases.join(",")))
+            .output()
+            .expect("run TSQR NumPy oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// The K-column reduction must reproduce the single-right-hand-side path it
     /// generalises EXACTLY, not merely closely: R never sees `b` at all, and each
     /// column's reflector application accumulates only its own values in the same
@@ -27609,106 +27986,6 @@ except Exception as exc:
     }
 
     #[test]
-    fn lstsq_tsqr_rank_deficient_multi_rhs_returns_minimum_norm() {
-        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
-        let b = [1.0, 0.5, 2.0, 1.0, 2.0, 0.25, 5.0, 3.0];
-        assert!(
-            super::lstsq_tsqr_full_rank(&a, &b, 4, 2, 2, 1e-6)
-                .unwrap()
-                .is_none()
-        );
-        let (x, residuals, rank, s) = super::lstsq_tsqr(&a, &b, 4, 2, 2, 1e-6).unwrap();
-        assert_eq!(rank, 1);
-        assert!(residuals.is_empty());
-        // A = [1,2,3,4]^T [1,2]. The minimum-norm coefficient vector is
-        // [1,2]^T * ([1,2,3,4] b) / (30*5), separately for both RHS columns.
-        assert_oracle_vec(
-            "rank-deficient multi-RHS minimum norm",
-            &x,
-            &[31.0 / 150.0, 15.25 / 150.0, 62.0 / 150.0, 30.5 / 150.0],
-        );
-        assert!((s[0] / 150.0_f64.sqrt() - 1.0).abs() < 1e-13);
-        assert!(s[1] < 1e-12);
-        for rhs in 0..2 {
-            let column: Vec<_> = b.chunks_exact(2).map(|row| row[rhs]).collect();
-            let scalar = super::lstsq_svd(&a, &column, 4, 2, 1e-6).unwrap();
-            assert_eq!(rank, scalar.2);
-            assert_eq!(s, scalar.3);
-            for row in 0..2 {
-                assert_eq!(x[row * 2 + rhs].to_bits(), scalar.0[row].to_bits());
-            }
-        }
-
-        // Rank deficiency must not reintroduce a square factor for a tall batch.
-        let rows = 20_000;
-        let a = vec![1.0; rows * 2];
-        let b: Vec<_> = (0..rows)
-            .flat_map(|row| {
-                if row % 2 == 0 {
-                    [2.0, -4.0]
-                } else {
-                    [4.0, -8.0]
-                }
-            })
-            .collect();
-        let (x, residuals, rank, _) = super::lstsq_tsqr(&a, &b, rows, 2, 2, -1.0).unwrap();
-        assert_eq!(rank, 1);
-        assert!(residuals.is_empty());
-        for (value, expected) in x.iter().zip([1.5, -3.0, 1.5, -3.0]) {
-            assert!((value - expected).abs() < 2e-10);
-        }
-    }
-
-    #[test]
-    fn lstsq_tsqr_rank_deficient_multi_rhs_preserves_legacy_cutoffs() {
-        let a = [1.0, 0.0, 0.0, 0.0, 2e-16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let b = [1.0, 2.0, 2e-16, 6e-16, 5.0, 7.0, 11.0, 13.0];
-        for (rcond, rank, expected) in [
-            (0.0, 2, [1.0, 2.0, 1.0, 3.0, 0.0, 0.0]),
-            (-1.0, 1, [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
-            (0.5, 1, [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
-            (1.0, 0, [0.0; 6]),
-            (f64::INFINITY, 0, [0.0; 6]),
-            (f64::NAN, 0, [0.0; 6]),
-        ] {
-            let result = super::lstsq_tsqr(&a, &b, 4, 3, 2, rcond).unwrap();
-            assert_eq!(result.2, rank, "rcond={rcond}");
-            assert!(result.1.is_empty(), "rcond={rcond}");
-            assert_oracle_vec("legacy TSQR cutoff", &result.0, &expected);
-        }
-    }
-
-    #[test]
-    fn lstsq_legacy_multi_rhs_keeps_extreme_independent_directions() {
-        // A global normalization erases the second mode. With rcond=0 it is
-        // explicitly requested, so the shared fallback must keep its exponent.
-        let a = [1e300, 0.0, 0.0, 0.0, 1e-300, 0.0, 0.0, 0.0, 0.0];
-        let b = [1e300, 2e300, 1e-300, -3e-300, 1.0, 2.0];
-        let (x, residuals, rank, s) =
-            super::lstsq_svd_with_legacy_cutoff(&a, &b, 3, 3, 2, 0.0).unwrap();
-        assert_eq!(rank, 2);
-        assert!(residuals.is_empty());
-        assert_eq!(s, [1e300, 1e-300, 0.0]);
-        assert_oracle_vec(
-            "independent extreme directions",
-            &x,
-            &[1.0, 2.0, 1.0, -3.0, 0.0, 0.0],
-        );
-
-        // Both RHS are finite, but U^T b for one overflows while the other
-        // solution is subnormal. Shared decomposition must preserve both.
-        let a = [1e308, 0.0, 1e308, 0.0];
-        let b = [1.7e308, 1.0, 1.7e308, 1.0];
-        let (x, residuals, rank, _) =
-            super::lstsq_svd_with_legacy_cutoff(&a, &b, 2, 2, 2, -1.0).unwrap();
-        assert_eq!(rank, 1);
-        assert!(residuals.is_empty());
-        assert!((x[0] - 1.7).abs() < 1e-13);
-        assert!((x[1] / 1e-308 - 1.0).abs() < 1e-13);
-        assert_eq!(x[2..], [0.0, 0.0]);
-    }
-
-    #[test]
     fn tsqr_qtb_and_lstsq_tsqr_reject_malformed_shapes() {
         // Wide (m < n).
         assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1.0, 2.0], 2, 3, 1).is_err());
@@ -27724,6 +28001,18 @@ except Exception as exc:
         );
         // a length must equal m*n.
         assert!(super::lstsq_tsqr(&[1.0, 2.0, 3.0], &[1.0, 2.0], 2, 2, 1, -1.0).is_err());
+        // The right-hand-side panel must be validated before fallback too.
+        assert!(
+            super::lstsq_tsqr(
+                &[1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0],
+                &[1.0, 0.5, 2.0, 1.0, 2.0, f64::NAN, 5.0, 3.0],
+                4,
+                2,
+                2,
+                1e-6,
+            )
+            .is_err()
+        );
     }
 
     /// The A-packed GEMM kernel must agree with the incumbent tiled kernel to the BIT.
