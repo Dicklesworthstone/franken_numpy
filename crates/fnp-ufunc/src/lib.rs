@@ -30924,11 +30924,96 @@ impl UFuncArray {
 
     // ── FFT (Fast Fourier Transform) ────────────────────────────────
 
+    /// Execute full transforms on logical complex axes. The trailing component
+    /// axis is storage metadata, and every output retains its complex dtype so
+    /// subsequent transforms continue to see the same logical array.
+    fn typed_complex_fft(
+        &self,
+        n: Option<usize>,
+        axis_count: Option<usize>,
+        inverse: bool,
+        operation: &str,
+    ) -> Result<Self, UFuncError> {
+        let mut shape = self.complex_logical_shape(operation)?;
+        let ndim = shape.len();
+        let count = axis_count.unwrap_or(ndim);
+        if count > ndim {
+            return Err(UFuncError::AxisOutOfBounds {
+                axis: -(count as isize),
+                ndim,
+            });
+        }
+        let first_axis = ndim - count;
+        let source_last = shape.last().copied().unwrap_or(1);
+        if let Some(length) = n {
+            // Only the one-axis forward entry point supplies a resize length.
+            shape[ndim - 1] = length;
+        }
+        for &length in &shape[first_axis..] {
+            validate_real_fft_length(length)?;
+        }
+        let total = element_count(&shape).map_err(UFuncError::Shape)?;
+        let components = total
+            .checked_mul(2)
+            .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if total == 0 {
+            shape.push(2);
+            return Self::new(shape, Vec::new(), self.dtype);
+        }
+        let input = self.real_fft_components(operation, true)?;
+        let mut re = try_zeroed_f64(total, operation)?;
+        let mut im = try_zeroed_f64(total, operation)?;
+        if let Some(length) = n {
+            let rows = total / length;
+            let copied = source_last.min(length);
+            for row in 0..rows {
+                for index in 0..copied {
+                    let source = (row * source_last + index) * 2;
+                    let destination = row * length + index;
+                    re[destination] = input[source];
+                    im[destination] = input[source + 1];
+                }
+            }
+        } else {
+            for ((real, imag), pair) in re
+                .iter_mut()
+                .zip(im.iter_mut())
+                .zip(input.as_chunks::<2>().0)
+            {
+                *real = pair[0];
+                *imag = pair[1];
+            }
+        }
+        // NumPy's multidimensional full transform visits the selected axes
+        // in reverse order. Its complex64 intermediate is rounded after each
+        // completed one-axis transform, not only after the whole operation.
+        for axis in (first_axis..ndim).rev() {
+            fftn_along_axis(&shape, &mut re, &mut im, axis, inverse);
+            if self.dtype == DType::Complex64 {
+                for value in re.iter_mut().chain(im.iter_mut()) {
+                    *value = f64::from(*value as f32);
+                }
+            }
+        }
+        let mut values = try_zeroed_f64(components, operation)?;
+        for ((pair, real), imag) in values.as_chunks_mut::<2>().0.iter_mut().zip(re).zip(im) {
+            pair[0] = real;
+            pair[1] = imag;
+        }
+        shape.push(2);
+        Self::new(shape, values, self.dtype)
+    }
+
     /// Compute the 1-D discrete Fourier transform (np.fft.fft).
-    /// Returns interleaved [re0, im0, re1, im1, ...] with shape [n].
-    /// The `n` parameter specifies the length; input is zero-padded or truncated.
-    /// If `n` is None, uses the length of the input array.
+    /// Typed complex input transforms the last logical axis, retaining batch
+    /// dimensions and complex dtype. `n` pads or truncates that axis; its current
+    /// length is used when omitted. The legacy real-input path flattens the input
+    /// and returns packed `F64` components with shape `[n, 2]`.
     pub fn fft(&self, n: Option<usize>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(n, Some(1), false, "fft");
+        }
         let len = n.unwrap_or(self.values.len());
         if len == 0 {
             return Err(UFuncError::Msg(
@@ -30962,9 +31047,13 @@ impl UFuncArray {
     }
 
     /// Compute the 1-D inverse discrete Fourier transform (np.fft.ifft).
-    /// Input is interleaved [re0, im0, re1, im1, ...] with shape [n, 2].
-    /// Returns interleaved complex output with shape [n, 2].
+    /// Typed complex input transforms the last logical axis, retaining batch
+    /// dimensions and complex dtype. Legacy packed `F64` input and output have
+    /// shape `[n, 2]`, containing interleaved real and imaginary components.
     pub fn ifft(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(None, Some(1), true, "ifft");
+        }
         if self.shape.len() != 2 || self.shape[1] != 2 {
             return Err(UFuncError::Msg(
                 "ifft: input must have shape [n, 2] (interleaved complex)".to_string(),
@@ -31143,9 +31232,13 @@ impl UFuncArray {
     }
 
     /// Compute the 2-D DFT (np.fft.fft2).
-    /// Input is a real 2-D array of shape `[rows, cols]`.
-    /// Returns interleaved complex output of shape `[rows, cols, 2]`.
+    /// Typed complex input transforms its last two logical axes, retaining
+    /// leading batch dimensions and complex dtype. Legacy real input of shape
+    /// `[rows, cols]` returns packed `F64` output of shape `[rows, cols, 2]`.
     pub fn fft2(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(None, Some(2), false, "fft2");
+        }
         if self.shape.len() != 2 {
             return Err(UFuncError::Msg(
                 "fft2: input must be a 2-D array".to_string(),
@@ -31185,9 +31278,13 @@ impl UFuncArray {
     }
 
     /// Compute the 2-D inverse DFT (np.fft.ifft2).
-    /// Input is interleaved complex of shape `[rows, cols, 2]`.
-    /// Returns interleaved complex output of shape `[rows, cols, 2]`.
+    /// Typed complex input transforms its last two logical axes, retaining
+    /// leading batch dimensions and complex dtype. Legacy packed `F64` input and
+    /// output have shape `[rows, cols, 2]`.
     pub fn ifft2(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(None, Some(2), true, "ifft2");
+        }
         if self.shape.len() != 3 || self.shape[2] != 2 {
             return Err(UFuncError::Msg(
                 "ifft2: input must have shape [rows, cols, 2] (interleaved complex)".to_string(),
@@ -31232,10 +31329,14 @@ impl UFuncArray {
 
     /// Compute the N-dimensional DFT (np.fft.fftn).
     ///
-    /// Input is a real array of arbitrary shape `[d0, d1, ..., d_{n-1}]`.
-    /// Applies 1-D FFT along every axis in order.
-    /// Returns interleaved complex output of shape `[d0, d1, ..., d_{n-1}, 2]`.
+    /// Typed complex input transforms all logical axes and retains its dtype;
+    /// a logical scalar is unchanged. Legacy real input of shape
+    /// `[d0, d1, ..., d_{n-1}]` returns packed `F64` output of shape
+    /// `[d0, d1, ..., d_{n-1}, 2]`.
     pub fn fftn(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(None, None, false, "fftn");
+        }
         let ndim = self.shape.len();
         if ndim == 0 {
             return Ok(Self {
@@ -31285,9 +31386,13 @@ impl UFuncArray {
 
     /// Compute the N-dimensional inverse DFT (np.fft.ifftn).
     ///
-    /// Input is interleaved complex of shape `[d0, d1, ..., d_{n-1}, 2]`.
-    /// Returns interleaved complex output of same shape.
+    /// Typed complex input transforms all logical axes and retains its dtype;
+    /// a logical scalar is unchanged. Legacy packed `F64` input and output have
+    /// shape `[d0, d1, ..., d_{n-1}, 2]`.
     pub fn ifftn(&self) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self.typed_complex_fft(None, None, true, "ifftn");
+        }
         let ndim = self.shape.len();
         if ndim < 2 || self.shape[ndim - 1] != 2 {
             return Err(UFuncError::Msg(
