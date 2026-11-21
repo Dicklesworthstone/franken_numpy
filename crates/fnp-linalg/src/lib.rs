@@ -3041,6 +3041,69 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
     Ok((q, r))
 }
 
+fn qr_buffer(length: usize) -> Result<Vec<f64>, LinAlgError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(length).map_err(|_| {
+        LinAlgError::ShapeContractViolation("reduced QR: unable to allocate workspace or factors")
+    })?;
+    values.resize(length, 0.0);
+    Ok(values)
+}
+
+fn qr_complex_cell_count(rows: usize, columns: usize) -> Result<usize, LinAlgError> {
+    rows.checked_mul(columns)
+        .and_then(|length| length.checked_mul(2))
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "reduced QR: component dimensions overflow",
+        ))
+}
+
+/// Reduced QR decomposition of a real m-by-n matrix.
+///
+/// Returns row-major Q with shape (m, k) and R with shape (k, n), where
+/// k = min(m, n). Empty dimensions are valid. The workspace is O(m*n + m*k),
+/// including the returned factors; the tall case never constructs m-by-m Q.
+///
+/// The real subspace of the normalized complex Householder implementation is
+/// invariant. Sharing that implementation retains its per-column scaling and
+/// extended-exponent projection arithmetic for tiny and large inputs without
+/// introducing a second thin-factor algorithm. This is a bounded-memory API,
+/// not a throughput claim against the existing full-factor implementation.
+pub fn qr_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "qr_mxn_reduced: input must contain m*n entries",
+        ));
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+    if m == 0 || n == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut interleaved = qr_buffer(qr_complex_cell_count(m, n)?)?;
+    for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+        pair[0] = value;
+    }
+    let (q, r) = complex_qr_mxn_reduced(&interleaved, m, n)?;
+    drop(interleaved);
+    let real_factor = |interleaved: Vec<f64>| -> Result<Vec<f64>, LinAlgError> {
+        let mut real = qr_buffer(interleaved.len() / 2)?;
+        for (output, pair) in real.iter_mut().zip(interleaved.chunks_exact(2)) {
+            if pair[1] != 0.0 {
+                return Err(LinAlgError::NormDetRankPolicyViolation(
+                    "reduced real QR: factors left the real subspace",
+                ));
+            }
+            *output = pair[0];
+        }
+        Ok(real)
+    };
+    Ok((real_factor(q)?, real_factor(r)?))
+}
+
 /// Minimum rows per TSQR leaf block. Below this the per-leaf Householder pass
 /// is too short to amortize the reduction-tree work, so the block count is
 /// capped to keep every leaf at least this tall.
@@ -13050,10 +13113,13 @@ pub fn complex_solve_nxn_multi(
 /// Determinant of a complex NxN matrix.
 /// Returns (det_re, det_im).
 pub fn complex_det_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
-    if Some(a.len()) != n.checked_mul(n).and_then(|x| x.checked_mul(2)) || n == 0 {
+    if Some(a.len()) != n.checked_mul(n).and_then(|x| x.checked_mul(2)) {
         return Err(LinAlgError::ShapeContractViolation(
-            "complex_det_nxn: input must be 2*n*n with n > 0",
+            "complex_det_nxn: input length must equal 2*n*n",
         ));
+    }
+    if n == 0 {
+        return Ok((1.0, 0.0));
     }
 
     match complex_lu_decompose(a, n) {
@@ -13072,6 +13138,44 @@ pub fn complex_det_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
         }
         Err(LinAlgError::SolverSingularity) => Ok((0.0, 0.0)),
         Err(e) => Err(e),
+    }
+}
+
+/// Complex determinant phase and natural logarithm of its absolute value.
+///
+/// Returns `((phase_re, phase_im), log_abs_det)`. A singular matrix returns
+/// `((0, 0), -infinity)`. Each LU pivot magnitude is rounded to f64 before
+/// phase division and logarithmic accumulation, matching NumPy even when a
+/// subnormal magnitude produces a nonunit phase or a magnitude overflows.
+/// The determinant product itself is never formed, avoiding its overflow and
+/// underflow. As with the other complex LU entry points, nonfinite input
+/// components are rejected.
+pub fn complex_slogdet_nxn(a: &[f64], n: usize) -> Result<((f64, f64), f64), LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n).and_then(|x| x.checked_mul(2)) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_slogdet_nxn: input length must equal 2*n*n",
+        ));
+    }
+    if n == 0 {
+        return Ok(((1.0, 0.0), 0.0));
+    }
+    match complex_lu_decompose(a, n) {
+        Ok((lu, _, mut phase_re, mut phase_im)) => {
+            let mut log_abs_det = 0.0;
+            for i in 0..n {
+                let re = lu[2 * (i * n + i)];
+                let im = lu[2 * (i * n + i) + 1];
+                let magnitude = re.hypot(im);
+                if magnitude == 0.0 {
+                    return Ok(((0.0, 0.0), f64::NEG_INFINITY));
+                }
+                (phase_re, phase_im) = cmul(phase_re, phase_im, re / magnitude, im / magnitude);
+                log_abs_det += magnitude.ln();
+            }
+            Ok(((phase_re, phase_im), log_abs_det))
+        }
+        Err(LinAlgError::SolverSingularity) => Ok(((0.0, 0.0), f64::NEG_INFINITY)),
+        Err(error) => Err(error),
     }
 }
 
@@ -13537,6 +13641,153 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
         }
     }
 
+    Ok((q, r))
+}
+
+/// Apply I - 2*v*v^H to the trailing rows and columns of a row-major matrix.
+/// The reflector is unit length and stores a full column of interleaved values.
+/// Products and the subtraction keep separate binary exponents: even when the
+/// result is representable, a projection or its doubled value can overflow f64.
+fn reduced_qr_apply_reflector(
+    matrix: &mut [f64],
+    rows: usize,
+    columns: usize,
+    first: usize,
+    reflector: &[f64],
+) {
+    let two = ScaledReal::new(2.0);
+    for column in first..columns {
+        let mut dot_re = ScaledReal::new(0.0);
+        let mut dot_im = ScaledReal::new(0.0);
+        for row in first..rows {
+            let at = 2 * (row * columns + column);
+            let (re, im) = complex_product_scaled(
+                reflector[2 * row],
+                -reflector[2 * row + 1],
+                matrix[at],
+                matrix[at + 1],
+            );
+            dot_re = dot_re.sum(re);
+            dot_im = dot_im.sum(im);
+        }
+        dot_re = dot_re.multiply(two);
+        dot_im = dot_im.multiply(two);
+        for row in first..rows {
+            let at = 2 * (row * columns + column);
+            let vr = ScaledReal::new(reflector[2 * row]);
+            let vi = ScaledReal::new(reflector[2 * row + 1]);
+            let re = vr.multiply(dot_re).sum(vi.multiply(dot_im).negated());
+            let im = vr.multiply(dot_im).sum(vi.multiply(dot_re));
+            matrix[at] = ScaledReal::new(matrix[at]).sum(re.negated()).value();
+            matrix[at + 1] = ScaledReal::new(matrix[at + 1]).sum(im.negated()).value();
+        }
+    }
+}
+
+/// Reduced QR decomposition of an interleaved complex m-by-n matrix.
+///
+/// Returns Q with 2*m*k components and R with 2*k*n components in row-major
+/// order, where k = min(m, n). Q has orthonormal columns and R is upper
+/// trapezoidal. Empty dimensions are accepted. Workspace is O(m*n + m*k):
+/// reflectors are recorded during factorization, then applied in reverse to
+/// an m-by-k identity. An m-by-m factor is never allocated for a tall input.
+/// All dimension products and allocations are checked before use.
+pub fn complex_qr_mxn_reduced(
+    a: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    let input_length = qr_complex_cell_count(m, n)?;
+    if a.len() != input_length {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_qr_mxn_reduced: input must contain 2*m*n components",
+        ));
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex matrix entries must be finite for QR",
+        ));
+    }
+    let k = m.min(n);
+    if k == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let factor_length = qr_complex_cell_count(m, k)?;
+    let result_length = qr_complex_cell_count(k, n)?;
+    let mut r = qr_buffer(input_length)?;
+    r.copy_from_slice(a);
+    // Reflectors are column-major here so each saved direction is contiguous.
+    let mut reflectors = qr_buffer(factor_length)?;
+    for column in 0..k {
+        let v = &mut reflectors[2 * column * m..2 * (column + 1) * m];
+        let mut scale = 0.0_f64;
+        for row in column..m {
+            let at = 2 * (row * n + column);
+            v[2 * row] = r[at];
+            v[2 * row + 1] = r[at + 1];
+            scale = scale.max(r[at].abs()).max(r[at + 1].abs());
+        }
+        if scale == 0.0 {
+            continue;
+        }
+
+        // Determine the pivot phase before column scaling. A tiny pivot next
+        // to a huge trailing entry can otherwise underflow and lose its phase.
+        let pivot = 2 * column;
+        let pivot_scale = v[pivot].abs().max(v[pivot + 1].abs());
+        let (phase_re, phase_im) = if pivot_scale == 0.0 {
+            (1.0, 0.0)
+        } else {
+            let re = v[pivot] / pivot_scale;
+            let im = v[pivot + 1] / pivot_scale;
+            let magnitude = re.hypot(im);
+            (re / magnitude, im / magnitude)
+        };
+        let mut norm_sq = 0.0;
+        for pair in v[pivot..].chunks_exact_mut(2) {
+            pair[0] /= scale;
+            pair[1] /= scale;
+            norm_sq += cabs2(pair[0], pair[1]);
+        }
+        let norm = norm_sq.sqrt();
+        v[pivot] += phase_re * norm;
+        v[pivot + 1] += phase_im * norm;
+        let vector_norm = v[pivot..]
+            .chunks_exact(2)
+            .map(|pair| cabs2(pair[0], pair[1]))
+            .sum::<f64>()
+            .sqrt();
+        for component in &mut v[pivot..] {
+            *component /= vector_norm;
+        }
+        reduced_qr_apply_reflector(&mut r, m, n, column, v);
+        // The reflector annihilates the tail mathematically. Preserve the
+        // triangular contract rather than exposing cancellation residuals.
+        for row in (column + 1)..m {
+            let at = 2 * (row * n + column);
+            r[at] = 0.0;
+            r[at + 1] = 0.0;
+        }
+    }
+
+    let mut q = qr_buffer(factor_length)?;
+    for index in 0..k {
+        q[2 * (index * k + index)] = 1.0;
+    }
+    for column in (0..k).rev() {
+        let v = &reflectors[2 * column * m..2 * (column + 1) * m];
+        if v[2 * column] != 0.0 || v[2 * column + 1] != 0.0 {
+            reduced_qr_apply_reflector(&mut q, m, k, column, v);
+        }
+    }
+    drop(reflectors);
+    if m > k {
+        // Do not retain the discarded m-by-n workspace in the returned small
+        // R factor's capacity. Allocate only its k-by-n occupied rows.
+        let mut reduced = qr_buffer(result_length)?;
+        reduced.copy_from_slice(&r[..result_length]);
+        r = reduced;
+    }
     Ok((q, r))
 }
 
@@ -23285,6 +23536,253 @@ for value in actual / scale:
                 assert!((qtq[i * 3 + j] - exp).abs() < 1e-10);
             }
         }
+    }
+
+    fn assert_reduced_qr_contract(a: &[f64], m: usize, n: usize, complex: bool, tolerance: f64) {
+        let k = m.min(n);
+        let (q, mut r, mut source) = if complex {
+            let (q, r) = super::complex_qr_mxn_reduced(a, m, n).expect("reduced complex QR");
+            assert_eq!(q.len(), 2 * m * k);
+            assert_eq!(r.len(), 2 * k * n);
+            (q, r, a.to_vec())
+        } else {
+            let (q, r) = super::qr_mxn_reduced(a, m, n).expect("reduced real QR");
+            assert_eq!(q.len(), m * k);
+            assert_eq!(r.len(), k * n);
+            let interleave =
+                |values: &[f64]| values.iter().flat_map(|&value| [value, 0.0]).collect();
+            (interleave(&q), interleave(&r), interleave(a))
+        };
+        assert!(q.iter().chain(&r).all(|value| value.is_finite()));
+        // Scale each column independently so a large unrelated column cannot
+        // hide a lost small direction or an underflowed reflector.
+        for column in 0..n {
+            let scale = (0..m)
+                .flat_map(|row| {
+                    let at = 2 * (row * n + column);
+                    [source[at].abs(), source[at + 1].abs()]
+                })
+                .fold(0.0_f64, f64::max);
+            for row in (column + 1)..k {
+                let at = 2 * (row * n + column);
+                assert_eq!(&r[at..at + 2], &[0.0, 0.0]);
+            }
+            if scale != 0.0 {
+                for row in 0..m {
+                    let at = 2 * (row * n + column);
+                    source[at] /= scale;
+                    source[at + 1] /= scale;
+                }
+                for row in 0..k {
+                    let at = 2 * (row * n + column);
+                    r[at] /= scale;
+                    r[at + 1] /= scale;
+                }
+            }
+        }
+        let reconstructed = complex_matmul(&q, &r, m, k, n);
+        for (index, (&got, &expected)) in reconstructed.iter().zip(&source).enumerate() {
+            assert!(
+                (got - expected).abs() < tolerance,
+                "reduced QR m={m}, n={n}, complex={complex}, component {index}: {got} != {expected}"
+            );
+        }
+        let qh = complex_conjugate_transpose(&q, m, k);
+        let gram = complex_matmul(&qh, &q, k, m, k);
+        for row in 0..k {
+            for column in 0..k {
+                let at = 2 * (row * k + column);
+                let expected = if row == column { 1.0 } else { 0.0 };
+                assert!((gram[at] - expected).abs() < tolerance);
+                assert!(gram[at + 1].abs() < tolerance);
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_qr_rectangular_rank_deficient_and_zero_inputs() {
+        for (m, n) in [(1, 1), (1, 5), (5, 1), (3, 2), (2, 3), (4, 4), (5, 3)] {
+            for complex in [false, true] {
+                let components = if complex { 2 } else { 1 };
+                for rank_deficient in [false, true] {
+                    let mut a = vec![0.0; components * m * n];
+                    for row in 0..m {
+                        for column in 0..n {
+                            let at = components * (row * n + column);
+                            a[at] = if rank_deficient {
+                                (row as f64 - 1.5) * (column as f64 + 1.0)
+                            } else {
+                                ((row * 7 + column * 3 + 1) as f64).sin()
+                            };
+                            if complex {
+                                a[at + 1] = if rank_deficient {
+                                    (row as f64 + 0.5) * (column as f64 + 1.0)
+                                } else {
+                                    ((row * 3 + column * 5 + 2) as f64).cos()
+                                };
+                            }
+                        }
+                    }
+                    assert_reduced_qr_contract(&a, m, n, complex, 3e-12);
+                }
+                assert_reduced_qr_contract(&vec![0.0; components * m * n], m, n, complex, 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_qr_extreme_and_mixed_column_scales() {
+        for (m, n, a) in complex_qr_scale_cases() {
+            assert_reduced_qr_contract(&a, m, n, true, 3e-12);
+        }
+        let real = [1.0, 3.0, 2.0, 2.0, -1.0, 3.0, 3.0, 2.0, -2.0];
+        for scale in [1e-310, 1e-300, 1e-200, 1.0, 1e200, 1e300] {
+            let a: Vec<f64> = real.iter().map(|value| value * scale).collect();
+            assert_reduced_qr_contract(&a, 3, 3, false, 3e-12);
+            let a: Vec<f64> = a.iter().flat_map(|&value| [value, -0.5 * value]).collect();
+            assert_reduced_qr_contract(&a, 3, 3, true, 3e-12);
+        }
+        for complex in [false, true] {
+            let mut a = Vec::new();
+            for row in 0..3 {
+                for column in 0..3 {
+                    let value = real[row * 3 + column] * [1e300, 1e-300, 1e100][column];
+                    a.push(value);
+                    if complex {
+                        a.push(-0.5 * value);
+                    }
+                }
+            }
+            assert_reduced_qr_contract(&a, 3, 3, complex, 3e-12);
+        }
+        // The reflector's doubled projection is outside f64 even though the
+        // actual norm and R factor are representable.
+        assert_reduced_qr_contract(&[8e307, 8e307], 2, 1, false, 3e-12);
+        assert_reduced_qr_contract(&[7e307, 1e307, 7e307, -1e307], 2, 1, true, 3e-12);
+        let tiny = f64::from_bits(1);
+        for (re, im) in [(tiny, tiny), (-tiny, tiny), (tiny, -2.0 * tiny)] {
+            assert_reduced_qr_contract(&[re, im, 1.0, 0.0], 2, 1, true, 3e-12);
+        }
+    }
+
+    #[test]
+    fn reduced_qr_empty_invalid_and_capacity_contracts() {
+        for (m, n) in [(0, 0), (4, 0), (0, 5), (usize::MAX, 0), (0, usize::MAX)] {
+            let real = super::qr_mxn_reduced(&[], m, n).expect("empty reduced real QR");
+            let complex =
+                super::complex_qr_mxn_reduced(&[], m, n).expect("empty reduced complex QR");
+            assert!(real.0.is_empty() && real.1.is_empty());
+            assert!(complex.0.is_empty() && complex.1.is_empty());
+        }
+        assert!(super::qr_mxn_reduced(&[], 1, 1).is_err());
+        assert!(super::complex_qr_mxn_reduced(&[1.0], 1, 1).is_err());
+        assert!(super::qr_mxn_reduced(&[1.0], 0, 0).is_err());
+        assert!(super::complex_qr_mxn_reduced(&[1.0, 0.0], 0, 0).is_err());
+        assert!(super::qr_mxn_reduced(&[], usize::MAX, 2).is_err());
+        assert!(super::complex_qr_mxn_reduced(&[], usize::MAX / 2 + 1, 1).is_err());
+        assert!(super::qr_buffer(usize::MAX).is_err());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(super::qr_mxn_reduced(&[value], 1, 1).is_err());
+            assert!(super::complex_qr_mxn_reduced(&[value, 0.0], 1, 1).is_err());
+            assert!(super::complex_qr_mxn_reduced(&[0.0, value], 1, 1).is_err());
+        }
+        // Adding the reduced APIs must not narrow the existing complete-factor
+        // shape contract, which callers elsewhere in this crate rely on.
+        let (q, r) = qr_mxn(&[1.0, 2.0, 3.0], 3, 1).unwrap();
+        assert_eq!((q.len(), r.len()), (9, 3));
+        let (q, r) = complex_qr_mxn(&[1.0, 0.5, 2.0, -1.0, 3.0, 2.0], 3, 1).unwrap();
+        assert_eq!((q.len(), r.len()), (18, 6));
+    }
+
+    #[test]
+    fn reduced_qr_large_skinny_factors_stay_linear() {
+        // Full Q would require 80 GB for real input or 160 GB for complex input.
+        // Both orientations must complete with factors proportional to input.
+        for (m, n) in [(100_000, 1), (1, 100_000)] {
+            let real: Vec<f64> = (0..m * n).map(|index| (index % 7) as f64 - 2.5).collect();
+            assert_reduced_qr_contract(&real, m, n, false, 2e-10);
+            let complex: Vec<f64> = real
+                .iter()
+                .enumerate()
+                .flat_map(|(index, &value)| [value, (index % 5) as f64 - 1.5])
+                .collect();
+            assert_reduced_qr_contract(&complex, m, n, true, 2e-10);
+        }
+    }
+
+    #[test]
+    fn reduced_qr_matches_live_numpy() {
+        if !numpy_oracle_available() {
+            eprintln!("NumPy unavailable; reduced QR oracle test skipped");
+            return;
+        }
+        let base = [
+            [(1.0, 2.0), (3.0, -1.0), (2.0, 0.5)],
+            [(2.0, 1.0), (-1.0, 4.0), (3.0, -2.0)],
+            [(3.0, -2.0), (2.0, 3.0), (-2.0, 1.0)],
+        ];
+        let mut cases = Vec::new();
+        for (m, n) in [(3, 2), (2, 3), (3, 3)] {
+            for scale in [1e-200, 1.0, 1e200] {
+                for complex in [false, true] {
+                    let mut a = Vec::new();
+                    for row in &base[..m] {
+                        for &(real, imag) in &row[..n] {
+                            a.push(real * scale);
+                            if complex {
+                                a.push(imag * scale);
+                            }
+                        }
+                    }
+                    let (q, r) = if complex {
+                        super::complex_qr_mxn_reduced(&a, m, n).unwrap()
+                    } else {
+                        super::qr_mxn_reduced(&a, m, n).unwrap()
+                    };
+                    cases.push(format!("[{m},{n},{complex},{a:?},{q:?},{r:?}]"));
+                }
+            }
+        }
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+def matrix(values, rows, cols, complex_input):
+    values = np.array(values, dtype=np.float64)
+    if complex_input:
+        values = values.view(np.complex128)
+    return values.reshape(rows, cols)
+
+def canonicalize(q, r):
+    diagonal = np.diag(r)
+    phases = diagonal / np.abs(diagonal)
+    return q * phases, r * phases.conj()[:, None]
+
+for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
+    k = min(m, n)
+    a = matrix(a, m, n, complex_input)
+    q = matrix(q, m, k, complex_input)
+    r = matrix(r, k, n, complex_input)
+    expected_q, expected_r = np.linalg.qr(a, mode='reduced')
+    actual_q, actual_r = canonicalize(q, r)
+    expected_q, expected_r = canonicalize(expected_q, expected_r)
+    scales = np.maximum(np.abs(a.real), np.abs(a.imag)).max(axis=0)
+    np.testing.assert_allclose(actual_q, expected_q, rtol=3e-12, atol=3e-12)
+    np.testing.assert_allclose(actual_r / scales, expected_r / scales,
+                               rtol=3e-12, atol=3e-12)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .args(["-c", script, &format!("[{}]", cases.join(","))])
+            .output()
+            .expect("NumPy reduced QR oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy reduced QR comparison failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // ── Rectangular SVD tests ────────────────────────────────────────
