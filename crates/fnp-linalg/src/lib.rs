@@ -8882,11 +8882,11 @@ pub fn polar_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgErro
     Ok((u_mat, p_mat))
 }
 
-/// NxN least-squares solve: minimize ||Ax - b||_2 using normal equations.
-/// Returns the solution vector x.
-/// NxN least-squares solve: minimize ||Ax - b||_2 using SVD for numerical stability.
+/// Rectangular least-squares solve: minimize ||Ax - b||_2 using reduced SVD.
 ///
 /// Matches `numpy.linalg.lstsq` semantics. Returns `(x, residuals, rank, singular_values)`.
+/// Singular factors use O(m*n + min(m,n)^2) workspace, including for a
+/// rank-deficient tall matrix. A negative cutoff selects epsilon*max(m,n).
 pub fn lstsq_svd(
     a: &[f64],
     b: &[f64],
@@ -8905,7 +8905,7 @@ pub fn lstsq_svd(
         ));
     }
 
-    let (u, s, vt) = svd_mxn_full(a, m, n)?;
+    let (u, s, vt) = svd_mxn_reduced(a, m, n)?;
     let k = s.len();
     let sigma_max = s.first().copied().unwrap_or(0.0);
     let threshold = if rcond < 0.0 {
@@ -8914,47 +8914,49 @@ pub fn lstsq_svd(
         rcond * sigma_max
     };
 
-    let mut s_inv = vec![0.0; k];
-    let mut rank = 0;
-    for i in 0..k {
-        if s[i] > threshold {
-            s_inv[i] = 1.0 / s[i];
-            rank += 1;
+    let rank = s.iter().filter(|&&value| value > threshold).count();
+    let zero = ScaledReal::new(0.0);
+    let mut coefficients = complex_svd_buffer(k, zero)?;
+    // Only the k columns of reduced U participate in S^+ U^T b. Keep the
+    // projection and division factored so neither an overflowing U^T b nor
+    // the reciprocal of a subnormal singular value destroys a finite answer.
+    for (index, &value) in s.iter().enumerate() {
+        if value > threshold {
+            let mut projection = zero;
+            for row in 0..m {
+                projection = projection
+                    .sum(ScaledReal::new(u[row * k + index]).multiply(ScaledReal::new(b[row])));
+            }
+            coefficients[index] = projection.quotient(ScaledReal::new(value));
         }
     }
-
-    // x = V * S^+ * U^T * b
-    // 1. utb = U^T * b  (m x m) * (m x 1) -> (m x 1)
-    let mut utb = vec![0.0; m];
-    for i in 0..m {
-        let mut sum = 0.0;
-        for j in 0..m {
-            sum += u[j * m + i] * b[j]; // U^T[i,j] = U[j,i]
+    let mut x = complex_svd_buffer(n, 0.0)?;
+    for row in 0..n {
+        let mut sum = zero;
+        for index in 0..k {
+            sum = sum.sum(ScaledReal::new(vt[index * n + row]).multiply(coefficients[index]));
         }
-        utb[i] = sum;
+        x[row] = sum.value();
     }
 
-    // 2. siutb = S^+ * utb  (n x m) * (m x 1) -> (n x 1)
-    let mut siutb = vec![0.0; n];
-    for i in 0..k {
-        siutb[i] = s_inv[i] * utb[i];
-    }
-
-    // 3. x = V * siutb = Vt^T * siutb  (n x n) * (n x 1) -> (n x 1)
-    let mut x = vec![0.0; n];
-    for i in 0..n {
-        let mut sum = 0.0;
-        for j in 0..n {
-            sum += vt[j * n + i] * siutb[j]; // V[i,j] = Vt^T[i,j] = Vt[j,i]
-        }
-        x[i] = sum;
-    }
-
-    // Residuals (only if full rank and m > n)
+    // A thin U has no orthogonal-complement columns. Compute ||b-Ax||^2
+    // directly instead of materializing those unused m-k columns for residuals.
     let mut residuals = Vec::new();
     if rank == n && m > n {
-        let sum_sq: f64 = utb[n..m].iter().map(|v| v * v).sum();
-        residuals.push(sum_sq);
+        let mut sum_sq = zero;
+        for row in 0..m {
+            let mut predicted = zero;
+            for col in 0..n {
+                predicted = predicted
+                    .sum(ScaledReal::new(a[row * n + col]).multiply(ScaledReal::new(x[col])));
+            }
+            let residual = ScaledReal::new(b[row]).sum(predicted.negated());
+            sum_sq = sum_sq.sum(residual.multiply(residual));
+        }
+        residuals.try_reserve_exact(1).map_err(|_| {
+            LinAlgError::ShapeContractViolation("lstsq_svd: unable to allocate residual")
+        })?;
+        residuals.push(sum_sq.value());
     }
 
     Ok((x, residuals, rank, s))
@@ -8966,6 +8968,7 @@ pub fn lstsq_svd(
 /// Returns (X, residual sums of squares, rank, singular values). Residuals have
 /// one entry per right-hand side only when m > n and rank == n. Empty matrix
 /// dimensions and zero right-hand-side columns retain those same shape rules.
+/// The reduced singular factors avoid square workspace on tall or wide input.
 ///
 /// None selects epsilon*max(m,n). Explicit cutoffs outside (0,1) follow LAPACK's
 /// machine-precision convention (epsilon/2); NaN cutoffs are rejected. This is
@@ -9005,10 +9008,10 @@ pub fn lstsq_svd_multi(
     })?;
     x.resize(result_len, 0.0);
 
-    // The real SVD forms squared norms. Normalize the matrix once so its
-    // Householder and QR steps neither overflow nor underflow for uniformly
-    // scaled inputs. Keep the divisor factored below: sigma * input_scale can
-    // exceed f64 even when the solution is finite.
+    // Preserve the factored singular-value contract for this multi-RHS API:
+    // sigma * input_scale can exceed f64 even when the solution is finite.
+    // The reduced SVD operates on the normalized matrix and never constructs
+    // the unused orthogonal-complement factors.
     let largest_entry = a.iter().map(|value| value.abs()).fold(0.0, f64::max);
     let input_scale = if largest_entry == 0.0 {
         1.0
@@ -9018,13 +9021,11 @@ pub fn lstsq_svd_multi(
     let (u, singular_values, vt) = if m == 0 || n == 0 {
         (Vec::new(), Vec::new(), Vec::new())
     } else {
-        if m.checked_mul(m).is_none() || n.checked_mul(n).is_none() {
-            return Err(LinAlgError::ShapeContractViolation(
-                "lstsq_svd_multi: singular factor shape overflowed",
-            ));
+        let mut normalized = complex_svd_buffer(a.len(), 0.0)?;
+        for (output, &value) in normalized.iter_mut().zip(a) {
+            *output = value / input_scale;
         }
-        let normalized: Vec<f64> = a.iter().map(|value| value / input_scale).collect();
-        svd_mxn_full(&normalized, m, n)?
+        svd_mxn_reduced(&normalized, m, n)?
     };
     let relative_cutoff = match rcond {
         None => f64::EPSILON * m.max(n) as f64,
@@ -9068,7 +9069,7 @@ pub fn lstsq_svd_multi(
             let mut projection = zero;
             for row in 0..m {
                 projection = projection.sum(
-                    ScaledReal::new(u[row * m + index])
+                    ScaledReal::new(u[row * k + index])
                         .multiply(ScaledReal::new(b[row * nrhs + rhs])),
                 );
             }
@@ -9125,10 +9126,8 @@ pub fn lstsq_svd_multi(
 /// [`lstsq_svd`] uses) fall back to [`lstsq_svd`], which handles the minimum-norm
 /// solution and truncated pseudo-inverse.
 ///
-/// That fallback is O(m²) in both time and memory — [`lstsq_svd`] materialises a
-/// full m×m U — so callers that route very tall inputs here should gate on
-/// [`lstsq_tsqr_full_rank`] instead and hand rank-deficient matrices to a solver
-/// that does not form U.
+/// The fallback uses reduced singular factors and O(m*n + n*n) workspace;
+/// rank deficiency does not force a full m-by-m factor allocation.
 pub fn lstsq_tsqr(
     a: &[f64],
     b: &[f64],
@@ -9154,9 +9153,8 @@ pub fn lstsq_tsqr(
 /// instead of falling back.
 ///
 /// Returns `Ok(None)` when `rank < n` under the same singular-value threshold
-/// [`lstsq_svd`] uses. Callers with very tall inputs want this: [`lstsq_tsqr`]'s
-/// own fallback forms an m×m U, which for m in the millions is not a slow path
-/// but an unallocatable one.
+/// [`lstsq_svd`] uses. This lets callers choose how to handle rank deficiency
+/// without paying for the reduced-SVD fallback in [`lstsq_tsqr`].
 pub fn lstsq_tsqr_full_rank(
     a: &[f64],
     b: &[f64],
@@ -9234,7 +9232,9 @@ pub fn lstsq_nxn(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>, L
     Ok(x)
 }
 
-/// Pseudoinverse of an MxN matrix (np.linalg.pinv) via SVD.
+/// Pseudoinverse of an MxN matrix (np.linalg.pinv) via reduced SVD.
+/// Workspace is O(m*n + min(m,n)^2); singular values are divided after forming
+/// each factor product so tiny singular values do not overflow a reciprocal.
 pub fn pinv_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<Vec<f64>, LinAlgError> {
     if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -9247,30 +9247,24 @@ pub fn pinv_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<Vec<f64>, L
         ));
     }
 
-    let (u, s, vt) = svd_mxn_full(a, m, n)?;
+    let (u, s, vt) = svd_mxn_reduced(a, m, n)?;
     let k = s.len();
     let sigma_max = s.first().copied().unwrap_or(0.0);
     let threshold = pinv_singular_value_cutoff(sigma_max, m, n, rcond);
 
-    let mut s_inv = vec![0.0; k];
-    for i in 0..k {
-        if s[i] > threshold {
-            s_inv[i] = 1.0 / s[i];
-        }
-    }
-
     // A^+ = V * S^+ * U^T
-    // result_{i,j} = sum_k Vt_{k,i} * s_inv[k] * U_{j,k}
-    let mut result = vec![0.0; n * m];
+    let mut result = complex_svd_buffer(a.len(), 0.0)?;
     for i in 0..n {
         for j in 0..m {
-            let mut sum = 0.0;
+            let mut sum = ScaledReal::new(0.0);
             for kk in 0..k {
-                if s_inv[kk] > 0.0 {
-                    sum += vt[kk * n + i] * s_inv[kk] * u[j * m + kk];
+                if s[kk] > threshold {
+                    let product =
+                        ScaledReal::new(vt[kk * n + i]).multiply(ScaledReal::new(u[j * k + kk]));
+                    sum = sum.sum(product.quotient(ScaledReal::new(s[kk])));
                 }
             }
-            result[i * m + j] = sum;
+            result[i * m + j] = sum.value();
         }
     }
     Ok(result)
@@ -26165,6 +26159,113 @@ except Exception as exc:
     }
 
     #[test]
+    fn real_pinv_and_lstsq_use_thin_factors_for_large_skinny_inputs() {
+        // Full U or Vt would require 80 GB in either orientation. All three
+        // public consumers must remain usable with linear-size inputs here.
+        let length = 100_000;
+        let a = vec![1.0; length];
+        for (m, n) in [(length, 1), (1, length)] {
+            let pinv = super::pinv_mxn(&a, m, n, -1.0).unwrap();
+            assert_eq!(pinv.len(), length);
+            for value in pinv {
+                assert!((value * length as f64 - 1.0).abs() < 2e-10);
+            }
+
+            let b: Vec<_> = (0..m)
+                .map(|row| if row % 2 == 0 { 2.0 } else { 4.0 })
+                .collect();
+            let (x, residuals, rank, s) = super::lstsq_svd(&a, &b, m, n, -1.0).unwrap();
+            assert_eq!(rank, 1);
+            assert!((s[0] / (length as f64).sqrt() - 1.0).abs() < 1e-12);
+            let expected_x = if m > n { 3.0 } else { 2.0 / length as f64 };
+            for value in x {
+                assert!((value / expected_x - 1.0).abs() < 2e-10);
+            }
+            if m > n {
+                assert_eq!(residuals.len(), 1);
+                assert!((residuals[0] / length as f64 - 1.0).abs() < 1e-12);
+            } else {
+                assert!(residuals.is_empty());
+            }
+
+            let b_multi: Vec<_> = b.iter().flat_map(|&value| [value, -2.0 * value]).collect();
+            let (x, residuals, rank, s) =
+                super::lstsq_svd_multi(&a, &b_multi, m, n, 2, None).unwrap();
+            assert_eq!(rank, 1);
+            assert!((s[0] / (length as f64).sqrt() - 1.0).abs() < 1e-12);
+            assert_eq!(x.len(), 2 * n);
+            for values in x.chunks_exact(2) {
+                assert!((values[0] / expected_x - 1.0).abs() < 2e-10);
+                assert!((values[1] / (-2.0 * expected_x) - 1.0).abs() < 2e-10);
+            }
+            if m > n {
+                assert_eq!(residuals.len(), 2);
+                assert!((residuals[0] / length as f64 - 1.0).abs() < 1e-12);
+                assert!((residuals[1] / length as f64 - 4.0).abs() < 1e-12);
+            } else {
+                assert!(residuals.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn real_lstsq_reduced_factors_preserve_rank_and_cutoffs_on_tall_inputs() {
+        let m = 20_000;
+        let a = vec![1.0; m * 2];
+        let b: Vec<_> = (0..m)
+            .map(|row| if row % 2 == 0 { 2.0 } else { 4.0 })
+            .collect();
+        for result in [
+            super::lstsq_svd(&a, &b, m, 2, -1.0),
+            super::lstsq_tsqr(&a, &b, m, 2, 1, -1.0),
+            super::lstsq_svd_multi(&a, &b, m, 2, 1, None),
+        ] {
+            let (x, residuals, rank, s) = result.unwrap();
+            assert_eq!(rank, 1);
+            assert!(residuals.is_empty());
+            assert_eq!(x.len(), 2);
+            assert!((x[0] - 1.5).abs() < 2e-10);
+            assert!((x[1] - 1.5).abs() < 2e-10);
+            assert!((s[0] / ((2 * m) as f64).sqrt() - 1.0).abs() < 2e-10);
+            assert!(s[1] < 1e-10);
+        }
+
+        // Keep the legacy single-RHS meaning of explicit cutoffs: rcond=0
+        // retains every positive singular value, while rcond>=1 drops all.
+        let a = [1.0, 0.0, 0.0, 2e-16, 0.0, 0.0];
+        let b = [1.0, 2e-16, 7.0];
+        let retained = super::lstsq_svd(&a, &b, 3, 2, 0.0).unwrap();
+        assert_eq!(retained.2, 2);
+        assert_oracle_vec("retained singular modes", &retained.0, &[1.0, 1.0]);
+        assert_oracle_vec("thin residual", &retained.1, &[49.0]);
+        let dropped = super::lstsq_svd(&a, &b, 3, 2, 1.0).unwrap();
+        assert_eq!(dropped.2, 0);
+        assert_eq!(dropped.0, [0.0, 0.0]);
+        assert!(dropped.1.is_empty());
+    }
+
+    #[test]
+    fn real_reduced_solvers_keep_finite_results_across_extreme_scales() {
+        let (x, _, rank, _) =
+            super::lstsq_svd(&[1e308, 1e308], &[1.7e308, 1.7e308], 2, 1, -1.0).unwrap();
+        assert_eq!(rank, 1);
+        assert!((x[0] - 1.7).abs() < 1e-13);
+        let tiny = super::lstsq_svd(&[1e-320], &[2e-320], 1, 1, 0.0).unwrap();
+        assert_eq!(tiny.0, [2.0]);
+        assert_eq!(tiny.2, 1);
+
+        // 1/sigma is infinite, but each entry of V*(1/sigma)*U^T is finite.
+        let a = vec![1e-309; 100];
+        for (m, n) in [(100, 1), (1, 100)] {
+            let pinv = super::pinv_mxn(&a, m, n, 0.0).unwrap();
+            assert!(pinv.iter().all(|value| value.is_finite()));
+            for value in pinv {
+                assert!((value / 1e307 - 1.0).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn numpy_oracle_qr_2x2() {
         let result = qr_2x2([[1.0, 2.0], [3.0, 4.0]], QrMode::Reduced).unwrap();
         // QR decomposition sign convention may differ from NumPy (Householder).
@@ -26706,9 +26807,9 @@ except Exception as exc:
     fn lstsq_tsqr_matches_lstsq_svd_full_rank_tall_skinny() {
         // The whole 4-tuple must be allclose to the SVD path on full-rank
         // tall-skinny inputs (numpy's own path is SVD, so allclose here == allclose
-        // to numpy). Sizes stay modest here because the lstsq_svd reference builds
-        // a full m×m U (the very cost TSQR avoids); the multi-block TSQR path is
-        // validated cheaply by lstsq_tsqr_multiblock_satisfies_normal_equations.
+        // to numpy). The reduced-SVD reference uses bounded workspace; these
+        // modest sizes keep the iterative numerical comparison inexpensive.
+        // The multi-block TSQR path is validated separately below.
         for (m, n, seed) in [
             (64usize, 8usize, 0xABCD_u64),
             (300, 8, 0x1234),
