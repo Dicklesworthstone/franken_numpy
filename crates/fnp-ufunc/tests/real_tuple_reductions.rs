@@ -459,7 +459,12 @@ fn default_mean_preserves_numpy_pairwise_order_and_source_dtypes() {
             (vec![0, 2], vec![]),
             (vec![2, 0], vec![]),
         ] {
-            let array = UFuncArray::new(shape, values, dtype).unwrap();
+            // Construct NumPy's declared source dtype before testing scalar
+            // axes. A fractional raw I64/U64 working buffer has no exact
+            // integer provenance and must still be rejected by to_storage.
+            let array =
+                UFuncArray::from_storage_with_dtype(shape, ArrayStorage::F64(values), dtype)
+                    .unwrap();
             let input = batch.add_input(&array);
             for axis in [None, Some(0), Some(1), Some(-1), Some(-2)] {
                 for keepdims in [false, true] {

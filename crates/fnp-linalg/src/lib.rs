@@ -1809,6 +1809,13 @@ pub fn solve_nxn_multi(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f
             "solve_nxn_multi: B must be n*m",
         ));
     }
+    if m == 0 {
+        // NumPy 2.4 calls gesv even with no RHS columns. Its factorization can
+        // still fail; neither the NaN solution shortcuts nor substitution are
+        // relevant when there are no output cells.
+        lu_decompose_for_det(a, n)?;
+        return Ok(Vec::new());
+    }
     if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
         let sanitized = fill_diagonal_nans_with_one(a, n);
         let mut solved = solve_nxn_multi(&sanitized, b, n, m)?;
@@ -12186,6 +12193,15 @@ pub fn batch_solve(
             "batch_solve: B data length does not match shape",
         ));
     }
+    if rhs_width == 0 {
+        // There are no output chunks to iterate, but each occupied coefficient
+        // matrix still needs a singularity check. Avoid chunks_mut(0) in the
+        // scratch paths and factor a broadcast coefficient matrix only once.
+        for matrix in a.chunks_exact(mat_size) {
+            solve_nxn_multi(matrix, &[], n, 0)?;
+        }
+        return Ok(Vec::new());
+    }
 
     // A literal 2-D matrix broadcast across a vector- or matrix-RHS batch has one
     // LU, not `batch` independent LUs. Factor the finite, unblocked matrix once,
@@ -12931,17 +12947,23 @@ fn complex_lu_decompose(
     a: &[f64],
     n: usize,
 ) -> Result<(Vec<f64>, Vec<usize>, f64, f64), LinAlgError> {
+    complex_lu_decompose_inner(a, n, true)
+}
+
+fn complex_lu_decompose_inner(
+    a: &[f64],
+    n: usize,
+    reject_non_finite: bool,
+) -> Result<(Vec<f64>, Vec<usize>, f64, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n).and_then(|x| x.checked_mul(2)) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "complex LU input must be 2*n*n with n > 0",
         ));
     }
-    for v in a {
-        if !v.is_finite() {
-            return Err(LinAlgError::NormDetRankPolicyViolation(
-                "complex matrix entries must be finite for LU",
-            ));
-        }
+    if reject_non_finite && a.iter().any(|value| !value.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "complex matrix entries must be finite for LU",
+        ));
     }
 
     let mut lu = a.to_vec();
@@ -13078,9 +13100,9 @@ pub fn complex_solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, Lin
 /// Solve A*X = B for complex matrices using one LU factorization for every RHS.
 ///
 /// A is n-by-n and B and X are n-by-nrhs in row-major interleaved storage.
-/// Finite inputs are required. Zero rows or zero RHS columns return an empty
-/// result after shape and finite-value validation; as in NumPy, a zero-column
-/// solve does not factor A and therefore does not reject a singular matrix.
+/// Finite inputs are required for nonempty solutions. Zero rows return an empty
+/// result after shape validation. With zero RHS columns, NumPy 2.4 still factors
+/// A and reports singularity; non-finite factors have no output cells to fill.
 pub fn complex_solve_nxn_multi(
     a: &[f64],
     b: &[f64],
@@ -13099,12 +13121,11 @@ pub fn complex_solve_nxn_multi(
             "complex rhs entries must be finite",
         ));
     }
-    if n == 0 || nrhs == 0 {
-        if a.iter().any(|value| !value.is_finite()) {
-            return Err(LinAlgError::NormDetRankPolicyViolation(
-                "complex matrix entries must be finite for LU",
-            ));
-        }
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    if nrhs == 0 {
+        complex_lu_decompose_inner(a, n, false)?;
         return Ok(Vec::new());
     }
 
@@ -22627,6 +22648,46 @@ for value in actual / scale:
     }
 
     #[test]
+    fn zero_column_solve_factors_real_and_complex_coefficients() {
+        let singular = [1.0, 2.0, 2.0, 4.0];
+        let identity = [1.0, 0.0, 0.0, 1.0];
+        assert!(matches!(
+            solve_nxn_multi(&singular, &[], 2, 0),
+            Err(LinAlgError::SolverSingularity)
+        ));
+        assert!(solve_nxn_multi(&identity, &[], 2, 0).unwrap().is_empty());
+
+        let complex_singular = [1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 4.0, 4.0];
+        let complex_identity = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(matches!(
+            super::complex_solve_nxn_multi(&complex_singular, &[], 2, 0),
+            Err(LinAlgError::SolverSingularity)
+        ));
+        assert!(
+            super::complex_solve_nxn_multi(&complex_identity, &[], 2, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::complex_solve_nxn_multi(&[], &[], 0, 3)
+                .unwrap()
+                .is_empty()
+        );
+        for value in [f64::NAN, f64::INFINITY] {
+            let complex = [value, 0.0, value, 0.0, value, 0.0, value, 0.0];
+            assert!(solve_nxn_multi(&[value; 4], &[], 2, 0).unwrap().is_empty());
+            assert!(
+                super::complex_solve_nxn_multi(&complex, &[], 2, 0)
+                    .unwrap()
+                    .is_empty()
+            );
+            // Nonempty complex solutions retain their existing finite-input
+            // contract; the factor-only path must not relax it.
+            assert!(super::complex_solve_nxn_multi(&complex, &[1.0; 4], 2, 1).is_err());
+        }
+    }
+
+    #[test]
     fn solve_triangular_lower() {
         // L = [[2, 0, 0], [1, 3, 0], [4, 2, 5]]
         let l = [2.0, 0.0, 0.0, 1.0, 3.0, 0.0, 4.0, 2.0, 5.0];
@@ -24891,16 +24952,23 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
 
     #[test]
     fn batch_solve_broadcast_a_zero_column_matrix_rhs_is_empty() {
-        let n = 16usize;
         let batch = 3usize;
-        let mut a = vec![0.0; n * n];
-        for i in 0..n {
-            a[i * n + i] = 1.0;
+        // Exercise both sides of the small-matrix scratch threshold. A zero
+        // RHS width must never reach either chunks_mut(0) implementation.
+        for n in [1usize, 2, 16] {
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                a[i * n + i] = 1.0;
+            }
+            let x = batch_solve(&a, &[n, n], &[], &[batch, n, 0], false)
+                .expect("zero-column matrix rhs");
+            assert!(x.is_empty());
+            a[n * n - 1] = 0.0;
+            assert!(matches!(
+                batch_solve(&a, &[n, n], &[], &[batch, n, 0], false),
+                Err(LinAlgError::SolverSingularity)
+            ));
         }
-
-        let x =
-            batch_solve(&a, &[n, n], &[], &[batch, n, 0], false).expect("zero-column matrix rhs");
-        assert!(x.is_empty());
     }
 
     #[test]
@@ -26896,7 +26964,7 @@ except Exception as exc:
             assert_eq!(rank, 1);
             assert!((s[0] / (length as f64).sqrt() - 1.0).abs() < 1e-12);
             assert_eq!(x.len(), 2 * n);
-            for values in x.chunks_exact(2) {
+            for values in x.as_chunks::<2>().0 {
                 assert!((values[0] / expected_x - 1.0).abs() < 2e-10);
                 assert!((values[1] / (-2.0 * expected_x) - 1.0).abs() < 2e-10);
             }
@@ -27716,7 +27784,7 @@ except Exception as exc:
         assert_oracle("rank-one singular value", values[0], 150.0_f64.sqrt());
         assert!(values[1] < 1e-12);
         for rhs in 0..2 {
-            let column: Vec<_> = b.chunks_exact(2).map(|row| row[rhs]).collect();
+            let column: Vec<_> = b.as_chunks::<2>().0.iter().map(|row| row[rhs]).collect();
             let scalar = super::lstsq_svd(&a, &column, 4, 2, 1e-6).unwrap();
             assert_eq!(rank, scalar.2);
             assert_eq!(values, scalar.3);

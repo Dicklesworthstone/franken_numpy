@@ -2071,7 +2071,7 @@ fn matrix_power_preserves_exact_integer_sidecars_and_boolean_products() {
         assert!(!input.has_integer_sidecar());
         let squared = input.matrix_power(2).unwrap();
         assert_eq!(squared.dtype(), dtype);
-        assert_eq!(squared.to_storage().unwrap().get_i128(0), Some(0));
+        assert_eq!(squared.to_storage().unwrap().get_i128(0), Ok(0));
         for (power, expected) in [(-1, inverse), (-2, inverse * inverse)] {
             let negative = input.matrix_power(power).unwrap();
             assert_eq!(negative.dtype(), DType::F64);
@@ -2494,6 +2494,54 @@ fn solve_empty_systems_preserve_shapes_and_skip_unvisited_factorizations() {
             assert!(result.values().is_empty());
         }
     }
+}
+
+#[test]
+fn solve_zero_column_rhs_still_checks_occupied_coefficients() {
+    let mut oracle = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I64,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let singular = UFuncArray::from_storage_with_dtype(
+            vec![2, 2],
+            ArrayStorage::F64(vec![1.0, 2.0, 2.0, 4.0]),
+            dtype,
+        )
+        .unwrap();
+        let visited = source(&[2, 0], dtype, 0);
+        assert!(singular.solve(&visited).is_err());
+        assert!(singular.solve_multi(&visited).is_err());
+        oracle.solve_case(&singular, &visited, false);
+        oracle.solve_case(&singular, &visited, true);
+
+        // A zero outer batch visits no matrix, even if the broadcast A would
+        // be singular. It must still retain the logical and component axes.
+        let unvisited = source(&[0, 2, 0], dtype, 0);
+        for result in [singular.solve(&unvisited), singular.solve_multi(&unvisited)] {
+            let result = result.unwrap();
+            assert_eq!(result.shape(), unvisited.shape());
+            assert!(result.values().is_empty());
+        }
+        oracle.solve_case(&singular, &unvisited, false);
+        oracle.solve_case(&singular, &unvisited, true);
+
+        let stacked = UFuncArray::from_storage_with_dtype(
+            vec![2, 2, 2],
+            ArrayStorage::F64(vec![1.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0]),
+            dtype,
+        )
+        .unwrap();
+        assert!(stacked.solve(&visited).is_err());
+        assert!(stacked.solve_multi(&visited).is_err());
+        oracle.solve_case(&stacked, &visited, false);
+        oracle.solve_case(&stacked, &visited, true);
+    }
+    oracle.finish();
 }
 
 #[test]

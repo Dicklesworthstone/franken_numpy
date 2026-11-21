@@ -5427,7 +5427,11 @@ impl UFuncArray {
             }
         }
 
-        ensure_storage_bridge_input_supported(&storage, "from_storage_with_dtype")?;
+        // The cast reads typed storage directly, so wide integers must reach
+        // it without passing through an f64 exactness gate. Narrowing needs
+        // their low bits, and floating targets must round only once. The
+        // resulting storage rebuilds any sidecar needed by the target dtype.
+        ensure_bridge_dtype_supported(source_dtype, "from_storage_with_dtype")?;
         ensure_storage_cast_target_supported(&storage, dtype, "from_storage_with_dtype")?;
         let casted = storage
             .cast_to(dtype)
@@ -8487,14 +8491,21 @@ impl UFuncArray {
 
     /// Preserve exact integer sources and normalize narrow source dtypes before
     /// converting to the resolved integer loop. No floating intermediate is used.
-    fn integer_binary_input(&self, dtype: DType) -> Result<IntegerSidecar, UFuncError> {
-        let source = self.to_storage()?;
+    fn integer_binary_input(
+        &self,
+        dtype: DType,
+        context: &str,
+    ) -> Result<IntegerSidecar, UFuncError> {
+        let source = self.to_storage().map_err(|error| match error {
+            UFuncError::Msg(message) => UFuncError::Msg(format!("{context}: {message}")),
+            other => other,
+        })?;
         let source = if source.dtype() == dtype {
             source
         } else {
-            source
-                .cast_to(dtype)
-                .map_err(|error| UFuncError::Msg(format!("integer loop cast failed: {error}")))?
+            source.cast_to(dtype).map_err(|error| {
+                UFuncError::Msg(format!("{context}: integer loop cast failed: {error}"))
+            })?
         };
         Ok(match source {
             ArrayStorage::Bool(v) => IntegerSidecar::I64(v.into_iter().map(i64::from).collect()),
@@ -8542,8 +8553,8 @@ impl UFuncArray {
         {
             return Ok(None);
         }
-        let lhs = self.integer_binary_input(out_dtype)?;
-        let rhs_values = rhs.integer_binary_input(out_dtype)?;
+        let lhs = self.integer_binary_input(out_dtype, op.name())?;
+        let rhs_values = rhs.integer_binary_input(out_dtype, op.name())?;
         if op == BinaryOp::Power
             && !out_shape.contains(&0)
             && let IntegerSidecar::I64(values) = &rhs_values
@@ -21206,11 +21217,11 @@ impl UFuncArray {
         let complex = dtype.is_complex();
         let components = if complex { 2 } else { 1 };
         if complex {
-            for pair in right.values.chunks_exact_mut(2) {
+            for pair in right.values.as_chunks_mut::<2>().0 {
                 pair[1] = -pair[1];
             }
             if !hermitian {
-                for pair in left.values.chunks_exact_mut(2) {
+                for pair in left.values.as_chunks_mut::<2>().0 {
                     pair[1] = -pair[1];
                 }
             }
@@ -21329,10 +21340,12 @@ impl UFuncArray {
             .checked_mul(components)
             .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
             .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
-        // NumPy does not factor a singular/nonfinite matrix when there are no
-        // result elements. Validate shapes and dtypes first, then avoid unused
-        // core products, source casts and numerical kernels altogether.
-        if physical_count == 0 {
+        // An empty outer batch or a zero-order matrix has no factorizations.
+        // Zero RHS columns are different: NumPy 2.4 still factors every
+        // visited A and reports singularity even though the result is empty.
+        // Keep this check before core products so unvisited large dimensions
+        // neither overflow nor require source casts.
+        if n == 0 || out_batch.contains(&0) {
             return Self::from_linalg_values(out_shape, Vec::new(), dtype);
         }
         let matrix_size = n
@@ -21365,7 +21378,7 @@ impl UFuncArray {
         );
         let mut coordinates = vec![0usize; out_batch.len()];
         let (mut a_flat, mut b_flat) = (0usize, 0usize);
-        let batches = physical_count / rhs_size;
+        let batches = element_count(&out_batch).map_err(UFuncError::Shape)?;
         for batch in 0..batches {
             let a_start = a_flat * matrix_size;
             let b_start = b_flat * rhs_size;
@@ -21434,7 +21447,7 @@ impl UFuncArray {
         // also preserves wide integer sidecars rather than trusting f64 cells.
         let source = self.cast_numeric_storage(DType::F64, false)?;
         let n = shape[shape.len() - 1];
-        let value_count = if n == 0 { 0 } else { source.values.len() / n };
+        let value_count = source.values.len().checked_div(n).unwrap_or(0);
         let mut values = Vec::new();
         let mut vectors = Vec::new();
         let value_capacity = value_count
@@ -21479,7 +21492,11 @@ impl UFuncArray {
             }
         }
 
-        let complex = values.chunks_exact(2).any(|value| value[1] != 0.0);
+        let complex = values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|value| value[1] != 0.0);
         let dtype = match (self.dtype == DType::F32, complex) {
             (true, false) => DType::F32,
             (true, true) => DType::Complex64,
@@ -42405,41 +42422,6 @@ fn ensure_exact_integer_bridge_value_supported(
     Ok(())
 }
 
-fn ensure_storage_bridge_input_supported(
-    storage: &ArrayStorage,
-    context: &str,
-) -> Result<(), UFuncError> {
-    ensure_bridge_dtype_supported(storage.dtype(), context)?;
-    match storage {
-        ArrayStorage::I64(values) => {
-            if let Some((index, value)) = values
-                .iter()
-                .copied()
-                .enumerate()
-                .find(|(_, value)| value.unsigned_abs() > MAX_EXACT_F64_U64)
-            {
-                return Err(UFuncError::Msg(format!(
-                    "{context}: i64 value at index {index} ({value}) exceeds exact f64 bridge range"
-                )));
-            }
-        }
-        ArrayStorage::U64(values) => {
-            if let Some((index, value)) = values
-                .iter()
-                .copied()
-                .enumerate()
-                .find(|(_, value)| *value > MAX_EXACT_F64_U64)
-            {
-                return Err(UFuncError::Msg(format!(
-                    "{context}: u64 value at index {index} ({value}) exceeds exact f64 bridge range"
-                )));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn ensure_storage_cast_target_supported(
     storage: &ArrayStorage,
     dtype: DType,
@@ -42527,7 +42509,14 @@ fn ensure_storage_cast_target_supported(
         }
         ArrayStorage::U64(values) => {
             for (index, value) in values.iter().copied().enumerate() {
-                ensure_exact_integer_bridge_value_supported(value as f64, dtype, context, index)?;
+                // Check the typed value before rounding: 2^53 + 1 becomes
+                // 2^53 in f64 and would otherwise pass this temporal guard.
+                if value > MAX_EXACT_F64_U64 {
+                    return Err(UFuncError::Msg(format!(
+                        "{context}: u64 value at index {index} ({value}) exceeds exact f64 bridge range for {}",
+                        dtype.name()
+                    )));
+                }
             }
         }
         ArrayStorage::F16(values) => {
@@ -56070,6 +56059,82 @@ mod tests {
             .unwrap_or(false)
     }
 
+    fn required_numpy_oracle_json(
+        script: &str,
+        input: &impl serde::Serialize,
+    ) -> serde_json::Value {
+        let mut child = Command::new(oracle_python_bin())
+            .args(["-c", script])
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("required NumPy oracle should spawn");
+        serde_json::to_writer(child.stdin.take().expect("oracle stdin"), input)
+            .expect("oracle input should be written");
+        let output = child
+            .wait_with_output()
+            .expect("NumPy oracle should finish");
+        assert!(
+            output.status.success(),
+            "required NumPy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("NumPy oracle should emit JSON")
+    }
+
+    fn assert_nan_statistics_match_live_numpy(cases: &[serde_json::Value], actual: &[UFuncArray]) {
+        // Compare the complete operation, including the mean and its reduction
+        // order. Reusing our nanmean here concealed errors in that first pass.
+        // Keep NaNs in the input bit stream; dropping them changes NumPy's
+        // contiguous pairwise tree even when the remaining values are unchanged.
+        let expected = required_numpy_oracle_json(
+            r#"
+import json, sys, warnings
+import numpy as np
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+rows = []
+for case in json.load(sys.stdin):
+    raw = np.array(case['bits'], dtype=np.uint64).view(np.float64).reshape(case['shape'])
+    out = np.asarray(getattr(np, case['op'])(
+        raw, axis=case['axis'], ddof=case['ddof'], keepdims=case['keepdims']))
+    rows.append(dict(shape=list(out.shape), dtype=str(out.dtype), bits=[
+        0x7ff8000000000000 if np.isnan(x) else int(x.view(np.uint64))
+        for x in out.ravel()]))
+print(json.dumps(rows))
+"#,
+            &cases,
+        );
+        let expected = expected.as_array().expect("oracle result rows");
+        assert_eq!(actual.len(), cases.len());
+        assert_eq!(actual.len(), expected.len());
+        for ((got, expected), case) in actual.iter().zip(expected).zip(cases) {
+            let context = format!(
+                "{} shape={} axis={} ddof={} keepdims={}",
+                case["op"], case["shape"], case["axis"], case["ddof"], case["keepdims"]
+            );
+            let shape: Vec<usize> = serde_json::from_value(expected["shape"].clone()).unwrap();
+            let bits: Vec<u64> = serde_json::from_value(expected["bits"].clone()).unwrap();
+            assert_eq!(expected["dtype"], "float64", "{context}");
+            assert_eq!(got.dtype(), DType::F64, "{context}");
+            assert_eq!(got.shape(), shape, "{context}");
+            let got_bits: Vec<u64> = got
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_nan() {
+                        0x7ff8_0000_0000_0000
+                    } else {
+                        value.to_bits()
+                    }
+                })
+                .collect();
+            assert_eq!(got_bits, bits, "{context}");
+        }
+    }
+
     fn normalize_minimum_fill_value(result: Option<UFuncArray>) -> String {
         normalize_fill_value(result)
     }
@@ -56707,6 +56772,76 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn from_storage_with_dtype_preserves_wide_integer_casts() {
+        // NumPy 2.4.3 astype results: narrowing retains low bits and signedness
+        // changes wrap at the destination width, even beyond f64 precision.
+        for (source, expected) in [
+            (
+                ArrayStorage::I64(vec![
+                    (1_i64 << 53) + 1,
+                    (1_i64 << 53) + 3,
+                    -(1_i64 << 53) - 1,
+                    i64::MAX,
+                ]),
+                ArrayStorage::I8(vec![1, 3, -1, -1]),
+            ),
+            (
+                ArrayStorage::U64(vec![
+                    u64::MAX,
+                    u64::MAX - 253,
+                    (1_u64 << 63) + 3,
+                    (1_u64 << 53) + 1,
+                ]),
+                ArrayStorage::I32(vec![-1, -254, 3, 1]),
+            ),
+            (
+                ArrayStorage::I64(vec![-1, -(1_i64 << 53) - 1, (1_i64 << 53) + 3, i64::MIN]),
+                ArrayStorage::U64(vec![
+                    u64::MAX,
+                    u64::MAX - (1_u64 << 53),
+                    (1_u64 << 53) + 3,
+                    1_u64 << 63,
+                ]),
+            ),
+            (
+                ArrayStorage::U64(vec![u64::MAX, (1_u64 << 63) + 3, (1_u64 << 53) + 1, 0]),
+                ArrayStorage::I64(vec![-1, i64::MIN + 3, (1_i64 << 53) + 1, 0]),
+            ),
+        ] {
+            let dtype = expected.dtype();
+            let array = UFuncArray::from_storage_with_dtype(vec![2, 2], source, dtype).unwrap();
+            assert_eq!(array.shape(), &[2, 2]);
+            assert_eq!(array.dtype(), dtype);
+            assert_eq!(array.to_storage().unwrap(), expected);
+            assert_eq!(array.values(), expected.to_f64_vec());
+        }
+    }
+
+    #[test]
+    fn from_storage_with_dtype_integer_to_float32_rounds_once() {
+        let midpoint = (1_i64 << 62) + (1_i64 << 38);
+        let array = UFuncArray::from_storage_with_dtype(
+            vec![4],
+            ArrayStorage::I64(vec![
+                midpoint - 1,
+                midpoint + 1,
+                -midpoint + 1,
+                -midpoint - 1,
+            ]),
+            DType::F32,
+        )
+        .unwrap();
+        let bits: Vec<_> = array
+            .values()
+            .iter()
+            .map(|&value| (value as f32).to_bits())
+            .collect();
+        // NumPy 2.4.3: both sides of a float32 midpoint must stay distinct;
+        // converting the original integers to f64 first loses that distinction.
+        assert_eq!(bits, [0x5e80_0000, 0x5e80_0001, 0xde80_0000, 0xde80_0001]);
+    }
+
+    #[test]
     fn from_storage_with_dtype_f64_fast_path_preserves_bits() {
         let values = vec![
             0.0,
@@ -56974,6 +57109,40 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn from_storage_with_dtype_temporal_targets_reject_rounded_unsigned_ticks() {
+        let boundary = 1_u64 << 53;
+        for dtype in [DType::DateTime64, DType::TimeDelta64] {
+            let exact = UFuncArray::from_storage_with_dtype(
+                vec![2],
+                ArrayStorage::U64(vec![0, boundary]),
+                dtype,
+            )
+            .unwrap();
+            assert_eq!(exact.dtype(), dtype);
+            assert_eq!(
+                exact.to_storage().unwrap(),
+                ArrayStorage::I64(vec![0, boundary as i64])
+            );
+            // The first case rounds down into the accepted f64 range. The
+            // guard must inspect its integer value, not that rounded value.
+            for value in [boundary + 1, boundary + 2, u64::MAX] {
+                let error = UFuncArray::from_storage_with_dtype(
+                    vec![1],
+                    ArrayStorage::U64(vec![value]),
+                    dtype,
+                )
+                .expect_err("inexact temporal bridge must remain rejected");
+                assert!(matches!(
+                    error,
+                    UFuncError::Msg(message)
+                        if message.contains("exceeds exact f64 bridge range")
+                            && message.contains(dtype.name())
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn scalar_fractional_datetime_lossy_fallback_uses_f64_dtype() {
         let arr = UFuncArray::scalar(1.5, DType::DateTime64);
         assert!(arr.shape().is_empty());
@@ -57113,6 +57282,21 @@ print(json.dumps(payload))
             err,
             UFuncError::Msg(message) if message.contains("cannot be represented exactly")
         ));
+    }
+
+    #[test]
+    fn to_storage_rejects_inexact_wide_integer_working_buffers() {
+        // Typed storage has exact provenance; raw f64 buffers do not. Enabling
+        // direct typed casts must not let an invalid raw buffer invent it.
+        for dtype in [DType::I64, DType::U64] {
+            for value in [1.25, f64::NAN, f64::INFINITY, 9_007_199_254_740_994.0] {
+                let array = UFuncArray::new(vec![1], vec![value], dtype).unwrap();
+                assert!(matches!(
+                    array.to_storage(),
+                    Err(UFuncError::Msg(message)) if message.contains("cannot be represented exactly")
+                ));
+            }
+        }
     }
 
     #[test]
@@ -65959,76 +66143,76 @@ print(json.dumps(np.asarray(result).reshape(-1).view(np.uint64).tolist()))
     }
 
     #[test]
-    fn nanvar_axis_parallel_matches_serial_reference() {
-        // nanvar above the parallel threshold runs an indexed parallel map over the
-        // output lanes (any axis, strided gather, serial within-lane accumulation).
-        // It must be bit-identical to a serial per-lane mean-deviation reference, for
-        // both a strided middle axis and the contiguous last axis, with ddof and a
-        // fully-NaN lane (denom==0 -> NaN). nanstd just sqrt's nanvar, so checking
-        // nanvar locks both.
-        let (d0, d1, d2) = (21usize, 19usize, 29usize);
-        let mut data: Vec<f64> = (0..d0 * d1 * d2)
-            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
-            .collect();
-        for i in (0..data.len()).step_by(13) {
-            data[i] = f64::NAN;
-        }
-        let arr = UFuncArray::new(vec![d0, d1, d2], data.clone(), DType::F64).expect("arr");
-        let strides = [d1 * d2, d2, 1usize];
-
-        for ax in [1usize, 2usize] {
-            for ddof in [0usize, 1usize] {
-                let axis_len = [d0, d1, d2][ax];
-                let out = arr.nanvar(Some(ax as isize), false, ddof).expect("nanvar");
-                // Use production's own per-lane mean (compensated reduce_sum), so the
-                // reference isolates the sq_sum + parallelization, not nanmean parity.
-                let mean_arr = arr.nanmean(Some(ax as isize), true).expect("nanmean");
-                let outer_count = data.len() / axis_len;
-                for outer in 0..outer_count {
-                    // Reproduce base-offset decomposition and the sq_sum scan.
-                    let mut remainder = outer;
-                    let mut base_flat = 0usize;
-                    for (d, &stride) in strides.iter().enumerate() {
-                        if d == ax {
-                            continue;
+    fn nanvar_axis_parallel_matches_live_numpy() {
+        // Strided lanes retain a left fold; contiguous lanes use NumPy's
+        // pairwise tree in both passes. A linear squared-deviation reference
+        // incorrectly rejects the latter by one ULP. Retain the original
+        // [21, 19, 29] witness and add a shape above the 1 << 14 SIMD parallel
+        // threshold, then compare complete results with NumPy and across pools.
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let parallel_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
+        for d0 in [21usize, 31usize] {
+            let (d1, d2) = (19usize, 29usize);
+            let mut data: Vec<f64> = (0..d0 * d1 * d2)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+                .collect();
+            for i in (0..data.len()).step_by(13) {
+                data[i] = f64::NAN;
+            }
+            if d0 == 31 {
+                // All-NaN middle-axis lane, all-NaN last-axis lane, and a
+                // one-value last-axis lane (ddof=1 must produce NaN).
+                for k in 0..d1 {
+                    data[k * d2 + 1] = f64::NAN;
+                }
+                let tail = data.len() - 2 * d2;
+                data[tail..].fill(f64::NAN);
+                data[tail] = 1.0;
+            }
+            let arr = UFuncArray::new(vec![d0, d1, d2], data.clone(), DType::F64).expect("arr");
+            for ax in [1isize, 2isize] {
+                for ddof in [0usize, 1usize] {
+                    let serial = serial_pool
+                        .install(|| arr.nanvar(Some(ax), false, ddof))
+                        .expect("serial nanvar");
+                    let parallel = parallel_pool
+                        .install(|| arr.nanvar(Some(ax), false, ddof))
+                        .expect("parallel nanvar");
+                    assert_eq!(serial.shape(), parallel.shape());
+                    for (index, (&expected, &got)) in
+                        serial.values().iter().zip(parallel.values()).enumerate()
+                    {
+                        if expected.is_nan() {
+                            assert!(got.is_nan(), "d0={d0} axis={ax} ddof={ddof} lane={index}");
+                        } else {
+                            assert_eq!(
+                                got.to_bits(),
+                                expected.to_bits(),
+                                "d0={d0} axis={ax} ddof={ddof} lane={index} thread-count drift"
+                            );
                         }
-                        let outer_stride = if d < ax { stride / axis_len } else { stride };
-                        let coord = remainder / outer_stride;
-                        remainder %= outer_stride;
-                        base_flat += coord * stride;
                     }
-                    let mean = mean_arr.values()[outer];
-                    let mut sq_sum = 0.0f64;
-                    let mut valid = 0usize;
-                    for k in 0..axis_len {
-                        let v = data[base_flat + k * strides[ax]];
-                        if !v.is_nan() {
-                            sq_sum += (v - mean).powi(2);
-                            valid += 1;
-                        }
-                    }
-                    let denom = valid.saturating_sub(ddof);
-                    let exp = if denom == 0 {
-                        f64::NAN
-                    } else {
-                        sq_sum / denom as f64
-                    };
-                    let got = out.values()[outer];
-                    if exp.is_nan() {
-                        assert!(
-                            got.is_nan(),
-                            "ax={ax} ddof={ddof} outer {outer} expected NaN, got {got}"
-                        );
-                    } else {
-                        assert_eq!(
-                            got.to_bits(),
-                            exp.to_bits(),
-                            "parallel nanvar ax={ax} ddof={ddof} outer {outer} diverged from serial"
-                        );
-                    }
+                    cases.push(serde_json::json!({
+                        "op": "nanvar",
+                        "shape": arr.shape(),
+                        "bits": data.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                        "axis": ax,
+                        "ddof": ddof,
+                        "keepdims": false,
+                    }));
+                    actual.push(parallel);
                 }
             }
         }
+        assert_nan_statistics_match_live_numpy(&cases, &actual);
     }
 
     #[test]
@@ -68238,8 +68422,21 @@ print(json.dumps(np.asarray(result).reshape(-1).view(np.uint64).tolist()))
 
     #[test]
     fn roll_multi_length_mismatch() {
-        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
-        assert!(arr.roll_multi(&[1, 2], &[0]).is_err());
+        let arr =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        // NumPy broadcasts a length-one shift OR axis, accumulating repeated
+        // axes. Only incompatible nonsingleton lengths are a mismatch.
+        assert_eq!(
+            arr.roll_multi(&[1, 2], &[0]).unwrap().values(),
+            &[4.0, 5.0, 6.0, 1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            arr.roll_multi(&[1], &[0, 1]).unwrap().values(),
+            &[6.0, 4.0, 5.0, 3.0, 1.0, 2.0]
+        );
+        assert!(arr.roll_multi(&[1, 2], &[0, 1, 0]).is_err());
+        assert!(arr.roll_multi(&[1, 2, 3], &[0, 1]).is_err());
+        assert!(arr.roll_multi(&[1], &[0, 2]).is_err());
     }
 
     #[test]
@@ -70389,11 +70586,12 @@ print(json.dumps([[str(int(x)) for x in np.array(c['values'], dtype=c['source'])
         ];
         let mut cases = Vec::new();
         let mut actual = Vec::new();
+        let mut constructed_actual = Vec::new();
         for (source_name, storage) in sources {
             let input: Vec<String> = (0..storage.len())
                 .map(|i| storage.get_i128(i).unwrap().to_string())
                 .collect();
-            let array = UFuncArray::from_storage(vec![storage.len()], storage).unwrap();
+            let array = UFuncArray::from_storage(vec![storage.len()], storage.clone()).unwrap();
             for (target_name, dtype) in targets {
                 cases.push(serde_json::json!({"source": source_name, "target": target_name, "values": input}));
                 let converted = array.astype_with_casting(dtype, "unsafe").unwrap();
@@ -70401,6 +70599,21 @@ print(json.dumps([[str(int(x)) for x in np.array(c['values'], dtype=c['source'])
                 assert_eq!(converted.dtype(), dtype);
                 let result = converted.to_storage().unwrap();
                 actual.push(
+                    (0..result.len())
+                        .map(|i| result.get_i128(i).unwrap().to_string())
+                        .collect::<Vec<_>>(),
+                );
+                let constructed = UFuncArray::from_storage_with_dtype(
+                    vec![storage.len()],
+                    storage.clone(),
+                    dtype,
+                )
+                .unwrap();
+                assert_eq!(constructed.shape(), array.shape());
+                assert_eq!(constructed.dtype(), dtype);
+                let result = constructed.to_storage().unwrap();
+                assert_eq!(constructed.values(), result.to_f64_vec());
+                constructed_actual.push(
                     (0..result.len())
                         .map(|i| result.get_i128(i).unwrap().to_string())
                         .collect::<Vec<_>>(),
@@ -70422,6 +70635,10 @@ print(json.dumps([[str(int(x)) for x in np.array([int(x) for x in c['values']], 
         );
         let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(actual, expected, "integer cast matrix must match NumPy");
+        assert_eq!(
+            constructed_actual, expected,
+            "typed constructor cast matrix must match NumPy"
+        );
     }
 
     #[test]
@@ -77448,11 +77665,11 @@ for module, prefix in families:
     }
 
     #[test]
-    fn fused_nanvar_nanstd_axis_matches_strided_reference_bits() {
-        // The fused nan_var_axis_simd path must be BIT-IDENTICAL to the scalar
-        // per-column non-NaN sum-of-squared-deviations it replaces, for nanvar AND
-        // nanstd, across the LANES=8 boundary, axis 0/1 of 2-D + 3-D, both ddof, incl
-        // all-NaN columns (-> NaN) and columns with valid <= ddof (-> NaN).
+    fn fused_nanvar_nanstd_axis_matches_live_numpy_bits() {
+        // Check BOTH passes against an independent oracle across the LANES=8
+        // boundary, every axis of 2-D/3-D arrays, both ddof and keepdims values.
+        // NumPy uses pairwise sums on the contiguous last axis, so the former
+        // uniformly linear per-column reference was wrong for that path.
         let shapes: &[Vec<usize>] = &[
             vec![37, 21],
             vec![21, 37],
@@ -77461,7 +77678,8 @@ for module, prefix in families:
             vec![8, 8],
             vec![3, 17],
         ];
-        let bits = |v: f64| v.to_bits();
+        let mut cases = Vec::new();
+        let mut actual = Vec::new();
         for shape in shapes {
             let n: usize = shape.iter().product();
             let mut data = Vec::with_capacity(n);
@@ -77474,67 +77692,29 @@ for module, prefix in families:
                 data.push(cell);
             }
             let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
-            let cols_after = |axis: usize| -> usize { shape[axis + 1..].iter().product() };
             for axis in 0..shape.len() {
-                let axis_len = shape[axis];
-                let inner = cols_after(axis);
                 for &ddof in &[0usize, 1usize] {
                     for keepdims in [false, true] {
-                        // Reference: nanmean (same in both paths) then the literal scalar
-                        // per-column non-NaN sq-sum / (valid - ddof) scan.
-                        let means = a.nanmean(Some(axis as isize), true).unwrap().values;
-                        let outer: usize = shape[..axis].iter().product();
-                        let mut reference = vec![0.0f64; outer * inner];
-                        for o in 0..outer {
-                            for c in 0..inner {
-                                let mean = means[o * inner + c];
-                                let mut acc = 0.0f64;
-                                let mut valid = 0usize;
-                                for k in 0..axis_len {
-                                    let v = data[o * axis_len * inner + k * inner + c];
-                                    if !v.is_nan() {
-                                        let d = v - mean;
-                                        acc += d * d;
-                                        valid += 1;
-                                    }
-                                }
-                                let denom = valid.saturating_sub(ddof);
-                                reference[o * inner + c] = if denom == 0 {
-                                    f64::NAN
-                                } else {
-                                    acc / denom as f64
-                                };
-                            }
-                        }
-                        let got_var = a.nanvar(Some(axis as isize), keepdims, ddof).unwrap();
-                        for (g, r) in got_var.values().iter().zip(&reference) {
-                            if r.is_nan() {
-                                assert!(g.is_nan(), "nanvar NaN {shape:?} ax{axis} ddof{ddof}");
+                        for op in ["nanvar", "nanstd"] {
+                            cases.push(serde_json::json!({
+                                "op": op,
+                                "shape": shape,
+                                "bits": data.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                                "axis": axis,
+                                "ddof": ddof,
+                                "keepdims": keepdims,
+                            }));
+                            actual.push(if op == "nanvar" {
+                                a.nanvar(Some(axis as isize), keepdims, ddof).unwrap()
                             } else {
-                                assert_eq!(
-                                    bits(*g),
-                                    bits(*r),
-                                    "nanvar bits {shape:?} ax{axis} ddof{ddof}: {g} vs {r}"
-                                );
-                            }
-                        }
-                        let got_std = a.nanstd(Some(axis as isize), keepdims, ddof).unwrap();
-                        for (g, r) in got_std.values().iter().zip(&reference) {
-                            let rs = r.sqrt();
-                            if rs.is_nan() {
-                                assert!(g.is_nan(), "nanstd NaN {shape:?} ax{axis} ddof{ddof}");
-                            } else {
-                                assert_eq!(
-                                    bits(*g),
-                                    bits(rs),
-                                    "nanstd bits {shape:?} ax{axis} ddof{ddof}: {g} vs {rs}"
-                                );
-                            }
+                                a.nanstd(Some(axis as isize), keepdims, ddof).unwrap()
+                            });
                         }
                     }
                 }
             }
         }
+        assert_nan_statistics_match_live_numpy(&cases, &actual);
     }
 
     #[test]
@@ -83531,6 +83711,15 @@ print("\n".join(out))
         // reduction parity is tolerance-based, so assert allclose vs an INDEPENDENT
         // naive nested-sum reference (sequential, defined order) rather than bit
         // equality, plus a golden sha256 over the deterministic fast-path bits.
+        // The default-sum parity fix replaced contiguous left folds with NumPy's
+        // pairwise tree. The old digest
+        // 7aea8f52341606af3d23819ecb16448970de450adc3dd1ed77772025b03e3e5f
+        // locks those former folds, not a NumPy einsum result. Independently
+        // evaluated NumPy 2.4.3 descending sums produce the new digest below:
+        // 30 of 234 values change bits; all remain within the SAME einsum bound.
+        // Require that live independent graph and np.einsum itself, as well as
+        // the naive reference, before accepting the new golden.
+        let expected_digest = "b59c38b46bb0304d9ea761c2a78658808edbb1711fa62877fcda7e1f10d5a1ec";
         let lcg = |seed: u64, n: usize| -> Vec<f64> {
             let mut s = seed;
             (0..n)
@@ -83583,6 +83772,59 @@ print("\n".join(out))
                 assert!(close(out_ik.values[i * d2 + k], acc), "ijk->ik ({i},{k})");
             }
         }
+        let oracle = required_numpy_oracle_json(
+            r#"
+import hashlib, json, sys
+import numpy as np
+case = json.load(sys.stdin)
+m = np.array(case['matrix_bits'], dtype=np.uint64).view(np.float64).reshape(37, 53)
+t = np.array(case['tensor_bits'], dtype=np.uint64).view(np.float64).reshape(11, 17, 13)
+descending_sums = [np.sum(m, axis=1), np.sum(m, axis=0),
+                   np.sum(np.sum(m, axis=1), axis=0), np.sum(t, axis=1)]
+einsums = [np.einsum('ij->i', m), np.einsum('ij->j', m),
+           np.einsum('ij->', m), np.einsum('ijk->ik', t)]
+digest = hashlib.sha256(b''.join(
+    np.asarray(a, dtype='<f8').tobytes() for a in descending_sums)).hexdigest()
+rows = [dict(shape=list(a.shape), sum_bits=a.ravel().view(np.uint64).tolist(),
+             einsum_bits=np.asarray(e).ravel().view(np.uint64).tolist())
+        for a, e in zip(descending_sums, einsums)]
+print(json.dumps(dict(digest=digest, rows=rows)))
+"#,
+            &serde_json::json!({
+                "matrix_bits": m.values.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+                "tensor_bits": t.values.iter().map(|v| v.to_bits()).collect::<Vec<u64>>(),
+            }),
+        );
+        assert_eq!(
+            oracle["digest"].as_str().unwrap(),
+            expected_digest,
+            "independent NumPy descending-sum golden drifted"
+        );
+        let rows = oracle["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        for ((arr, row), subscripts) in [&out_i, &out_j, &out_s, &out_ik]
+            .into_iter()
+            .zip(rows)
+            .zip(["ij->i", "ij->j", "ij->", "ijk->ik"])
+        {
+            let shape: Vec<usize> = serde_json::from_value(row["shape"].clone()).unwrap();
+            let sum_bits: Vec<u64> = serde_json::from_value(row["sum_bits"].clone()).unwrap();
+            let einsum_bits: Vec<u64> = serde_json::from_value(row["einsum_bits"].clone()).unwrap();
+            assert_eq!(arr.shape(), shape, "{subscripts} NumPy shape");
+            assert_eq!(
+                arr.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                sum_bits,
+                "{subscripts} independent NumPy reduction graph"
+            );
+            assert_eq!(arr.values.len(), einsum_bits.len());
+            for (index, (&got, bits)) in arr.values.iter().zip(einsum_bits).enumerate() {
+                let expected = f64::from_bits(bits);
+                assert!(
+                    close(got, expected),
+                    "{subscripts} NumPy einsum cell {index}: {got} vs {expected}"
+                );
+            }
+        }
         for arr in [&out_i, &out_j, &out_s, &out_ik] {
             for v in &arr.values {
                 hasher.update(v.to_bits().to_le_bytes());
@@ -83594,7 +83836,7 @@ print("\n".join(out))
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "7aea8f52341606af3d23819ecb16448970de450adc3dd1ed77772025b03e3e5f",
+            digest, expected_digest,
             "einsum single-operand reduction golden digest drifted"
         );
     }
