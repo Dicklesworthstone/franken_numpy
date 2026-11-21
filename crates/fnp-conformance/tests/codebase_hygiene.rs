@@ -13,12 +13,19 @@ use std::process::Command;
 /// additional `-g` glob patterns via `extra_globs` (e.g. positive includes
 /// like `"**/src/*.rs"`, or further excludes like `"!fuzz/"`).
 fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
+    ripgrep_output(pattern, extra_globs, "-c")
+        .lines()
+        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
+        .sum()
+}
+
+fn ripgrep_output(pattern: &str, extra_globs: &[&str], output_mode: &str) -> String {
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates dir");
 
     let mut args: Vec<&str> = vec![
-        "-c",
+        output_mode,
         pattern,
         "--type",
         "rust",
@@ -39,7 +46,7 @@ fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
         .expect("rg should be available");
 
     if output.status.code() == Some(1) {
-        return 0;
+        return String::new();
     }
     assert!(
         output.status.success(),
@@ -47,10 +54,7 @@ fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
         String::from_utf8_lossy(&output.stderr).trim()
     );
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
-        .sum()
+    String::from_utf8(output.stdout).expect("ripgrep output should be UTF-8")
 }
 
 /// Default ripgrep helper used by the stub-marker / TODO / unimplemented tests.
@@ -272,24 +276,60 @@ fn no_allow_unsafe_code_lint_overrides() {
 
 #[test]
 fn no_arch_intrinsics_in_crate_sources() {
-    // `is_x86_feature_detected!` is a SAFE macro and the standard way to gate a
-    // SIMD/ISA fast path at runtime (e.g. the AVX-512-gated linalg and libm
-    // paths); it is permitted. Any OTHER `core/std::arch` reference — real
-    // intrinsics like `_mm256_*` that require `unsafe` — is still forbidden, so
-    // subtract the feature-detection calls from the total.
-    let total = run_ripgrep(
+    // Runtime feature-detection macros are safe on both supported architectures.
+    // Inspect each reference: subtracting matching LINE counts lets a detection
+    // macro hide a forbidden intrinsic on the same line.
+    let matches = ripgrep_output(
         r"\buse\s+(core|std)::arch\b|\b(core|std)::arch::",
         &["!fuzz/", "!codebase_hygiene.rs"],
+        "-n",
     );
-    let feature_detected = run_ripgrep(
-        r"\b(core|std)::arch::is_x86_feature_detected\b",
-        &["!fuzz/", "!codebase_hygiene.rs"],
+    let forbidden: Vec<_> = matches
+        .lines()
+        .filter(|line| has_forbidden_arch_reference(line))
+        .collect();
+    assert!(
+        forbidden.is_empty(),
+        "found core/std::arch references other than safe x86/aarch64 feature-detection macros — use portable safe SIMD or scalar fallbacks instead:\n{}",
+        forbidden.join("\n")
     );
-    let count = total.saturating_sub(feature_detected);
-    assert_eq!(
-        count, 0,
-        "found {count} core/std::arch intrinsic references (excluding is_x86_feature_detected!) — use portable safe SIMD or scalar fallbacks instead"
-    );
+}
+
+fn has_forbidden_arch_reference(line: &str) -> bool {
+    ["core::arch", "std::arch"].iter().any(|prefix| {
+        line.match_indices(prefix).any(|(start, _)| {
+            let suffix = &line[start + prefix.len()..];
+            !["::is_x86_feature_detected", "::is_aarch64_feature_detected"]
+                .iter()
+                .any(|allowed| {
+                    suffix
+                        .strip_prefix(allowed)
+                        .is_some_and(|rest| rest.trim_start().starts_with('!'))
+                })
+        })
+    })
+}
+
+#[test]
+fn arch_reference_gate_accepts_safe_detection_and_rejects_intrinsics() {
+    for source in [
+        r#"std::arch::is_x86_feature_detected!("avx2")"#,
+        r#"std::arch::is_aarch64_feature_detected!("neon")"#,
+        r#"core::arch::is_aarch64_feature_detected ! ("neon")"#,
+    ] {
+        assert!(!has_forbidden_arch_reference(source), "{source}");
+    }
+    for source in [
+        "use std::arch;",
+        "use core::arch::aarch64::*;",
+        "std::arch::x86_64::_mm256_add_pd(a, b)",
+        "core::arch::aarch64::vaddq_f64(a, b)",
+        "std::arch::is_aarch64_feature_detected_unchecked!()",
+        r#"std::arch::is_x86_feature_detected!("avx2"); std::arch::x86_64::_mm256_add_pd(a, b)"#,
+        r#"std::arch::is_aarch64_feature_detected!("neon"); core::arch::aarch64::vaddq_f64(a, b)"#,
+    ] {
+        assert!(has_forbidden_arch_reference(source), "{source}");
+    }
 }
 
 /// A ufunc-named `#[pyfunction]` must never be REGISTERED under a name that

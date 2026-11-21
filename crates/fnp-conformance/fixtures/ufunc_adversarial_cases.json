@@ -807,7 +807,7 @@
     "expected_error_contains": "cannot broadcast"
   },
   {
-    "id": "sum_axis_out_of_bounds_scalar_axis_0",
+    "id": "sum_axis_out_of_bounds_scalar_axis_1",
     "seed": 433,
     "severity": "critical",
     "mode": "hardened",
@@ -822,7 +822,7 @@
     "lhs_shape": [],
     "lhs_values": [42.0],
     "lhs_dtype": "f64",
-    "axis": 0,
+    "axis": 1,
     "keepdims": false,
     "expected_error_contains": "axis"
   },
@@ -1185,7 +1185,7 @@
     "expected_shape": []
   },
   {
-    "id": "sum_rank0_axis_neg1_oob",
+    "id": "sum_rank0_axis_neg2_oob",
     "seed": 450,
     "severity": "critical",
     "mode": "hardened",
@@ -1200,7 +1200,7 @@
     "lhs_shape": [],
     "lhs_values": [42.0],
     "lhs_dtype": "f64",
-    "axis": -1,
+    "axis": -2,
     "keepdims": false,
     "expected_error_contains": "axis"
   },

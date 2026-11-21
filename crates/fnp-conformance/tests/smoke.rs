@@ -240,6 +240,74 @@ fn core_conformance_suites_pass() {
 }
 
 #[test]
+fn scalar_sum_axis_boundaries_match_live_numpy() {
+    // A scalar sum accepts scalar axis 0 and -1 (including keepdims), while
+    // 1 and -2 are the first genuinely out-of-bounds axes. Keep the hostile
+    // fixtures on those rejected boundaries and verify both sides with NumPy.
+    let cfg = HarnessConfig::default_paths();
+    let fixtures: Vec<Value> = serde_json::from_str(
+        &fs::read_to_string(cfg.fixture_root.join("ufunc_adversarial_cases.json"))
+            .expect("read adversarial fixtures"),
+    )
+    .expect("parse adversarial fixtures");
+    for axis in [-2, 1] {
+        assert!(fixtures.iter().any(|case| {
+            case["op"] == "sum"
+                && case["lhs_shape"].as_array().is_some_and(Vec::is_empty)
+                && case["axis"] == axis
+                && case["expected_error_contains"] == "axis"
+        }));
+    }
+
+    let output = Command::new(real_numpy_python())
+        .arg("-c")
+        .arg(
+            r#"
+import json
+import numpy as np
+rows = []
+for axis in (-2, -1, 0, 1):
+    for keepdims in (False, True):
+        row = dict(axis=axis, keepdims=keepdims)
+        try:
+            result = np.sum(np.array(42.0), axis=axis, keepdims=keepdims)
+            row.update(shape=list(result.shape), value=float(result), dtype=str(result.dtype))
+        except np.exceptions.AxisError:
+            row['error'] = 'AxisError'
+        rows.append(row)
+print(json.dumps(rows))
+"#,
+        )
+        .output()
+        .expect("run scalar sum NumPy oracle");
+    assert!(
+        output.status.success(),
+        "NumPy oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<Value> = serde_json::from_slice(&output.stdout).expect("parse NumPy rows");
+    assert_eq!(rows.len(), 8);
+    let scalar = fnp_ufunc::UFuncArray::scalar(42.0, fnp_dtype::DType::F64);
+    for row in rows {
+        let axis = row["axis"].as_i64().expect("axis") as isize;
+        let keepdims = row["keepdims"].as_bool().expect("keepdims");
+        match scalar.reduce_sum(Some(axis), keepdims) {
+            Ok(result) => {
+                assert!(row.get("error").is_none(), "{row}");
+                assert_eq!(serde_json::json!(result.shape()), row["shape"], "{row}");
+                assert_eq!(result.dtype(), fnp_dtype::DType::F64, "{row}");
+                assert_eq!(row["dtype"], "float64");
+                assert_eq!(result.values(), &[row["value"].as_f64().expect("value")]);
+            }
+            Err(error) => {
+                assert_eq!(row["error"], "AxisError", "{row}: {error}");
+                assert!(error.to_string().contains("axis"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
 fn nditer_wrapper_matches_numpy_iterindex_and_multi_index_progression() {
     for (order_name, order) in [("C", NditerOrder::C), ("F", NditerOrder::F)] {
         let oracle_states = numpy_nditer_states(order_name, None);

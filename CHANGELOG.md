@@ -33,6 +33,20 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 
 ## [Unreleased]
 
+### Release qualification regressions ([#8](https://github.com/Dicklesworthstone/franken_numpy/issues/8))
+
+- Preserve exact wide integers through `from_storage_with_dtype` casts, including
+  narrowing, signedness changes, and single-rounding conversion to float32. Keep
+  invalid raw integer buffers and inexact temporal conversions rejected.
+- Match NumPy 2.4's singularity checks for solves with zero RHS columns, including
+  real, complex, and batched systems. Empty outer batches still skip factorization.
+- Check NaN statistics against live NumPy with exact finite-result bits and lock
+  the einsum reduction golden to independently verified pairwise accumulation.
+  Cover accepted singleton `roll_multi` broadcasting and rejected length mismatches.
+- Repair the matrix-power test's storage-result assertion, fixed-size chunk
+  Clippy violations, scalar out-of-bounds fixtures, safe ARM feature-detection
+  hygiene, and a malformed campaign-result field in the performance ledger.
+
 ---
 
 ## [0.5.0] — Native polynomial, product and early-exit fidelity release (2026-10-07 → 2026-10-14)

@@ -79509,7 +79509,9 @@ AGENT_NAME=SandyOriole.
 ## 2026-10-28 - SHIP: union1d decides a float64 concatenation first and gives numpy the small ones (TealKnoll's f25cb35e1, re-measured on main) - f8+f8 1,024 1.51x numpy -> 1.03x, i8+f8 1,024 1.64x -> 1.03x
 worker=thinkstation1 (taskset -c 37, governor powersave) harness=bench_union1d.py (scratch; one build per process, fnp and numpy interleaved per round with an A/A null of fnp against itself, 31 rounds x 50 calls, medians; runs alternated before/after/before/after), numpy 2.4.3, python 3.14.3
 
-**Campaign result class:** maintenance-self-speedup (a loss closed to parity by routing; not a win)
+**Campaign result class:** maintenance-self-speedup
+
+A loss closed to parity by routing; not a win.
 
 The lever was measured on 2026-10-07 and never landed; it survived only in the swept
 franken_numpy-TealKnoll-rc0923 worktree (bead deadlock-audit-jcixj). On main 0ce8c59ca the loss
