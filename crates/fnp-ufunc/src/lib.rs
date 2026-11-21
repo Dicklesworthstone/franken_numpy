@@ -21820,58 +21820,82 @@ impl UFuncArray {
         Ok((values, factors))
     }
 
-    /// QR decomposition (np.linalg.qr).
-    /// Returns (Q, R). For m x n input, Q is m x min(m,n), R is min(m,n) x n.
+    /// Reduced QR decomposition of real or complex matrix stacks (`np.linalg.qr`).
+    ///
+    /// The final two logical axes describe each m-by-n matrix. Leading batch
+    /// axes are preserved; Q is m-by-k and R is k-by-n, where k = min(m, n).
+    /// Float32/complex64 inputs retain their precision, and integer/Boolean
+    /// inputs return float64. The thin kernels never allocate m-by-m Q for
+    /// tall matrices. Empty cores and empty batches return empty factors.
     pub fn qr(&self) -> Result<(Self, Self), UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            let (values, m, n) = self.as_complex_matrix_input("qr", false)?;
-            let k = m.min(n);
-            let (q_full, r_full) = fnp_linalg::complex_qr_mxn(&values, m, n)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-            let mut q = vec![0.0; 2 * m * k];
-            for row in 0..m {
-                for col in 0..k {
-                    let src = 2 * (row * m + col);
-                    let dst = 2 * (row * k + col);
-                    q[dst] = q_full[src];
-                    q[dst + 1] = q_full[src + 1];
-                }
-            }
-            let mut r = vec![0.0; 2 * k * n];
-            for row in 0..k {
-                for col in 0..n {
-                    let idx = 2 * (row * n + col);
-                    r[idx] = r_full[idx];
-                    r[idx + 1] = r_full[idx + 1];
-                }
-            }
-            return Ok((
-                Self::complex_matrix_from_interleaved(m, k, q, self.dtype)?,
-                Self::complex_matrix_from_interleaved(k, n, r, self.dtype)?,
+        let shape = self.complex_logical_shape("qr")?;
+        if shape.len() < 2 {
+            return Err(UFuncError::Msg(
+                "qr: input must have at least two logical dimensions".into(),
             ));
         }
-
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("qr: input must be a 2-D array".into()));
-        }
-        let m = self.shape[0];
-        let n = self.shape[1];
+        let dtype = Self::linalg_output_dtype(&[self], "qr")?;
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let batch_shape = &shape[..shape.len() - 2];
+        let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
         let k = m.min(n);
-        let (q, r) =
-            fnp_linalg::qr_mxn(&self.values, m, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
+        let mut q_shape = batch_shape.to_vec();
+        q_shape.extend([m, k]);
+        let mut r_shape = batch_shape.to_vec();
+        r_shape.extend([k, n]);
+        let capacity = |shape: &[usize]| {
+            let count = if shape.contains(&0) {
+                0
+            } else {
+                element_count(shape).map_err(UFuncError::Shape)?
+            };
+            count
+                .checked_mul(components)
+                .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        };
+        let input_count = capacity(&shape)?;
+        if input_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: input_count,
+                actual: self.values.len(),
+            });
+        }
+        // Validate both output shapes before allocating either factor. Empty
+        // batches never multiply unused core dimensions, even huge ones.
+        let q_count = capacity(&q_shape)?;
+        let r_count = capacity(&r_shape)?;
+        let mut q = try_zeroed_f64(q_count, "qr")?;
+        let mut r = try_zeroed_f64(r_count, "qr")?;
+        if input_count != 0 {
+            // Normalize the declared source dtype before widening; raw f64
+            // cells may not have been rounded to float32 or narrow integers.
+            // This bridge also preserves exact wide-integer sidecars.
+            let source = self.cast_numeric_storage(
+                if dtype.is_complex() {
+                    DType::Complex128
+                } else {
+                    DType::F64
+                },
+                false,
+            )?;
+            let matrix_len = capacity(&[m, n])?;
+            let q_len = capacity(&[m, k])?;
+            let r_len = capacity(&[k, n])?;
+            for (batch, matrix) in source.values.chunks_exact(matrix_len).enumerate() {
+                let (left, right) = if dtype.is_complex() {
+                    fnp_linalg::complex_qr_mxn_reduced(matrix, m, n)
+                } else {
+                    fnp_linalg::qr_mxn_reduced(matrix, m, n)
+                }
+                .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+                q[batch * q_len..(batch + 1) * q_len].copy_from_slice(&left);
+                r[batch * r_len..(batch + 1) * r_len].copy_from_slice(&right);
+            }
+        }
         Ok((
-            Self {
-                shape: vec![m, k],
-                values: q,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
-            Self {
-                shape: vec![k, n],
-                values: r,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            },
+            Self::from_linalg_values(q_shape, q, dtype)?,
+            Self::from_linalg_values(r_shape, r, dtype)?,
         ))
     }
 
@@ -30976,32 +31000,27 @@ impl UFuncArray {
     /// Returns the first n//2 + 1 complex coefficients as shape [n//2+1, 2].
     pub fn rfft(&self, n: Option<usize>) -> Result<Self, UFuncError> {
         let len = n.unwrap_or(self.values.len());
+        validate_real_fft_length(len)?;
+        let input = self.real_fft_components("rfft", false)?;
+        let mut real = try_zeroed_f64(len, "rfft")?;
+        let input_len = input.len().min(len);
+        real[..input_len].copy_from_slice(&input[..input_len]);
+        let out_len = len / 2 + 1;
         // Even length ≥ 2: real-FFT two-for-one trick (one length-L/2 complex FFT
         // + O(L) untangle ≈ half the work of the full length-L complex FFT). Odd
-        // or degenerate length: fall back to the full complex FFT then truncate
-        // (the rare odd case; keeps the error path identical for len == 0).
-        if len >= 2 && len.is_multiple_of(2) {
-            let out_len = len / 2 + 1;
-            let mut real = vec![0.0f64; len];
-            let input_len = self.values.len().min(len);
-            real[..input_len].copy_from_slice(&self.values[..input_len]);
-            let (re_half, im_half) = rfft_half_spectrum(&real);
-            let mut values = vec![0.0f64; out_len * 2];
-            for k in 0..out_len {
-                values[2 * k] = re_half[k];
-                values[2 * k + 1] = im_half[k];
-            }
-            return Ok(Self {
-                shape: vec![out_len, 2],
-                values,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+        // or unit length: full complex FFT, retaining only its nonnegative bins.
+        let (re, im) = if len >= 2 && len.is_multiple_of(2) {
+            rfft_half_spectrum(&real)
+        } else {
+            let mut imag = try_zeroed_f64(len, "rfft")?;
+            fft_dit(&mut real, &mut imag, false);
+            (real, imag)
+        };
+        let mut values = try_zeroed_f64(out_len * 2, "rfft")?;
+        for k in 0..out_len {
+            values[2 * k] = re[k];
+            values[2 * k + 1] = im[k];
         }
-        let full = self.fft(n)?;
-        let len = full.shape[0];
-        let out_len = len / 2 + 1;
-        let values = full.values[..out_len * 2].to_vec();
         Ok(Self {
             shape: vec![out_len, 2],
             values,
@@ -31021,71 +31040,52 @@ impl UFuncArray {
             ));
         }
         let m = self.shape[0]; // number of complex coefficients
-        let n = output_n.unwrap_or(2 * (m.saturating_sub(1)));
-        if n == 0 {
-            return Ok(Self {
-                shape: vec![0],
-                values: vec![],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+        let n = inverse_real_fft_length(m, output_n)?;
+        let needed = n / 2 + 1;
+        let input = self.real_fft_components("irfft", true)?;
+        let mut half_re = try_zeroed_f64(needed, "irfft")?;
+        let mut half_im = try_zeroed_f64(needed, "irfft")?;
+        for k in 0..m.min(needed) {
+            half_re[k] = input[k * 2];
+            half_im[k] = input[k * 2 + 1];
         }
-        // Even output with no spectrum truncation (m ≤ n/2+1, i.e. the natural
-        // roundtrip + zero-padded cases): inverse two-for-one trick — one length-n/2
-        // inverse complex FFT + O(n) re-tangle, ≈ half the work of the full path.
-        // Spectrum-truncating (m > n/2+1) or odd n fall back to the full path below.
-        //
-        // The two-for-one packing assumes the DC (index 0) and Nyquist (index n/2)
-        // coefficients are real, which they always are for a spectrum produced by
-        // rfft. `hfft` feeds an arbitrary Hermitian spectrum whose Nyquist can be
-        // complex (e.g. conj(a) with a non-real last coefficient); the packing then
-        // leaks that imaginary part into a uniform DC offset. When either terminal
-        // coefficient is complex, use the exact full-spectrum path below instead.
-        let dc_imag = self.values.get(1).copied().unwrap_or(0.0);
-        let nyquist_imag = if m == n / 2 + 1 {
-            self.values.get(n + 1).copied().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 && dc_imag == 0.0 && nyquist_imag == 0.0
-        {
-            let needed = n / 2 + 1;
-            let mut half_re = vec![0.0f64; needed];
-            let mut half_im = vec![0.0f64; needed];
-            let avail = m.min(needed);
-            for k in 0..avail {
-                half_re[k] = self.values[k * 2];
-                half_im[k] = self.values[k * 2 + 1];
-            }
-            let out = irfft_half_spectrum(&half_re, &half_im, n);
-            return Ok(Self {
-                shape: vec![n],
-                values: out,
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
-        }
-        // Reconstruct full spectrum from hermitian symmetry: X[k] = conj(X[n-k])
-        let mut re = vec![0.0; n];
-        let mut im = vec![0.0; n];
-        for k in 0..m.min(n) {
-            re[k] = self.values[k * 2];
-            im[k] = self.values[k * 2 + 1];
-        }
-        for k in m.min(n)..n {
-            let mirror = n - k;
-            if mirror < m {
-                re[k] = self.values[mirror * 2];
-                im[k] = -self.values[mirror * 2 + 1]; // conjugate
-            }
-        }
-        fft_dit(&mut re, &mut im, true);
+        let values = inverse_real_fft_lane(&half_re, &half_im, n)?;
         Ok(Self {
             shape: vec![n],
-            values: re,
+            values,
             dtype: DType::F64,
             integer_sidecar: None,
         })
+    }
+
+    /// Normalize source precision while preserving the packed spectrum layout.
+    /// Real forward transforms reject complex inputs; inverse transforms accept
+    /// either the packed real-component arrays or typed complex arrays.
+    fn real_fft_components(
+        &self,
+        operation: &str,
+        allow_complex: bool,
+    ) -> Result<std::borrow::Cow<'_, [f64]>, UFuncError> {
+        if self.dtype.is_complex() && !allow_complex {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: real-input transform does not support complex input"
+            )));
+        }
+        match self.dtype {
+            DType::F64 | DType::Complex128 => Ok(std::borrow::Cow::Borrowed(&self.values)),
+            DType::Complex64 => Ok(std::borrow::Cow::Owned(try_collect_f64(
+                self.values.iter().map(|&value| f64::from(value as f32)),
+                operation,
+            )?)),
+            dtype
+                if dtype.is_integer() || matches!(dtype, DType::Bool | DType::F16 | DType::F32) =>
+            {
+                Ok(std::borrow::Cow::Owned(self.to_storage()?.to_f64_vec()))
+            }
+            dtype => Err(UFuncError::Msg(format!(
+                "{operation}: unsupported input dtype {dtype:?}"
+            ))),
+        }
     }
 
     /// Compute the FFT of a Hermitian-symmetric signal (`np.fft.hfft`).
@@ -31337,30 +31337,19 @@ impl UFuncArray {
     pub fn rfftn(&self) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         if ndim == 0 {
-            return Ok(Self {
-                shape: vec![1, 2],
-                values: vec![self.values.first().copied().unwrap_or(0.0), 0.0],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+            return Err(UFuncError::Msg(
+                "rfftn: need at least one spatial dimension".to_string(),
+            ));
         }
+        for &len in &self.shape {
+            validate_real_fft_length(len)?;
+        }
+        let input = self.real_fft_components("rfftn", false)?;
         let total: usize = fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
-        if total == 0 {
-            let mut out_shape = self.shape.clone();
-            out_shape[ndim - 1] = out_shape[ndim - 1] / 2 + 1;
-            out_shape.push(2);
-            return Ok(Self {
-                shape: out_shape,
-                values: vec![],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
-        }
 
         // Initialize re/im arrays
-        let mut re = self.values.clone();
-        re.resize(total, 0.0);
-        let mut im = vec![0.0; total];
+        let mut re = try_collect_f64(input.iter().copied(), "rfftn")?;
+        let mut im = try_zeroed_f64(total, "rfftn")?;
 
         // FFT along all axes except the last
         for axis in 0..ndim.saturating_sub(1) {
@@ -31375,13 +31364,18 @@ impl UFuncArray {
         // Truncate last axis to n//2+1
         let last_n = self.shape[ndim - 1];
         let half_n = last_n / 2 + 1;
-        let outer: usize = self.shape[..ndim - 1].iter().product::<usize>().max(1);
-        let mut values = Vec::with_capacity(outer * half_n * 2);
+        let outer = total / last_n;
+        let component_count = outer
+            .checked_mul(half_n)
+            .and_then(|count| count.checked_mul(2))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut values = try_zeroed_f64(component_count, "rfftn")?;
         for o in 0..outer {
             for k in 0..half_n {
                 let idx = o * last_n + k;
-                values.push(re[idx]);
-                values.push(im[idx]);
+                let output = (o * half_n + k) * 2;
+                values[output] = re[idx];
+                values[output + 1] = im[idx];
             }
         }
         let mut out_shape = self.shape.clone();
@@ -31410,68 +31404,55 @@ impl UFuncArray {
         }
         let spatial_shape = &self.shape[..ndim - 1];
         let spatial_ndim = spatial_shape.len();
-        if spatial_ndim == 0 {
-            return Err(UFuncError::Msg(
-                "irfftn: need at least one spatial dimension".to_string(),
-            ));
+        for &len in &spatial_shape[..spatial_ndim - 1] {
+            validate_real_fft_length(len)?;
         }
         let half_n = spatial_shape[spatial_ndim - 1];
-        let output_n = last_n.unwrap_or(2 * (half_n - 1));
-        if output_n == 0 {
-            let mut out_shape: Vec<usize> = spatial_shape[..spatial_ndim - 1].to_vec();
-            out_shape.push(0);
-            return Ok(Self {
-                shape: out_shape,
-                values: vec![],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
-        }
-
-        // Reconstruct full spectrum along last axis
-        let outer: usize = spatial_shape[..spatial_ndim - 1]
-            .iter()
-            .product::<usize>()
-            .max(1);
-        let total_out = outer * output_n;
-        let mut re = vec![0.0; total_out];
-        let mut im = vec![0.0; total_out];
-        let spatial_total: usize =
-            fnp_ndarray::element_count(spatial_shape).map_err(UFuncError::Shape)?;
+        let output_n = inverse_real_fft_length(half_n, last_n)?;
+        let needed = output_n / 2 + 1;
+        let outer = element_count(&spatial_shape[..spatial_ndim - 1]).map_err(UFuncError::Shape)?;
+        let total_out = outer
+            .checked_mul(output_n)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let total_half = outer
+            .checked_mul(needed)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let input = self.real_fft_components("irfftn", true)?;
+        let mut re = try_zeroed_f64(total_half, "irfftn")?;
+        let mut im = try_zeroed_f64(total_half, "irfftn")?;
         for o in 0..outer {
-            for k in 0..half_n.min(output_n) {
+            for k in 0..half_n.min(needed) {
                 let src = o * half_n + k;
-                if src < spatial_total {
-                    re[o * output_n + k] = self.values[src * 2];
-                    im[o * output_n + k] = self.values[src * 2 + 1];
-                }
-            }
-            // Hermitian symmetry for k > half_n
-            for k in half_n..output_n {
-                let conj_k = output_n - k;
-                if conj_k < half_n {
-                    let src = o * half_n + conj_k;
-                    if src < spatial_total {
-                        re[o * output_n + k] = self.values[src * 2];
-                        im[o * output_n + k] = -self.values[src * 2 + 1];
-                    }
-                }
+                re[o * needed + k] = input[src * 2];
+                im[o * needed + k] = input[src * 2 + 1];
             }
         }
 
-        // Build output shape for IFFT processing
-        let mut full_shape: Vec<usize> = spatial_shape[..spatial_ndim - 1].to_vec();
-        full_shape.push(output_n);
-
-        // IFFT along all axes
-        for axis in 0..full_shape.len() {
-            fftn_along_axis(&full_shape, &mut re, &mut im, axis, true);
+        // Multidimensional Hermitian symmetry reflects EVERY frequency axis:
+        // X[k0, ..., k_last] = conj(X[-k0, ..., -k_last]). Reflecting only
+        // the last index in each frequency row corrupts all general 2-D/3-D
+        // signals. Invert the other axes first, then each resulting spatial
+        // row has ordinary 1-D Hermitian symmetry. Cropping/padding the last
+        // frequency axis commutes with these outer transforms.
+        let mut half_shape = spatial_shape.to_vec();
+        half_shape[spatial_ndim - 1] = needed;
+        for axis in 0..spatial_ndim - 1 {
+            fftn_along_axis(&half_shape, &mut re, &mut im, axis, true);
+        }
+        let mut values = try_zeroed_f64(total_out, "irfftn")?;
+        for ((half_re, half_im), output) in re
+            .chunks_exact(needed)
+            .zip(im.chunks_exact(needed))
+            .zip(values.chunks_exact_mut(output_n))
+        {
+            output.copy_from_slice(&inverse_real_fft_lane(half_re, half_im, output_n)?);
         }
 
-        // Return real part only
+        let mut full_shape = spatial_shape.to_vec();
+        full_shape[spatial_ndim - 1] = output_n;
         Ok(Self {
             shape: full_shape,
-            values: re,
+            values,
             dtype: DType::F64,
             integer_sidecar: None,
         })
@@ -46761,6 +46742,71 @@ fn rfft_half_spectrum(real: &[f64]) -> (Vec<f64>, Vec<f64>) {
     (out_re, out_im)
 }
 
+/// Validate both the packed output and Bluestein workspace before allocation.
+/// A requested length must not wrap arithmetic or exceed Vec's byte capacity.
+fn validate_real_fft_length(n: usize) -> Result<(), UFuncError> {
+    if n == 0 {
+        return Err(UFuncError::Msg(
+            "Invalid number of FFT data points (0) specified.".to_string(),
+        ));
+    }
+    let max_elements = isize::MAX as usize / std::mem::size_of::<f64>();
+    n.checked_mul(2)
+        .filter(|&count| count <= max_elements)
+        .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+    if !n.is_power_of_two() {
+        n.checked_mul(2)
+            .and_then(|count| count.checked_sub(1))
+            .and_then(usize::checked_next_power_of_two)
+            .filter(|&count| count <= max_elements)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+    }
+    Ok(())
+}
+
+fn inverse_real_fft_length(
+    input_len: usize,
+    requested: Option<usize>,
+) -> Result<usize, UFuncError> {
+    let n = match requested {
+        Some(n) => n,
+        None if input_len == 0 => {
+            return Err(UFuncError::Msg(
+                "Invalid number of FFT data points (-2) specified.".to_string(),
+            ));
+        }
+        None => (input_len - 1)
+            .checked_mul(2)
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?,
+    };
+    validate_real_fft_length(n)?;
+    Ok(n)
+}
+
+/// Invert one padded/truncated half spectrum. Its DC component, and the
+/// Nyquist component for even output lengths, are real by definition; their
+/// imaginary parts must be ignored even when they contain NaN or infinity.
+fn inverse_real_fft_lane(
+    half_re: &[f64],
+    half_im: &[f64],
+    n: usize,
+) -> Result<Vec<f64>, UFuncError> {
+    if n.is_multiple_of(2) {
+        return Ok(irfft_half_spectrum(half_re, half_im, n));
+    }
+    let mut re = try_zeroed_f64(n, "irfft")?;
+    let mut im = try_zeroed_f64(n, "irfft")?;
+    re[0] = half_re[0];
+    for k in 1..=n / 2 {
+        re[k] = half_re[k];
+        im[k] = half_im[k];
+        re[n - k] = half_re[k];
+        im[n - k] = -half_im[k];
+    }
+    fft_dit(&mut re, &mut im, true);
+    Ok(re)
+}
+
 /// Inverse of `rfft_half_spectrum`: recover the length-`n` (n even, ≥2) real signal
 /// from its half-spectrum `X[0..=M]` (M = n/2, so `M+1` interleaved coefficients)
 /// using one length-`M` inverse complex FFT plus an O(n) re-tangle — about half the
@@ -46777,10 +46823,10 @@ fn irfft_half_spectrum(half_re: &[f64], half_im: &[f64], n: usize) -> Vec<f64> {
     let two_pi_over_n = std::f64::consts::TAU / n as f64;
     for k in 0..m {
         let xkr = half_re[k];
-        let xki = half_im[k];
+        let xki = if k == 0 { 0.0 } else { half_im[k] };
         let mk = m - k; // k=0 -> M (Nyquist); k=1..M-1 -> M-k
         let xmr = half_re[mk];
-        let xmi = half_im[mk];
+        let xmi = if mk == m { 0.0 } else { half_im[mk] };
         // Xe = (X[k] + conj(X[M-k])) / 2
         let xer = (xkr + xmr) * 0.5;
         let xei = (xki - xmi) * 0.5;
@@ -84128,9 +84174,12 @@ print("\n".join(out))
     #[test]
     fn irfft_empty() {
         let a = UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap();
-        let result = a.irfft(None).unwrap();
-        assert_eq!(result.shape, vec![0]);
-        assert!(result.values.is_empty());
+        // NumPy infers n = 2 * (m - 1) = -2 here and rejects it. An
+        // explicit positive output length instead pads the empty spectrum.
+        assert!(a.irfft(None).is_err());
+        let result = a.irfft(Some(4)).unwrap();
+        assert_eq!(result.shape, vec![4]);
+        assert_eq!(result.values, vec![0.0; 4]);
     }
 
     #[test]
@@ -91696,7 +91745,9 @@ print(json.dumps(rows))
         let err = a
             .qr()
             .expect_err("missing trailing complex axis should fail");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("[rows, cols, 2]")));
+        assert!(
+            matches!(err, UFuncError::Msg(message) if message.contains("at least two logical dimensions"))
+        );
     }
 
     #[test]
