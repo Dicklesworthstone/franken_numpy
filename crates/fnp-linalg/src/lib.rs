@@ -3084,14 +3084,14 @@ pub fn qr_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
         return Ok((Vec::new(), Vec::new()));
     }
     let mut interleaved = qr_buffer(qr_complex_cell_count(m, n)?)?;
-    for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+    for (pair, &value) in interleaved.as_chunks_mut::<2>().0.iter_mut().zip(a) {
         pair[0] = value;
     }
     let (q, r) = complex_qr_mxn_reduced(&interleaved, m, n)?;
     drop(interleaved);
     let real_factor = |interleaved: Vec<f64>| -> Result<Vec<f64>, LinAlgError> {
         let mut real = qr_buffer(interleaved.len() / 2)?;
-        for (output, pair) in real.iter_mut().zip(interleaved.chunks_exact(2)) {
+        for (output, pair) in real.iter_mut().zip(interleaved.as_chunks::<2>().0) {
             if pair[1] != 0.0 {
                 return Err(LinAlgError::NormDetRankPolicyViolation(
                     "reduced real QR: factors left the real subspace",
@@ -3783,14 +3783,14 @@ pub fn svd_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, L
             "svd_mxn_reduced: input component dimensions overflow",
         ))?;
     let mut interleaved = complex_svd_buffer(interleaved_len, 0.0)?;
-    for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+    for (pair, &value) in interleaved.as_chunks_mut::<2>().0.iter_mut().zip(a) {
         pair[0] = value;
     }
     let (u, values, vt) = complex_svd_mxn_reduced(&interleaved, m, n)?;
     drop(interleaved);
     let real_factor = |interleaved: Vec<f64>| -> Result<Vec<f64>, LinAlgError> {
         let mut real = complex_svd_buffer(interleaved.len() / 2, 0.0)?;
-        for (output, pair) in real.iter_mut().zip(interleaved.chunks_exact(2)) {
+        for (output, pair) in real.iter_mut().zip(interleaved.as_chunks::<2>().0) {
             if pair[1] != 0.0 || !pair[0].is_finite() {
                 return Err(LinAlgError::SvdNonConvergence);
             }
@@ -4395,7 +4395,7 @@ fn svd_bidiag_values_with_max_iters(
                     "svd: component dimensions overflow",
                 ))?;
             let mut interleaved = complex_svd_buffer(components, 0.0)?;
-            for (pair, &value) in interleaved.chunks_exact_mut(2).zip(a) {
+            for (pair, &value) in interleaved.as_chunks_mut::<2>().0.iter_mut().zip(a) {
                 pair[0] = value;
             }
             complex_svd_mxn(&interleaved, m, n)
@@ -13830,7 +13830,7 @@ pub fn complex_qr_mxn_reduced(
             let magnitude = re.hypot(im);
             (re / magnitude, im / magnitude)
         };
-        for pair in v[pivot..].chunks_exact_mut(2) {
+        for pair in v[pivot..].as_chunks_mut::<2>().0 {
             pair[0] /= scale;
             pair[1] /= scale;
         }

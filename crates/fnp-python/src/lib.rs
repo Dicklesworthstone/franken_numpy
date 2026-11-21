@@ -1102,6 +1102,8 @@ impl PyDType {
 #[derive(Clone, Debug)]
 pub struct PyNdArray {
     array: UFuncArray,
+    // These allocations are published through Python's buffer protocol and
+    // stay fixed for this object's lifetime. Shape changes create new arrays.
     raw_bytes: Vec<u8>,
     buf_shape: Vec<isize>,
     buf_strides: Vec<isize>,
@@ -1258,22 +1260,33 @@ impl PyNdArray {
         })
     }
 
-    fn refresh_metadata(&mut self) -> PyResult<()> {
-        let storage = self.array.to_storage().map_err(map_ufunc_error)?;
-        self.raw_bytes = Self::storage_to_ne_bytes(storage)?;
-        let shape = self.array.shape();
-        let itemsize = self.array.dtype().item_size();
-        self.buf_strides =
-            contiguous_strides(shape, itemsize, MemoryOrder::C).map_err(|err| {
-                PyValueError::new_err(format!("PyNdArray stride computation failed: {err}"))
-            })?;
-        self.buf_shape = shape
-            .iter()
-            .map(|&d| {
-                isize::try_from(d)
-                    .map_err(|_| PyOverflowError::new_err("PyNdArray dimension exceeds isize::MAX"))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+    fn replace_same_layout(&mut self, array: UFuncArray) -> PyResult<()> {
+        if array.shape() != self.array.shape() || array.dtype() != self.array.dtype() {
+            return Err(PyBufferError::new_err(
+                "cannot change the layout of an existing PyNdArray buffer",
+            ));
+        }
+        let storage = array.to_storage().map_err(map_ufunc_error)?;
+        let bytes = Self::storage_to_ne_bytes(storage)?;
+        if bytes.len() != self.raw_bytes.len() {
+            return Err(PyBufferError::new_err("PyNdArray buffer size changed"));
+        }
+        // A memoryview retains this object, not the old Vec allocation. Finish
+        // all fallible work before publishing values, and never replace any
+        // exported allocation. Vec's raw-pointer API also avoids creating a
+        // mutable slice that could invalidate outstanding exported pointers.
+        // SAFETY: Both allocations are live, distinct, and have the same byte
+        // length. The destination is writable and cannot move while borrowed.
+        // No Rust reference into it escapes; buffer consumers hold raw pointers.
+        // As with NumPy, callers must synchronize concurrent native reads/writes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.raw_bytes.as_mut_ptr(),
+                bytes.len(),
+            );
+        }
+        self.array = array;
         Ok(())
     }
 
@@ -1314,7 +1327,45 @@ impl PyNdArray {
                 .map(Some)
                 .map_err(map_ufunc_error);
         }
-        Ok(None)
+        // PyO3 has no half-precision buffer element type and rejects null
+        // shape/stride pointers, which are valid for zero-dimensional NumPy
+        // buffers. A memoryview handles these layouts safely and copies
+        // strided buffers in logical C order while retaining the exporter.
+        let Ok(view) = pyo3::types::PyMemoryView::from(obj) else {
+            return Ok(None);
+        };
+        let format = view.getattr(intern!(py, "format"))?.extract::<String>()?;
+        let (native_order, code) = match format.as_bytes().split_first() {
+            Some((b'@' | b'=', code)) => (true, code),
+            Some((b'<', code)) => (cfg!(target_endian = "little"), code),
+            Some((b'>' | b'!', code)) => (cfg!(target_endian = "big"), code),
+            _ => (true, format.as_bytes()),
+        };
+        if !native_order {
+            return Ok(None);
+        }
+        let itemsize = view.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+        let dtype = match (code, itemsize) {
+            (b"?", 1) => DType::Bool,
+            (b"b", 1) => DType::I8,
+            (b"B", 1) => DType::U8,
+            (b"h", 2) => DType::I16,
+            (b"H", 2) => DType::U16,
+            (b"i" | b"l" | b"n", 4) => DType::I32,
+            (b"I" | b"L" | b"N", 4) => DType::U32,
+            (b"l" | b"q" | b"n", 8) => DType::I64,
+            (b"L" | b"Q" | b"N", 8) => DType::U64,
+            (b"e", 2) => DType::F16,
+            (b"f", 4) => DType::F32,
+            (b"d", 8) => DType::F64,
+            _ => return Ok(None),
+        };
+        let shape = view.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
+        let bytes = view.call_method0(intern!(py, "tobytes"))?;
+        let storage = Self::storage_from_ne_bytes(bytes.cast::<PyBytes>()?.as_bytes(), dtype)?;
+        UFuncArray::from_storage(shape, storage)
+            .map(Some)
+            .map_err(map_ufunc_error)
     }
 
     fn parse_nested_python(
@@ -1878,12 +1929,12 @@ impl PyNdArray {
     }
 
     #[getter]
-    fn __array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn __array_interface__<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("version", 3)?;
         dict.set_item("shape", PyTuple::new(py, self.array.shape())?)?;
         dict.set_item("typestr", PyDType::typestr_code(self.array.dtype()))?;
-        dict.set_item("data", (self.raw_bytes.as_ptr() as usize, true))?;
+        dict.set_item("data", (self.raw_bytes.as_mut_ptr() as usize, true))?;
         dict.set_item("strides", PyTuple::new(py, &self.buf_strides)?)?;
         Ok(dict)
     }
@@ -1891,7 +1942,9 @@ impl PyNdArray {
     // SAFETY: Implements the CPython PEP 3118 buffer protocol (`bf_getbuffer`). `view` is checked
     // for null before dereference, `(*view).obj` takes ownership of a new Python reference to
     // `slf` that keeps `self.raw_bytes`, `self.buf_shape`, and `self.buf_strides` alive until
-    // CPython releases the buffer, and `(*view).format` points to a `'static` NUL-terminated CStr.
+    // CPython releases the buffer. Their allocations never change during this object's
+    // lifetime (item assignment copies bytes through raw pointers), and `(*view).format`
+    // points to a `'static` NUL-terminated CStr.
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut pyo3::ffi::Py_buffer,
@@ -1906,14 +1959,14 @@ impl PyNdArray {
             ));
         }
         let (buf_ptr, byte_len, itemsize, ndim, format_ptr, shape_ptr, strides_ptr) = {
-            let borrowed = slf.borrow();
+            let mut borrowed = slf.try_borrow_mut()?;
             let Some(fmt) = PyDType::pep3118_format_cstr(borrowed.array.dtype()) else {
                 return Err(PyBufferError::new_err(
                     "PyNdArray dtype does not expose a PEP 3118 format string",
                 ));
             };
             (
-                borrowed.raw_bytes.as_ptr() as *mut core::ffi::c_void,
+                borrowed.raw_bytes.as_mut_ptr().cast::<core::ffi::c_void>(),
                 borrowed.raw_bytes.len() as isize,
                 borrowed.array.itemsize() as isize,
                 borrowed.array.ndim() as core::ffi::c_int,
@@ -2070,17 +2123,11 @@ impl PyNdArray {
             if shape.len() == 1 {
                 return Ok(self.element_to_pyobject(py, norm as usize)?.unbind());
             }
-            let sub_shape = shape[1..].to_vec();
-            let stride0 = self.array.strides()[0];
-            let start = (norm as usize) * stride0;
-            let end = start + stride0;
-            let sliced_vals = self.array.values()[start..end].to_vec();
-            let sub = UFuncArray::from_storage_with_dtype(
-                sub_shape,
-                ArrayStorage::F64(sliced_vals),
-                self.array.dtype(),
-            )
-            .map_err(map_ufunc_error)?;
+            let sub = self
+                .array
+                .take(&[norm as i64], Some(0))
+                .and_then(|row| row.squeeze(Some(0)))
+                .map_err(map_ufunc_error)?;
             return Ok(Py::new(py, Self::from_ufunc_array(sub)?)?.into_any());
         }
         if let Ok(tup) = key.cast::<PyTuple>() {
@@ -2111,33 +2158,94 @@ impl PyNdArray {
         Err(PyTypeError::new_err("unsupported index type for PyNdArray"))
     }
 
-    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: f64) -> PyResult<()> {
-        if let Ok(idx) = key.extract::<isize>() {
-            let flat = self.resolve_flat_index(&[idx])?;
-            let mut vals = self.array.values().to_vec();
-            vals[flat] = value;
-            self.array = UFuncArray::from_storage_with_dtype(
-                self.array.shape().to_vec(),
-                ArrayStorage::F64(vals),
-                self.array.dtype(),
-            )
-            .map_err(map_ufunc_error)?;
-            return self.refresh_metadata();
-        }
-        if let Ok(tup) = key.cast::<PyTuple>() {
+    fn __setitem__(
+        &mut self,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let flat = if let Ok(idx) = key.extract::<isize>() {
+            self.resolve_flat_index(&[idx])?
+        } else if let Ok(tup) = key.cast::<PyTuple>() {
             let indices = tup.extract::<Vec<isize>>()?;
-            let flat = self.resolve_flat_index(&indices)?;
-            let mut vals = self.array.values().to_vec();
-            vals[flat] = value;
-            self.array = UFuncArray::from_storage_with_dtype(
-                self.array.shape().to_vec(),
-                ArrayStorage::F64(vals),
-                self.array.dtype(),
-            )
-            .map_err(map_ufunc_error)?;
-            return self.refresh_metadata();
+            self.resolve_flat_index(&indices)?
+        } else {
+            return Err(PyTypeError::new_err(
+                "unsupported index type for PyNdArray.__setitem__",
+            ));
+        };
+        // Retain typed storage, especially untouched int64/uint64 values that
+        // the f64 working cells cannot represent. Conversion and range checks
+        // happen before mutation, so failed assignments leave every view intact.
+        let mut storage = self.array.to_storage().map_err(map_ufunc_error)?;
+        let dtype = self.array.dtype();
+        if dtype.is_integer() {
+            // Zero-dimensional arrays carry a strong source dtype. NumPy
+            // scalars also use that cast for unsigned targets, but signed
+            // targets use checked scalar packing, like builtin integers.
+            if value.cast_exact::<PyInt>().is_err()
+                && value.cast_exact::<pyo3::types::PyFloat>().is_err()
+                && (matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64)
+                    || !cached_numpy_generic(value.py())
+                        .is_ok_and(|generic| value.is_instance(generic).unwrap_or(false)))
+                && let Some(scalar) = Self::try_from_pep3118_buffer(value.py(), value)?
+                && scalar.ndim() == 0
+            {
+                let cast = scalar
+                    .to_storage()
+                    .map_err(map_ufunc_error)?
+                    .cast_to(dtype)
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                let integer = cast
+                    .get_i128(0)
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                storage
+                    .set_i128(flat, integer)
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                let array = UFuncArray::from_storage(self.array.shape().to_vec(), storage)
+                    .map_err(map_ufunc_error)?;
+                return self.replace_same_layout(array);
+            }
+            let integer = value.py().get_type::<PyInt>().call1((value,))?;
+            let integer = integer.extract::<i128>()?;
+            let (minimum, maximum) = match dtype {
+                DType::I8 => (i128::from(i8::MIN), i128::from(i8::MAX)),
+                DType::I16 => (i128::from(i16::MIN), i128::from(i16::MAX)),
+                DType::I32 => (i128::from(i32::MIN), i128::from(i32::MAX)),
+                DType::I64 => (i128::from(i64::MIN), i128::from(i64::MAX)),
+                DType::U8 => (0, i128::from(u8::MAX)),
+                DType::U16 => (0, i128::from(u16::MAX)),
+                DType::U32 => (0, i128::from(u32::MAX)),
+                DType::U64 => (0, i128::from(u64::MAX)),
+                _ => unreachable!("integer dtype was checked"),
+            };
+            if integer < minimum || integer > maximum {
+                return Err(PyOverflowError::new_err(format!(
+                    "Python integer {integer} out of bounds for {}",
+                    PyDType::canonical_name(dtype)
+                )));
+            }
+            storage
+                .set_i128(flat, integer)
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        } else {
+            let scalar = if dtype == DType::Bool {
+                if value.is_truthy()? { 1.0 } else { 0.0 }
+            } else if value.is_none() {
+                f64::NAN
+            } else {
+                value
+                    .py()
+                    .get_type::<pyo3::types::PyFloat>()
+                    .call1((value,))?
+                    .extract::<f64>()?
+            };
+            storage
+                .set_f64(flat, scalar)
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
         }
-        Err(PyTypeError::new_err("unsupported index type for PyNdArray.__setitem__"))
+        let array = UFuncArray::from_storage(self.array.shape().to_vec(), storage)
+            .map_err(map_ufunc_error)?;
+        self.replace_same_layout(array)
     }
 
     fn __neg__(&self) -> PyResult<Self> {
