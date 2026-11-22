@@ -1709,6 +1709,23 @@ fn inv_nxn_into_out(
     Ok(())
 }
 
+fn validate_lu_permutation(perm: &[usize], n: usize) -> Result<(), LinAlgError> {
+    if perm.len() != n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "LU permutation length must equal n",
+        ));
+    }
+    let mut seen = vec![false; n];
+    for &row in perm {
+        if row >= n || std::mem::replace(&mut seen[row], true) {
+            return Err(LinAlgError::ShapeContractViolation(
+                "LU permutation must contain each row exactly once",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Solve A*X = B for multiple right-hand sides given the LU factor.
 /// `lu` and `perm` are from `lu_decompose`. `b` is n*m (row-major).
 pub fn lu_solve_multi(
@@ -1723,6 +1740,7 @@ pub fn lu_solve_multi(
             "lu_solve_multi: LU must be n*n, B must be n*m, with n,m > 0",
         ));
     }
+    validate_lu_permutation(perm, n)?;
 
     let mut x = vec![0.0; n * m];
 
@@ -1774,11 +1792,7 @@ pub fn lu_solve(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Result<Vec<f
             "lu_solve: LU buffer must be n*n with n > 0",
         ));
     }
-    if perm.len() != n {
-        return Err(LinAlgError::ShapeContractViolation(
-            "lu_solve: permutation length must equal n",
-        ));
-    }
+    validate_lu_permutation(perm, n)?;
     if b.len() != n {
         return Err(LinAlgError::ShapeContractViolation(
             "lu_solve: rhs length must equal n",
@@ -12127,7 +12141,9 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
     Ok((signs, logabsdets))
 }
 
-/// Batched solve: solve on A(..., n, n) × b(..., n) → x(..., n).
+/// Solve square matrix stacks with broadcasted leading dimensions.
+/// `vector_rhs` selects a vector core `(..., n)`; otherwise B has matrix core
+/// `(..., n, nrhs)`. Results are flattened in the broadcast shape's C order.
 pub fn batch_solve(
     a: &[f64],
     a_shape: &[usize],
@@ -12135,64 +12151,83 @@ pub fn batch_solve(
     b_shape: &[usize],
     vector_rhs: bool,
 ) -> Result<Vec<f64>, LinAlgError> {
-    let (a_batch, n) = parse_batched_square(a_shape)?;
+    if a_shape.len() < 2 || a_shape[a_shape.len() - 2] != a_shape[a_shape.len() - 1] {
+        return Err(LinAlgError::ShapeContractViolation(
+            "batch_solve: the final two dimensions of A must be square",
+        ));
+    }
+    let n = a_shape[a_shape.len() - 1];
+    let a_batch_shape = &a_shape[..a_shape.len() - 2];
     if b_shape.is_empty() {
         return Err(LinAlgError::ShapeContractViolation(
             "batch_solve: b must have at least 1 dimension",
         ));
     }
 
-    let (b_batch, rhs_cols, rhs_width) = if vector_rhs {
+    let (b_batch_shape, rhs_cols) = if vector_rhs {
         if b_shape[b_shape.len() - 1] != n {
             return Err(LinAlgError::ShapeContractViolation(
                 "batch_solve: vector b length must match n",
             ));
         }
-        let b_batch = if b_shape.len() <= 1 {
-            1
-        } else {
-            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 1])
-                .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
-        };
-        (b_batch, 1, n)
+        (&b_shape[..b_shape.len() - 1], 1)
     } else {
         if b_shape.len() < 2 || b_shape[b_shape.len() - 2] != n {
             return Err(LinAlgError::ShapeContractViolation(
                 "batch_solve: matrix b penultimate dimension must match n",
             ));
         }
-        let rhs_cols = b_shape[b_shape.len() - 1];
-        let rhs_width = n
-            .checked_mul(rhs_cols)
-            .ok_or(LinAlgError::ShapeContractViolation(
-                "batch_solve: rhs width overflow",
-            ))?;
-        let b_batch = if b_shape.len() <= 2 {
-            1
-        } else {
-            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 2])
-                .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
-        };
-        (b_batch, rhs_cols, rhs_width)
+        (&b_shape[..b_shape.len() - 2], b_shape[b_shape.len() - 1])
     };
 
-    let batch = a_batch.max(b_batch);
-    if (a_batch != 1 && a_batch != batch) || (b_batch != 1 && b_batch != batch) {
-        return Err(LinAlgError::ShapeContractViolation(
-            "batch_solve: batch dimensions are not broadcastable",
-        ));
-    }
-    let mat_size = n * n;
-    if Some(a.len()) != a_batch.checked_mul(mat_size) {
+    let out_batch_shape =
+        fnp_ndarray::broadcast_shape(a_batch_shape, b_batch_shape).map_err(|_| {
+            LinAlgError::ShapeContractViolation(
+                "batch_solve: batch dimensions are not broadcastable",
+            )
+        })?;
+    let element_count = |shape: &[usize]| {
+        if shape.contains(&0) {
+            Ok(0)
+        } else {
+            fnp_ndarray::element_count(shape).map_err(|_| {
+                LinAlgError::ShapeContractViolation("batch_solve: shape product overflow")
+            })
+        }
+    };
+    if a.len() != element_count(a_shape)? {
         return Err(LinAlgError::ShapeContractViolation(
             "batch_solve: A data length does not match shape",
         ));
     }
-    if Some(b.len()) != b_batch.checked_mul(rhs_width) {
+    if b.len() != element_count(b_shape)? {
         return Err(LinAlgError::ShapeContractViolation(
             "batch_solve: B data length does not match shape",
         ));
     }
+    // Empty outer batches and zero-order systems visit no coefficient matrix.
+    // Validate the logical shapes and actual buffers first, then avoid products
+    // of unused dimensions, source indexing, and chunks_mut(0).
+    if n == 0 || out_batch_shape.contains(&0) {
+        return Ok(Vec::new());
+    }
+    let mat_size = n.checked_mul(n).ok_or(LinAlgError::ShapeContractViolation(
+        "batch_solve: matrix dimensions overflow",
+    ))?;
+    let rhs_width = n
+        .checked_mul(rhs_cols)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "batch_solve: rhs width overflow",
+        ))?;
+    let a_batch = element_count(a_batch_shape)?;
+    let b_batch = element_count(b_batch_shape)?;
+    let batch = element_count(&out_batch_shape)?;
+    let result_len = batch
+        .checked_mul(rhs_width)
+        .filter(|&length| length <= isize::MAX as usize / std::mem::size_of::<f64>())
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "batch_solve: output dimensions overflow",
+        ))?;
     if rhs_width == 0 {
         // There are no output chunks to iterate, but each occupied coefficient
         // matrix still needs a singularity check. Avoid chunks_mut(0) in the
@@ -12202,6 +12237,46 @@ pub fn batch_solve(
         }
         return Ok(Vec::new());
     }
+    let output_buffer = || {
+        let mut result = Vec::new();
+        result.try_reserve_exact(result_len).map_err(|_| {
+            LinAlgError::ShapeContractViolation("batch_solve: unable to allocate output")
+        })?;
+        result.resize(result_len, 0.0);
+        Ok::<_, LinAlgError>(result)
+    };
+    let lane_work = mat_size.saturating_add(rhs_width);
+    let source_lane = |mut output_lane: usize, shape: &[usize], source_batch: usize| {
+        // Once broadcasting is validated, these common layouts retain the
+        // existing constant-time lane mapping, even with leading singleton axes.
+        if source_batch == 1 {
+            return 0;
+        }
+        if source_batch == batch {
+            return output_lane;
+        }
+        let mut source_lane = 0;
+        let mut stride = 1;
+        for (&extent, &output_extent) in shape.iter().rev().zip(out_batch_shape.iter().rev()) {
+            let coordinate = output_lane % output_extent;
+            output_lane /= output_extent;
+            if extent != 1 {
+                source_lane += coordinate * stride;
+            }
+            // All dimensions are positive here, and the complete source shape
+            // and buffer count have already been checked for overflow.
+            stride *= extent;
+        }
+        source_lane
+    };
+    let lane_inputs = |idx: usize| {
+        let a_idx = source_lane(idx, a_batch_shape, a_batch);
+        let b_idx = source_lane(idx, b_batch_shape, b_batch);
+        (
+            &a[a_idx * mat_size..(a_idx + 1) * mat_size],
+            &b[b_idx * rhs_width..(b_idx + 1) * rhs_width],
+        )
+    };
 
     // A literal 2-D matrix broadcast across a vector- or matrix-RHS batch has one
     // LU, not `batch` independent LUs. Factor the finite, unblocked matrix once,
@@ -12305,12 +12380,12 @@ pub fn batch_solve(
             }
         };
 
-        let mut result = vec![0.0f64; batch * rhs_width];
-        if batch_should_parallelize(batch, mat_size + rhs_width) {
+        let mut result = output_buffer()?;
+        if batch_should_parallelize(batch, lane_work) {
             result
                 .par_chunks_mut(rhs_width)
                 .enumerate()
-                .with_min_len(batch_lanes_per_task(mat_size + rhs_width))
+                .with_min_len(batch_lanes_per_task(lane_work))
                 .for_each(|(idx, out_chunk)| {
                     let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
                     solve_factored_into(b_sub, out_chunk);
@@ -12341,15 +12416,7 @@ pub fn batch_solve(
         // (the *_into_out helpers share lu_factor_unblocked_into and the same
         // substitution; n < LU_BLOCK_MIN keeps the unblocked TRSM). The lowest-indexed
         // failing lane's error is returned, matching the batch_map_lanes ordering.
-        let mut result = vec![0.0f64; batch * rhs_width];
-        let lane_inputs = |idx: usize| {
-            let a_idx = if a_batch == 1 { 0 } else { idx };
-            let b_idx = if b_batch == 1 { 0 } else { idx };
-            (
-                &a[a_idx * mat_size..(a_idx + 1) * mat_size],
-                &b[b_idx * rhs_width..(b_idx + 1) * rhs_width],
-            )
-        };
+        let mut result = output_buffer()?;
         let solve_into = |a_sub: &[f64],
                           b_sub: &[f64],
                           lu: &mut [f64],
@@ -12362,13 +12429,13 @@ pub fn batch_solve(
                 solve_nxn_multi_into_out(a_sub, b_sub, n, rhs_cols, lu, perm, out)
             }
         };
-        if batch_should_parallelize(batch, mat_size + rhs_width) {
+        if batch_should_parallelize(batch, lane_work) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
             result
                 .par_chunks_mut(rhs_width)
                 .enumerate()
-                .with_min_len(batch_lanes_per_task(mat_size + rhs_width))
+                .with_min_len(batch_lanes_per_task(lane_work))
                 .for_each_init(
                     || (vec![0.0f64; mat_size], vec![0usize; n]),
                     |(lu, perm), (idx, out_chunk)| {
@@ -12404,18 +12471,18 @@ pub fn batch_solve(
         return Ok(result);
     }
 
-    let lanes = batch_map_lanes(batch, mat_size + rhs_width, |idx| {
-        let a_idx = if a_batch == 1 { 0 } else { idx };
-        let b_idx = if b_batch == 1 { 0 } else { idx };
-        let a_sub = &a[a_idx * mat_size..(a_idx + 1) * mat_size];
-        let b_sub = &b[b_idx * rhs_width..(b_idx + 1) * rhs_width];
+    let lanes = batch_map_lanes(batch, lane_work, |idx| {
+        let (a_sub, b_sub) = lane_inputs(idx);
         if vector_rhs {
             solve_nxn(a_sub, b_sub, n)
         } else {
             solve_nxn_multi(a_sub, b_sub, n, rhs_cols)
         }
     })?;
-    let mut result = Vec::with_capacity(batch * rhs_width);
+    let mut result = Vec::new();
+    result.try_reserve_exact(result_len).map_err(|_| {
+        LinAlgError::ShapeContractViolation("batch_solve: unable to allocate output")
+    })?;
     for x in &lanes {
         result.extend_from_slice(x);
     }
@@ -22621,6 +22688,30 @@ for value in actual / scale:
     }
 
     #[test]
+    fn lu_solve_rejects_malformed_permutations() {
+        let lu = [1.0, 0.0, 0.0, 1.0];
+        let invalid: &[&[usize]] = &[&[], &[0], &[0, 1, 2], &[0, 2], &[usize::MAX, 0], &[1, 1]];
+        for &perm in invalid {
+            assert!(matches!(
+                lu_solve(&lu, perm, &[4.0, 9.0], 2),
+                Err(LinAlgError::ShapeContractViolation(_))
+            ));
+            assert!(matches!(
+                super::lu_solve_multi(&lu, perm, &[4.0, 8.0, 9.0, 18.0], 2, 2),
+                Err(LinAlgError::ShapeContractViolation(_))
+            ));
+        }
+
+        // A real pivoted factorization must remain usable by both entry points.
+        let (lu, perm, _) = lu_factor_nxn(&[0.0, 2.0, 3.0, 4.0], 2).unwrap();
+        assert_eq!(lu_solve(&lu, &perm, &[10.0, 26.0], 2).unwrap(), [2.0, 5.0]);
+        assert_eq!(
+            super::lu_solve_multi(&lu, &perm, &[10.0, 20.0, 26.0, 52.0], 2, 2).unwrap(),
+            [2.0, 4.0, 5.0, 10.0]
+        );
+    }
+
+    #[test]
     fn solve_nxn_multi_matches_column_wise() {
         // A x1 = b1 and A x2 = b2
         let a = [2.0, 1.0, -1.0, -3.0, -1.0, 2.0, -2.0, 1.0, 2.0];
@@ -24969,6 +25060,235 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
                 Err(LinAlgError::SolverSingularity)
             ));
         }
+    }
+
+    #[test]
+    fn batch_solve_broadcasts_multiple_batch_axes() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        // n=16 exercises the per-lane matrix fallback; the large n=2 batch
+        // crosses the parallel scratch threshold. Both sides expand an axis.
+        for (n, a_lanes, b_lanes) in [(1, 2, 3), (2, 2, 3), (16, 2, 3), (2, 128, 512)] {
+            let mut a = vec![0.0; a_lanes * n * n];
+            for lane in 0..a_lanes {
+                for row in 0..n {
+                    a[lane * n * n + row * n + row] = (2 + lane + row) as f64;
+                }
+            }
+            for vector_rhs in [false, true] {
+                let columns = if vector_rhs { 1 } else { 3 };
+                let b: Vec<f64> = (0..b_lanes * n * columns)
+                    .map(|index| (index % 31) as f64 - 15.0)
+                    .collect();
+                let mut b_shape = vec![1, b_lanes, n];
+                if !vector_rhs {
+                    b_shape.push(columns);
+                }
+                let solved = pool
+                    .install(|| batch_solve(&a, &[a_lanes, 1, n, n], &b, &b_shape, vector_rhs))
+                    .unwrap();
+                assert_eq!(solved.len(), a_lanes * b_lanes * n * columns);
+                for a_lane in 0..a_lanes {
+                    for b_lane in 0..b_lanes {
+                        for row in 0..n {
+                            for column in 0..columns {
+                                let index =
+                                    ((a_lane * b_lanes + b_lane) * n + row) * columns + column;
+                                let rhs = b[(b_lane * n + row) * columns + column];
+                                let expected = rhs / (2 + a_lane + row) as f64;
+                                assert_eq!(
+                                    solved[index], expected,
+                                    "n={n}, vector={vector_rhs}, A lane={a_lane}, B lane={b_lane}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_solve_validates_empty_and_overflowing_shapes() {
+        let singular = [1.0, 2.0, 2.0, 4.0];
+        assert!(
+            batch_solve(&singular, &[2, 2], &[], &[0, 2], true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&singular, &[1, 2, 2], &[], &[0, 2, 0], false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&[], &[0, 2, 2], &[1.0, 2.0], &[2], true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&[], &[0, 2, 2], &[1.0, 2.0], &[2, 1], false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&[], &[0, 0], &[], &[0], true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&[], &[2, 1, 0, 0], &[], &[1, 3, 0, 2], false)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Empty dimensions do not license malformed buffers or batch axes.
+        for (a, a_shape, b, b_shape, vector_rhs) in [
+            (&[1.0][..], &[0, 2, 2][..], &[1.0, 2.0][..], &[2][..], true),
+            (&[][..], &[0, 2, 2][..], &[1.0][..], &[2][..], true),
+            (&[][..], &[2, 0, 0][..], &[][..], &[3, 0, 0][..], false),
+            (&[][..], &[0, 2, 2][..], &[][..], &[2, 2, 0][..], false),
+        ] {
+            assert!(matches!(
+                batch_solve(a, a_shape, b, b_shape, vector_rhs),
+                Err(LinAlgError::ShapeContractViolation(_))
+            ));
+        }
+        let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        assert!(matches!(
+            batch_solve(&a, &[2, 1, 2, 2], &[], &[1, 3, 2, 0], false),
+            Err(LinAlgError::SolverSingularity)
+        ));
+
+        let huge = usize::MAX;
+        assert!(
+            batch_solve(&[], &[0, huge, huge], &[], &[huge, 0], false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            batch_solve(&[], &[huge, huge, 0, 0], &[], &[0, 3], false)
+                .unwrap()
+                .is_empty()
+        );
+        for (a, a_shape, b_shape) in [
+            (&[][..], &[huge, huge][..], &[huge, 0][..]),
+            (&[1.0, 0.0, 0.0, 1.0][..], &[2, 2][..], &[2, huge][..]),
+            (&[1.0][..], &[1, 1][..], &[huge, huge, 1, 0][..]),
+        ] {
+            assert!(matches!(
+                batch_solve(a, a_shape, &[], b_shape, false),
+                Err(LinAlgError::ShapeContractViolation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn batch_solve_broadcasting_matches_live_numpy() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let batch_shapes: &[(&[usize], &[usize])] = &[
+            (&[], &[]),
+            (&[], &[2, 3]),
+            (&[2, 3], &[]),
+            (&[2, 3], &[2, 3]),
+            (&[2, 1], &[1, 3]),
+            (&[2, 1, 3], &[1, 4, 1]),
+            (&[1, 2, 1], &[3, 1]),
+            (&[2, 3], &[3, 2]),
+            (&[0], &[1]),
+            (&[1], &[0]),
+            (&[2, 0, 1], &[1, 1, 3]),
+            (&[0, 2], &[3, 1]),
+            (&[0], &[2]),
+        ];
+        let mut cases = Vec::new();
+        for &(a_batch, b_batch) in batch_shapes {
+            for n in [0, 2, 16] {
+                for (vector_rhs, columns) in [(true, 1), (false, 0), (false, 3)] {
+                    let mut a_shape = a_batch.to_vec();
+                    a_shape.extend([n, n]);
+                    let mut b_shape = b_batch.to_vec();
+                    b_shape.push(n);
+                    if !vector_rhs {
+                        b_shape.push(columns);
+                    }
+                    let a_count: usize = a_shape.iter().product();
+                    let mut a = vec![0.0; a_count];
+                    for (index, value) in a.iter_mut().enumerate() {
+                        let row = (index / n) % n;
+                        let column = index % n;
+                        *value = if row == column {
+                            n as f64 + 2.0 + (index / (n * n)) as f64
+                        } else {
+                            ((index % 7) as f64 - 3.0) * 0.125
+                        };
+                    }
+                    let b: Vec<f64> = (0..b_shape.iter().product::<usize>())
+                        .map(|index| (index % 19) as f64 * 0.25 - 2.0)
+                        .collect();
+                    let actual = match batch_solve(&a, &a_shape, &b, &b_shape, vector_rhs) {
+                        Ok(values) => format!("{values:?}"),
+                        Err(_) => "null".into(),
+                    };
+                    cases.push(format!(
+                        "[{a_shape:?},{b_shape:?},{a:?},{b:?},{vector_rhs},{actual}]"
+                    ));
+                }
+            }
+        }
+        // An occupied singular coefficient batch still fails with no RHS columns.
+        for columns in [0, 1] {
+            let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+            let b = vec![1.0; 3 * 2 * columns];
+            let actual = match batch_solve(&a, &[2, 1, 2, 2], &b, &[1, 3, 2, columns], false) {
+                Ok(values) => format!("{values:?}"),
+                Err(_) => "null".into(),
+            };
+            cases.push(format!(
+                "[[2,1,2,2],[1,3,2,{columns}],{a:?},{b:?},false,{actual}]"
+            ));
+        }
+        let script = r#"
+import json, sys
+import numpy as np
+for case in json.load(sys.stdin):
+    ashape, bshape, av, bv, vector_rhs, actual = case
+    a = np.array(av, dtype=np.float64).reshape(ashape)
+    b = np.array(bv, dtype=np.float64).reshape(bshape)
+    try:
+        expected = np.linalg.solve(a, b[..., None])[..., 0] if vector_rhs else np.linalg.solve(a, b)
+    except (ValueError, np.linalg.LinAlgError):
+        assert actual is None, (np.__version__, ashape, bshape, vector_rhs, actual)
+    else:
+        assert actual is not None, (np.__version__, ashape, bshape, vector_rhs)
+        np.testing.assert_allclose(actual, expected.ravel(), rtol=2e-12, atol=2e-12,
+                                   err_msg=str((ashape, bshape, vector_rhs)))
+"#;
+        let mut child = Command::new(oracle_python_bin())
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run batched solve NumPy oracle");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("[{}]", cases.join(",")).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -40,6 +40,9 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
   invalid raw integer buffers and inexact temporal conversions rejected.
 - Match NumPy 2.4's singularity checks for solves with zero RHS columns, including
   real, complex, and batched systems. Empty outer batches still skip factorization.
+- Broadcast batched solves across individual leading dimensions, including
+  singleton-to-zero batches and zero-order systems. Reject incompatible batch
+  shapes, overflowing output sizes, and malformed LU permutations before indexing.
 - Check NaN statistics against live NumPy with exact finite-result bits and lock
   the einsum reduction golden to independently verified pairwise accumulation.
   Cover accepted singleton `roll_multi` broadcasting and rejected length mismatches.
