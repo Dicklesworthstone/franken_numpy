@@ -4504,6 +4504,110 @@ result = (cells, bad)
     });
 }
 
+/// The legacy inverse formula has observable rounding at small p, including C's signed
+/// indefinite result once log(1-p) rounds to zero. Check both scalar and array-parameter
+/// routes, crossing the fill chunk boundary, without losing the following RNG stream.
+#[test]
+fn legacy_geometric_small_probabilities_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def drawn(m, seed, p, form):
+    r = m.random.RandomState(seed)
+    if form == "scalar":
+        value = r.geometric(p)
+    elif form == "bulk":
+        value = r.geometric(p, (3, 3000))
+    else:
+        value = r.geometric(np.full((3, 3000), p))
+    a = np.asarray(value)
+    return type(value).__name__, a.dtype.str, a.shape, a.tobytes(), r.random_sample(3).tobytes()
+for seed in (0, 42, 12345):
+    for p in (1e-7, 1e-10, 1e-17, np.nextafter(1/3, 0), 1/3, 1.0):
+        for form in ("scalar", "bulk", "array"):
+            cells += 1
+            if drawn(fnp, seed, p, form) != drawn(np, seed, p, form):
+                bad.append(f"seed={seed} p={p} {form}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 54, "the legacy geometric probe drifted");
+        assert!(bad.is_empty(), "legacy geometric differs from numpy: {bad:#?}");
+        Ok(())
+    });
+}
+
+/// UD-GEOMETRIC-SEARCH-STALL: a restored MT19937 state can draw the largest uniform and
+/// leave geometric's rounded CDF permanently below it. Do not invoke NumPy on those cells:
+/// fnp stops at the first stalled term, retaining exactly one uniform per output. All
+/// terminating boundary cells still compare with NumPy, including the next three uniforms.
+#[test]
+fn geometric_search_stall_answers_where_numpy_never_returns() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let (cells, bad) = run_sweep(
+            py,
+            &module,
+            &numpy,
+            r#"
+bad, cells = [], 0
+def make(m, kind, word):
+    key = np.random.RandomState(0).get_state()[1].copy()
+    # Tempering this word yields 0xffffffff; two such raw words yield 1 - 2**-53.
+    key[:8] = word
+    if kind == "legacy":
+        r = m.random.RandomState(0)
+        r.set_state(("MT19937", key, 0, 0, 0.0))
+        return r
+    bg = m.random.MT19937(0)
+    bg.state = {"bit_generator": "MT19937", "state": {"key": key, "pos": 0}}
+    return m.random.Generator(bg)
+def uniforms(r, kind, n):
+    return r.random_sample(n) if kind == "legacy" else r.random(n)
+def drawn(m, kind, word, p, form):
+    r = make(m, kind, word)
+    if form == "scalar":
+        value = r.geometric(p)
+    elif form == "bulk":
+        value = r.geometric(p, (2, 2))
+    else:
+        value = r.geometric(np.full((2, 2), p))
+    a = np.asarray(value)
+    return a.dtype.str, a.shape, a.tobytes(), uniforms(r, kind, 3).tobytes()
+for kind in ("legacy", "modern"):
+    for word, u in ((0x12dd9bb3, 1 - 2**-53), (0, 0.0)):
+        cells += 1
+        for m in (fnp, np):
+            if not np.array_equal(uniforms(make(m, kind, word), kind, 4), np.full(4, u)):
+                bad.append(f"{kind} state does not draw {u}")
+        for p in (1/3, 0.5, 0.75, 0.9, 1.0):
+            for form in ("scalar", "bulk", "array"):
+                cells += 1
+                if drawn(fnp, kind, word, p, form) != drawn(np, kind, word, p, form):
+                    bad.append(f"{kind} u={u} p={p} {form}")
+    for p, count in ((0.33333666666666667, 91), (0.38687720490923644, 76)):
+        for form in ("scalar", "bulk", "array"):
+            cells += 1
+            shape, n = ((), 1) if form == "scalar" else ((2, 2), 4)
+            expected = np.full(shape, count, dtype=np.int64)
+            r = make(np, kind, 0x12dd9bb3)
+            uniforms(r, kind, n)
+            after = uniforms(r, kind, 3).tobytes()
+            got = drawn(fnp, kind, 0x12dd9bb3, p, form)
+            if got != (expected.dtype.str, shape, expected.tobytes(), after):
+                bad.append(f"{kind} stalled p={p} {form}")
+result = (cells, bad)
+"#,
+        )?;
+        assert_eq!(cells, 76, "the geometric search-stall probe drifted");
+        assert!(bad.is_empty(), "geometric boundary handling is wrong: {bad:#?}");
+        Ok(())
+    });
+}
+
 /// UD-LEGACY-ZIPF-LARGE-A: from `a = 1025` numpy's `legacy_random_zipf` never returns (`b =
 /// 2**(a - 1)` overflows, every candidate is 1 and its acceptance test is NaN), so numpy is not
 /// called there. fnp answers 1 without a draw, as numpy's modern `random_zipf` does for the same

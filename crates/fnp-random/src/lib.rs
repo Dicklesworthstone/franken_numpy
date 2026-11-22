@@ -29,6 +29,29 @@ const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
 const BETA_TINY_THRESHOLD: f64 = 3e-103;
 
+/// Inverse-CDF search for `p >= 1/3`, shared by the modern and legacy geometric draws.
+/// Once a positive term no longer increases the rounded sum, every later (smaller) term
+/// also leaves it unchanged. NumPy then spins forever if `u` is still above that sum;
+/// stop at the first stalled term instead (UD-GEOMETRIC-SEARCH-STALL). Every terminating
+/// NumPy draw keeps its original value, and the caller still consumes exactly one uniform.
+#[inline]
+fn geometric_search(u: f64, p: f64) -> i64 {
+    let q = 1.0 - p;
+    let mut x = 1;
+    let mut sum = p;
+    let mut prod = p;
+    while u > sum {
+        prod *= q;
+        let next_sum = sum + prod;
+        x += 1;
+        if next_sum == sum {
+            break;
+        }
+        sum = next_sum;
+    }
+    x
+}
+
 /// numpy's `random_vonmises` wrap for the rejection sampler: fold |angle| with `fmod` and
 /// restore the sign. A `rem_euclid` of the signed angle is the same function mathematically
 /// but rounds differently for negative angles (4 of 1000 draws differed by one ulp).
@@ -3669,15 +3692,16 @@ impl<R: ZigguratRngCore> LegacyDraws<'_, R> {
         self.poisson(y)
     }
 
-    /// `legacy_random_geometric` as the oracle numpy (2.4) draws it: `ceil(log(1 - U) /
-    /// log1p(-p))`, 1 at `p == 1` after its uniform.
+    /// Legacy geometric uses the search walk from `p >= 1/3`, otherwise
+    /// `ceil(log1p(-U) / log(1 - p))`. The subtraction in the denominator and the
+    /// non-saturating C cast matter for tiny probabilities.
     #[inline]
     fn geometric(&mut self, p: f64) -> i64 {
         let u = self.double();
-        if p == 1.0 {
-            1
+        if p >= 1.0 / 3.0 {
+            geometric_search(u, p)
         } else {
-            ((1.0 - u).ln() / (-p).ln_1p()).ceil() as i64
+            c_long_from_f64(((-u).ln_1p() / (1.0 - p).ln()).ceil())
         }
     }
 
@@ -4331,17 +4355,7 @@ impl<R: ZigguratRngCore> ModernDraws<'_, R> {
     /// `i64::MAX`).
     fn geometric(&mut self, p: f64) -> i64 {
         if p >= 1.0 / 3.0 {
-            let q = 1.0 - p;
-            let u = self.double();
-            let mut x = 1_i64;
-            let mut sum = p;
-            let mut prod = p;
-            while u > sum {
-                prod *= q;
-                sum += prod;
-                x += 1;
-            }
-            return x;
+            return geometric_search(self.double(), p);
         }
         let z = (-self.exponential() / (-p).ln_1p()).ceil();
         if z >= 9.223_372_036_854_776e18 {
@@ -8933,18 +8947,7 @@ impl Generator {
         Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
-                    // Search method
-                    let q = 1.0 - p;
-                    let u = self.next_f64();
-                    let mut x = 1u64;
-                    let mut sum = p;
-                    let mut prod = p;
-                    while u > sum {
-                        prod *= q;
-                        sum += prod;
-                        x += 1;
-                    }
-                    x
+                    geometric_search(self.next_f64(), p) as u64
                 } else {
                     // Inversion via standard exponential
                     let z = (-self.sample_ziggurat_exponential() / inversion_log_q).ceil();
@@ -13446,6 +13449,121 @@ for child in rng.spawn(n_children):
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_geometric_small_probabilities_match_numpy() {
+        // NumPy 2.3.5, RandomState(42), eight draws and three following uniforms.
+        // In particular, log(1 - p) rounds to zero at 1e-17, and NumPy's C cast
+        // produces the signed indefinite value rather than Rust's saturated maximum.
+        for (p, expected) in [
+            (
+                1e-7,
+                [
+                    4_692_681,
+                    30_101_213,
+                    13_167_457,
+                    9_129_426,
+                    1_696_249,
+                    1_695_963,
+                    598_388,
+                    20_112_308,
+                ],
+            ),
+            (
+                1e-10,
+                [
+                    4_692_680_512,
+                    30_101_211_818,
+                    13_167_455_846,
+                    9_129_424_782,
+                    1_696_248_565,
+                    1_695_962_779,
+                    598_387_637,
+                    20_112_306_980,
+                ],
+            ),
+            (1e-17, [i64::MIN; 8]),
+        ] {
+            let fresh = || RandomState::new(SeedMaterial::U64(42)).expect("rng");
+            let mut bulk = fresh();
+            assert_eq!(
+                bulk.geometric(p, 8).expect("geometric"),
+                expected.map(|value| value as u64),
+                "p={p}"
+            );
+            let mut fill = fresh();
+            let mut values = [0; 8];
+            fill.fill_geometric(p, &mut values);
+            assert_eq!(values, expected, "p={p}");
+            assert_eq!(fill.state(), bulk.state());
+            let mut each = fresh();
+            each.fill_geometric_each(&[p; 8], &mut values);
+            assert_eq!(values, expected, "p={p}");
+            assert_eq!(each.state(), bulk.state());
+            let after: Vec<u64> = (0..3).map(|_| bulk.next_f64().to_bits()).collect();
+            assert_eq!(
+                after,
+                [
+                    4_603_589_582_231_063_469,
+                    4_604_552_970_340_303_490,
+                    4_581_590_297_942_195_840,
+                ],
+                "stream after p={p}"
+            );
+        }
+    }
+
+    #[test]
+    fn geometric_search_stall_preserves_all_entrypoint_streams() {
+        // Tempering 0x12dd9bb3 yields u32::MAX. Pairs of those words make the
+        // largest possible uniform, exactly 1 - 2^-53, through public state restore.
+        for (word, uniform) in [
+            (0x12dd_9bb3, f64::from_bits(1.0_f64.to_bits() - 1)),
+            (0, 0.0),
+        ] {
+            let mut source =
+                BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(0)).expect("mt");
+            let mut key = source.mt19937_key_pos().expect("mt key").0.to_vec();
+            key[..8].fill(word);
+            source.set_mt19937_key_pos(&key, 0).expect("restore mt");
+            let mut after = source.clone();
+            for _ in 0..4 {
+                assert_eq!(after.next_f64(), uniform);
+            }
+
+            for (p, tail_count) in [
+                (1.0 / 3.0, 89),
+                (0.5, 53),
+                (0.75, 27),
+                (0.9, 16),
+                (1.0, 1),
+                // UD-GEOMETRIC-SEARCH-STALL: NumPy never returns for these
+                // two maximum-uniform draws. Return the first stalled term.
+                (0.333_336_666_666_666_67, 91),
+                (0.386_877_204_909_236_44, 76),
+            ] {
+                let expected = if uniform == 0.0 { 1 } else { tail_count };
+                let mut legacy = RandomState::from_bit_generator(source.clone());
+                assert_eq!(legacy.geometric(p, 4).expect("legacy"), [expected; 4]);
+                assert_eq!(legacy.state(), after.state(), "legacy p={p}");
+
+                let mut legacy_each = RandomState::from_bit_generator(source.clone());
+                let mut values = [0; 4];
+                legacy_each.fill_geometric_each(&[p; 4], &mut values);
+                assert_eq!(values, [expected as i64; 4]);
+                assert_eq!(legacy_each.state(), after.state(), "legacy each p={p}");
+
+                let mut modern = Generator::from_bit_generator(source.clone());
+                assert_eq!(modern.geometric(p, 4).expect("modern"), [expected; 4]);
+                assert_eq!(modern.state(), after.state(), "modern p={p}");
+
+                let mut modern_each = Generator::from_bit_generator(source.clone());
+                modern_each.fill_geometric_each(&[p; 4], &mut values);
+                assert_eq!(values, [expected as i64; 4]);
+                assert_eq!(modern_each.state(), after.state(), "modern each p={p}");
+            }
+        }
     }
 
     #[test]
