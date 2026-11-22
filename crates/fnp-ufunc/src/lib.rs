@@ -3110,6 +3110,29 @@ pub struct UFuncArray {
     integer_sidecar: Option<IntegerSidecar>,
 }
 
+/// Combined controls for numeric sum and product reductions.
+///
+/// Axes and masks address logical elements, including complete complex pairs.
+/// `initial` is a zero-dimensional typed array, with the value-casting behavior
+/// of a NumPy zero-dimensional ndarray. It retains exact wide integers and complex
+/// components; unlike the Python-float initial APIs, narrowing integer casts
+/// wrap and complex-to-real casts discard the imaginary component.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReductionOptions<'a> {
+    /// `None` reduces every axis; `Some(&[])` reduces no axes. An explicit
+    /// slice follows NumPy's tuple-axis rules, including for scalar inputs.
+    pub axes: Option<&'a [isize]>,
+    pub keepdims: bool,
+    /// Both the accumulator and result dtype. Inputs are converted before
+    /// arithmetic; omission uses the usual sum/product integer promotion.
+    pub dtype: Option<DType>,
+    /// A Boolean mask broadcast over the logical input shape. Numeric masks
+    /// are rejected, following NumPy's safe conversion rule for `where`.
+    pub where_mask: Option<&'a UFuncArray>,
+    /// One logical scalar, cast to the accumulator dtype before reduction.
+    pub initial: Option<&'a UFuncArray>,
+}
+
 pub type UniqueInfo = (
     UFuncArray,
     Option<UFuncArray>,
@@ -10866,6 +10889,137 @@ impl UFuncArray {
         self.reduce_selected_arithmetic(Some(mask), axis, keepdims, None, true)
     }
 
+    /// Sum with joint tuple axes, an accumulator dtype, a broadcast selection,
+    /// and a typed scalar initial value. See [`ReductionOptions`].
+    pub fn reduce_sum_with_options(
+        &self,
+        options: ReductionOptions<'_>,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_with_options(options, false)
+    }
+
+    /// Product with joint tuple axes, an accumulator dtype, a broadcast
+    /// selection, and a typed scalar initial value. See [`ReductionOptions`].
+    pub fn reduce_prod_with_options(
+        &self,
+        options: ReductionOptions<'_>,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_arithmetic_with_options(options, true)
+    }
+
+    fn reduce_arithmetic_with_options(
+        &self,
+        options: ReductionOptions<'_>,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if product { "prod" } else { "sum" };
+        if let Some(mask) = options.where_mask
+            && mask.dtype != DType::Bool
+        {
+            return Err(UFuncError::ReductionContractViolation {
+                detail: format!(
+                    "{operation}: where mask must have boolean dtype, got {:?}",
+                    mask.dtype
+                ),
+            });
+        }
+        let dtype = options
+            .dtype
+            .unwrap_or_else(|| promote_for_sum_reduction(self.dtype));
+        for (role, dtype) in [("input", self.dtype), ("accumulator", dtype)] {
+            if !(dtype.is_numeric() || dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: unsupported {role} dtype {dtype:?}"
+                )));
+            }
+        }
+        let shape = self.complex_logical_shape(operation)?;
+        let all_axes;
+        let axes = match options.axes {
+            Some(axes) => axes,
+            None => {
+                all_axes = (0..shape.len())
+                    .map(|axis| axis as isize)
+                    .collect::<Vec<_>>();
+                &all_axes
+            }
+        };
+        let mut plan = AxesReductionPlan::new(&shape, axes, options.keepdims)?;
+        if dtype.is_complex()
+            && plan.output_count > isize::MAX as usize / std::mem::size_of::<(f64, f64)>()
+        {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        let mask = options
+            .where_mask
+            .map(|mask| normalize_reduction_where_mask(mask, &shape))
+            .transpose()?;
+        let iteration = ReductionIterationPlan::new(
+            &shape,
+            axes,
+            options.where_mask.map(Self::shape),
+            self.dtype != dtype,
+        )?;
+        plan.iteration = Some(iteration);
+        let initial = match options.initial {
+            Some(initial) => {
+                if !(initial.dtype.is_numeric() || initial.dtype == DType::Bool) {
+                    return Err(UFuncError::Msg(format!(
+                        "{operation}: unsupported initial dtype {:?}",
+                        initial.dtype
+                    )));
+                }
+                if !initial.complex_logical_shape(operation)?.is_empty() {
+                    return Err(UFuncError::ReductionContractViolation {
+                        detail: format!("{operation}: initial must be a logical scalar"),
+                    });
+                }
+                let storage = initial.to_storage()?.cast_to(dtype).map_err(|err| {
+                    UFuncError::Msg(format!("{operation}: initial cast failed: {err}"))
+                })?;
+                Self::from_storage(Vec::new(), storage)?
+            }
+            None => Self::pack_python_float_values(
+                &[if product { 1.0 } else { 0.0 }],
+                dtype,
+                operation,
+            )?,
+        };
+        let source = self.to_storage()?;
+        let storage = if dtype == DType::U32 && self.dtype.is_float() {
+            // This conversion's vector-body and scalar-tail values depend on
+            // each transfer length. Preserve source precision and the original
+            // complex layout when restarting a cast at a buffer boundary.
+            let mut values = Vec::with_capacity(source.len());
+            let mut start = 0;
+            while start < source.len() {
+                let end = iteration.buffer_end(start, source.len());
+                let run = Self::numeric_storage_run(&source, start, end - start);
+                let converted = run.cast_to(dtype).map_err(|err| {
+                    UFuncError::Msg(format!("{operation}: input cast failed: {err}"))
+                })?;
+                let ArrayStorage::U32(converted) = converted else {
+                    unreachable!("uint32 conversion produces uint32 storage");
+                };
+                values.extend(converted);
+                start = end;
+            }
+            ArrayStorage::U32(values)
+        } else {
+            source
+                .cast_to(dtype)
+                .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?
+        };
+        let casted = Self::from_storage(shape, storage)?;
+        casted.reduce_selected_arithmetic_values(
+            plan,
+            mask.as_ref().map(|mask| mask.values.as_slice()),
+            &initial,
+            product,
+            self.dtype != dtype,
+        )
+    }
+
     /// Arithmetic reductions with an optional selection and initial scalar.
     /// The shared traversal keeps a single accumulator per logical output and
     /// calls the numeric loop once per selected contiguous run, as NumPy does.
@@ -10965,11 +11119,50 @@ impl UFuncArray {
             operation,
         )?;
 
+        let promoted = if self.dtype.is_integer() || self.dtype == DType::Bool {
+            // Preserve the legacy initial/where APIs' conversion of raw wide
+            // working cells, alongside exact sidecars and narrow source widths.
+            let source = if matches!(self.dtype, DType::I64 | DType::U64) {
+                match self
+                    .promoting_reduction_sidecar()
+                    .expect("wide integer input has a reduction representation")
+                {
+                    IntegerSidecar::I64(values) => ArrayStorage::I64(values),
+                    IntegerSidecar::U64(values) => ArrayStorage::U64(values),
+                }
+            } else {
+                self.to_storage()?
+            };
+            let storage = source
+                .cast_to(dtype)
+                .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?;
+            Some(Self::from_storage(shape, storage)?)
+        } else {
+            None
+        };
+        promoted
+            .as_ref()
+            .unwrap_or(self)
+            .reduce_selected_arithmetic_values(plan, selected, &initial, product, false)
+    }
+
+    /// Execute already-selected accumulator precision. The seed is already
+    /// cast, so both typed ndarray initials and Python-float initials share
+    /// arithmetic without conflating their scalar conversion contracts.
+    fn reduce_selected_arithmetic_values(
+        &self,
+        plan: AxesReductionPlan,
+        selected: Option<&[f64]>,
+        initial: &Self,
+        product: bool,
+        buffered: bool,
+    ) -> Result<Self, UFuncError> {
+        let dtype = self.dtype;
         if dtype.is_complex() {
             let values = self.complex_reduction_values(dtype)?;
             let mut result = vec![(initial.values[0], initial.values[1]); plan.output_count];
             let fused = product && plan.vector_product && Self::complex_multiply_uses_fma();
-            plan.for_each_selected_run(values.len(), selected, |output, range| {
+            plan.for_each_selected_run(values.len(), selected, buffered, |output, range| {
                 let accumulator = &mut result[output];
                 if product {
                     for &value in &values[range] {
@@ -11008,7 +11201,7 @@ impl UFuncArray {
             });
             let values = half_values.as_deref().unwrap_or(&self.values);
             let mut result = vec![initial.values[0]; plan.output_count];
-            plan.for_each_selected_run(values.len(), selected, |output, range| {
+            plan.for_each_selected_run(values.len(), selected, buffered, |output, range| {
                 result[output] = Self::reduce_float_lane_from(
                     &values[range],
                     dtype,
@@ -11020,27 +11213,32 @@ impl UFuncArray {
             return Self::new(plan.output_shape, result, dtype);
         }
 
-        // Normalize narrow source widths and Boolean truth before promotion.
-        // Wide sources keep both their exact sidecars and the established
-        // promoting-reduction conversion of raw f64 working cells.
-        let source = if matches!(self.dtype, DType::I64 | DType::U64) {
-            match self
-                .promoting_reduction_sidecar()
-                .expect("wide integer input has a reduction representation")
-            {
-                IntegerSidecar::I64(values) => ArrayStorage::I64(values),
-                IntegerSidecar::U64(values) => ArrayStorage::U64(values),
-            }
-        } else {
-            self.to_storage()?
-        };
-        let storage = source
-            .cast_to(dtype)
-            .map_err(|err| UFuncError::Msg(format!("{operation}: input cast failed: {err}")))?;
-        let storage = match storage {
-            ArrayStorage::I64(values) => {
-                let mut result = vec![initial.values[0] as i64; plan.output_count];
-                plan.for_each_selected_run(values.len(), selected, |output, range| {
+        if dtype == DType::Bool {
+            let mut result = vec![initial.values[0]; plan.output_count];
+            plan.for_each_selected_run(self.values.len(), selected, buffered, |output, range| {
+                for &value in &self.values[range] {
+                    let truth = if product {
+                        result[output] != 0.0 && value != 0.0
+                    } else {
+                        result[output] != 0.0 || value != 0.0
+                    };
+                    result[output] = if truth { 1.0 } else { 0.0 };
+                }
+            });
+            return Self::new(plan.output_shape, result, dtype);
+        }
+
+        let initial = initial
+            .to_storage()?
+            .get_i128(0)
+            .expect("integer accumulator has an exact integer initial");
+        let storage = match self
+            .promoting_reduction_sidecar()
+            .expect("integer accumulator has an exact reduction representation")
+        {
+            IntegerSidecar::I64(values) => {
+                let mut result = vec![initial as i64; plan.output_count];
+                plan.for_each_selected_run(values.len(), selected, buffered, |output, range| {
                     for &value in &values[range] {
                         result[output] = if product {
                             result[output].wrapping_mul(value)
@@ -11051,9 +11249,9 @@ impl UFuncArray {
                 });
                 ArrayStorage::I64(result)
             }
-            ArrayStorage::U64(values) => {
-                let mut result = vec![initial.values[0] as u64; plan.output_count];
-                plan.for_each_selected_run(values.len(), selected, |output, range| {
+            IntegerSidecar::U64(values) => {
+                let mut result = vec![initial as u64; plan.output_count];
+                plan.for_each_selected_run(values.len(), selected, buffered, |output, range| {
                     for &value in &values[range] {
                         result[output] = if product {
                             result[output].wrapping_mul(value)
@@ -11064,8 +11262,11 @@ impl UFuncArray {
                 });
                 ArrayStorage::U64(result)
             }
-            _ => unreachable!("numeric sum/prod promote integer accumulators to i64/u64"),
-        };
+        }
+        // Modular narrowing after the joint traversal is equivalent to
+        // wrapping each operation at the requested accumulator width.
+        .cast_to(dtype)
+        .map_err(|err| UFuncError::Msg(format!("reduction: result cast failed: {err}")))?;
         Self::from_storage(plan.output_shape, storage)
     }
 
@@ -32122,6 +32323,7 @@ impl UFuncArray {
         operands: &[&Self],
         label_sizes: &std::collections::HashMap<char, usize>,
         dtype: DType,
+        optimized: bool,
     ) -> Result<Self, UFuncError> {
         let complex = dtype.is_complex();
         if !(complex || dtype.is_float())
@@ -32182,6 +32384,31 @@ impl UFuncArray {
                 Ok(terms)
             })
             .collect::<Result<Vec<_>, UFuncError>>()?;
+        // NumPy lowers an optimized pair with shared non-singleton contracted
+        // indices to matmul. When both operands also have non-singleton free
+        // indices, its complex GEMM stores alpha * accumulator with alpha=1+0j.
+        // That final complex operation is observable for infinite components;
+        // direct einsum and size-one/pure-product contractions do not perform it.
+        let gemm_store = if optimized && complex && operands.len() == 2 {
+            let nontrivial = |terms: &[(usize, usize)]| {
+                terms
+                    .iter()
+                    .filter_map(|&(axis, stride)| (stride != 0).then_some(axis))
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let left = nontrivial(&op_terms[0]);
+            let right = nontrivial(&op_terms[1]);
+            left.iter()
+                .any(|axis| *axis >= output_labels.len() && right.contains(axis))
+                && left
+                    .iter()
+                    .any(|axis| *axis < output_labels.len() && !right.contains(axis))
+                && right
+                    .iter()
+                    .any(|axis| *axis < output_labels.len() && !left.contains(axis))
+        } else {
+            false
+        };
         let inputs = operands
             .iter()
             .map(|op| {
@@ -32248,6 +32475,9 @@ impl UFuncArray {
                     sum = product;
                 }
             }
+            if gemm_store {
+                sum = Self::complex_reduction_multiply((1.0, 0.0), sum, dtype);
+            }
             output[0] = if dtype == DType::F16 {
                 // Optimized half contractions accumulate in float32 and pack
                 // only the final output; per-product half rounding can overflow.
@@ -32266,7 +32496,7 @@ impl UFuncArray {
         subscripts: &str,
         operands: &[&Self],
         allow_private_labels: bool,
-        allow_ellipsis_reduction: bool,
+        optimized: bool,
     ) -> Result<Self, UFuncError> {
         let normalized_subscripts =
             Self::normalize_einsum_subscripts("einsum", subscripts, allow_private_labels)?;
@@ -32299,7 +32529,7 @@ impl UFuncArray {
         };
         let (processed_input_subs, processed_output_sub, placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
-        if !allow_ellipsis_reduction
+        if !optimized
             && !placeholders.is_empty()
             && raw_output_sub.is_some_and(|output| !output.contains("..."))
         {
@@ -32347,6 +32577,7 @@ impl UFuncArray {
                 operands,
                 &label_sizes,
                 dtype,
+                optimized,
             );
         }
         if dtype.is_integer() || dtype == DType::Bool {
@@ -33047,6 +33278,7 @@ impl UFuncArray {
                         &refs,
                         &label_sizes,
                         dtype,
+                        false,
                     );
                 }
                 return Self::einsum_impl(&sub, &refs, true, true);
@@ -33087,7 +33319,7 @@ impl UFuncArray {
                     true,
                 )?;
                 let output: Vec<char> = inter_str.chars().collect();
-                Self::einsum_inexact(&pair_subs, &output, &pair_inputs, &labels, pair_dtype)?
+                Self::einsum_inexact(&pair_subs, &output, &pair_inputs, &labels, pair_dtype, true)?
             } else {
                 Self::einsum_impl(&pair_sub, &pair_inputs, true, true)?
             };
@@ -47573,6 +47805,140 @@ struct AxesReductionPlan {
     // Each retained axis contributes (input stride, extent, output stride).
     output_coordinates: Vec<(usize, usize, usize)>,
     vector_product: bool,
+    iteration: Option<ReductionIterationPlan>,
+}
+
+/// C-order conversion transfers and inner loops for combined reduction options.
+/// The original mask strides matter even after its values are broadcast: a
+/// repeated row can prevent coalescing, or make buffering that row worthwhile.
+#[derive(Clone, Copy)]
+struct ReductionIterationPlan {
+    region_len: usize,
+    buffer_len: usize,
+    inner_len: usize,
+}
+
+impl ReductionIterationPlan {
+    fn new(
+        shape: &[usize],
+        axes: &[isize],
+        mask_shape: Option<&[usize]>,
+        input_cast: bool,
+    ) -> Result<Self, UFuncError> {
+        if shape.contains(&0) {
+            return Ok(Self {
+                region_len: 1,
+                buffer_len: 1,
+                inner_len: 1,
+            });
+        }
+        let mut reduced = vec![false; shape.len()];
+        for axis in normalize_reduction_axes(axes, shape.len())? {
+            reduced[axis] = true;
+        }
+        let mask_shape = mask_shape.unwrap_or(&[]);
+        let mask_offset = shape.len().checked_sub(mask_shape.len()).ok_or_else(|| {
+            UFuncError::ReductionContractViolation {
+                detail: "where mask has more dimensions than the operand".to_string(),
+            }
+        })?;
+        let mask_strides = c_strides_elems(mask_shape);
+        // The source is contiguous. Coalesce dimensions only when both its
+        // output mapping and the original mask have compatible strides too.
+        let mut dimensions: Vec<(usize, [usize; 2])> = Vec::new();
+        let mut output_stride = 1;
+        for axis in (0..shape.len()).rev() {
+            let mask_stride = if axis < mask_offset || mask_shape[axis - mask_offset] == 1 {
+                0
+            } else {
+                mask_strides[axis - mask_offset]
+            };
+            let strides = [if reduced[axis] { 0 } else { output_stride }, mask_stride];
+            if !reduced[axis] {
+                output_stride *= shape[axis];
+            }
+            if shape[axis] == 1 {
+                continue;
+            }
+            if let Some((length, inner)) = dimensions.last_mut()
+                && inner
+                    .iter()
+                    .zip(strides)
+                    .all(|(&step, outer)| step * *length == outer)
+            {
+                *length *= shape[axis];
+            } else {
+                dimensions.push((shape[axis], strides));
+            }
+        }
+        if dimensions.is_empty() {
+            dimensions.push((1, [0, 0]));
+        }
+
+        // Choose a whole-core transfer by NumPy's iterator overhead contract:
+        // (one loop + buffered operands) / transferable elements. A writable
+        // output's first reduced/retained transition is the outermost candidate.
+        const CAPACITY: usize = 8192;
+        let mut contiguous = [1usize; 2];
+        let mut cost = 1 + usize::from(input_cast);
+        let mut best_cost = cost;
+        let mut size = dimensions[0].0;
+        let mut best_size = size;
+        let mut best_core = 1;
+        let mut best_dimension = 0;
+        let mut reduction_dimension = None;
+        for dimension in 1..dimensions.len() {
+            if reduction_dimension.is_some() || (size >= CAPACITY && cost > 1) {
+                break;
+            }
+            let (previous_length, previous) = dimensions[dimension - 1];
+            let (length, strides) = dimensions[dimension];
+            for (operand, contiguous_dimensions) in contiguous.iter_mut().enumerate() {
+                if *contiguous_dimensions == dimension {
+                    if previous[operand] * previous_length == strides[operand] {
+                        *contiguous_dimensions += 1;
+                        continue;
+                    }
+                    cost += 1;
+                }
+                if operand == 0 && (previous[operand] == 0 || strides[operand] == 0) {
+                    reduction_dimension = Some(dimension);
+                }
+            }
+            let core = size;
+            size *= length;
+            let candidate = if cost > 1 { size.min(CAPACITY) } else { size };
+            if cost as u128 * best_size as u128 <= best_cost as u128 * candidate as u128 {
+                best_cost = cost;
+                best_size = size;
+                best_core = core;
+                best_dimension = dimension;
+            }
+        }
+        let reducing = reduction_dimension == Some(best_dimension);
+        let mask_repeats_core = reducing
+            && (contiguous[1] == best_dimension
+                || (dimensions[best_dimension].1[1] == 0 && contiguous[1] <= best_dimension));
+        let mask_buffered = contiguous[1] + usize::from(mask_repeats_core) <= best_dimension;
+        let buffer_len = if input_cast || mask_buffered {
+            best_size.min(best_core * (CAPACITY / best_core))
+        } else {
+            best_size
+        };
+        Ok(Self {
+            region_len: best_size,
+            buffer_len,
+            inner_len: if reducing { best_core } else { buffer_len },
+        })
+    }
+
+    fn buffer_end(self, start: usize, input_count: usize) -> usize {
+        start
+            + self
+                .buffer_len
+                .min(self.region_len - start % self.region_len)
+                .min(input_count - start)
+    }
 }
 
 impl AxesReductionPlan {
@@ -47651,6 +48017,7 @@ impl AxesReductionPlan {
             contiguous_run_len,
             output_coordinates,
             vector_product,
+            iteration: None,
         })
     }
 
@@ -47670,29 +48037,51 @@ impl AxesReductionPlan {
         &self,
         input_count: usize,
         selected: Option<&[f64]>,
+        buffered: bool,
         mut visit: impl FnMut(usize, std::ops::Range<usize>),
     ) {
         debug_assert!(selected.is_none_or(|mask| mask.len() == input_count));
-        for start in (0..input_count).step_by(self.contiguous_run_len) {
-            let end = start + self.contiguous_run_len;
-            let output = self.output_index(start);
-            let Some(selected) = selected else {
-                visit(output, start..end);
-                continue;
-            };
-            let mut index = start;
-            while index < end {
-                while index < end && selected[index] == 0.0 {
-                    index += 1;
-                }
-                let selected_start = index;
-                while index < end && selected[index] != 0.0 {
-                    index += 1;
-                }
-                if selected_start != index {
-                    visit(output, selected_start..index);
+        let iteration = self.iteration.unwrap_or(ReductionIterationPlan {
+            region_len: self.contiguous_run_len,
+            buffer_len: if buffered {
+                8192
+            } else {
+                self.contiguous_run_len
+            },
+            inner_len: self.contiguous_run_len,
+        });
+        let mut buffer_start = 0;
+        while buffer_start < input_count {
+            let buffer_end = iteration.buffer_end(buffer_start, input_count);
+            for inner_start in (buffer_start..buffer_end).step_by(iteration.inner_len) {
+                let inner_end = inner_start + iteration.inner_len.min(buffer_end - inner_start);
+                let mut start = inner_start;
+                while start < inner_end {
+                    let end = start
+                        + (self.contiguous_run_len - start % self.contiguous_run_len)
+                            .min(inner_end - start);
+                    let output = self.output_index(start);
+                    if let Some(selected) = selected {
+                        let mut index = start;
+                        while index < end {
+                            while index < end && selected[index] == 0.0 {
+                                index += 1;
+                            }
+                            let selected_start = index;
+                            while index < end && selected[index] != 0.0 {
+                                index += 1;
+                            }
+                            if selected_start != index {
+                                visit(output, selected_start..index);
+                            }
+                        }
+                    } else {
+                        visit(output, start..end);
+                    }
+                    start = end;
                 }
             }
+            buffer_start = buffer_end;
         }
     }
 }

@@ -692,6 +692,73 @@ fn optimal_einsum_minimizes_total_cost_before_narrow_intermediate_rounding() {
 }
 
 #[test]
+fn optimized_complex_matrix_contractions_preserve_nonfinite_gemm_scaling() {
+    let filled = |shape: &[usize], value: (f64, f64), dtype| {
+        let mut physical_shape = shape.to_vec();
+        physical_shape.push(2);
+        UFuncArray::new(
+            physical_shape,
+            [value.0, value.1].repeat(shape.iter().product()),
+            dtype,
+        )
+        .unwrap()
+    };
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let left = filled(&[2, 3], (f64::INFINITY, 0.0), dtype);
+        let right = filled(&[3, 4], (1.0, 0.0), dtype);
+        let direct = UFuncArray::einsum("ik,kj->ij", &[&left, &right]).unwrap();
+        for pair in direct.values().as_chunks::<2>().0 {
+            assert_eq!(pair[0], f64::INFINITY);
+            assert!(pair[1].is_nan());
+        }
+        let optimized =
+            UFuncArray::einsum_optimized("ik,kj->ij", &[&left, &right], "optimal").unwrap();
+        assert!(
+            optimized
+                .values()
+                .iter()
+                .all(|component| component.is_nan())
+        );
+
+        // Shared batch labels and output permutations must not expose the
+        // physical component axis or change the matrix-kernel classification.
+        // Singleton broadcasts are removed before classifying labels. The
+        // final three cases have no non-singleton shared contraction and must
+        // retain direct complex product values.
+        let layouts: &[(&str, &[usize], &[usize])] = &[
+            ("ik,kj->ij", &[2, 3], &[3, 4]),
+            ("ki,kj->ji", &[3, 2], &[3, 4]),
+            ("bik,bkj->bij", &[2, 2, 3], &[2, 3, 4]),
+            ("bik,bkj->bij", &[2, 2, 3], &[1, 3, 4]),
+            ("mk,mkn->mn", &[2, 3], &[1, 3, 4]),
+            ("i,j->ij", &[2], &[4]),
+            ("ik,kj->ij", &[2, 1], &[1, 4]),
+            ("ik,kj->ij", &[2, 1], &[3, 4]),
+        ];
+        for &(subscripts, left_shape, right_shape) in layouts {
+            for (left_value, right_value) in [
+                ((f64::INFINITY, 0.0), (1.0, 0.0)),
+                ((0.0, f64::INFINITY), (1.0, 0.0)),
+                ((f64::INFINITY, 1.0), (0.0, 1.0)),
+                ((1.0, 0.0), (f64::INFINITY, 0.0)),
+                ((f64::NEG_INFINITY, 1.0), (1.0, -1.0)),
+                ((f64::NAN, 0.0), (1.0, 0.0)),
+            ] {
+                let operands = [
+                    filled(left_shape, left_value, dtype),
+                    filled(right_shape, right_value, dtype),
+                ];
+                for optimize in [None, Some("greedy"), Some("optimal")] {
+                    batch.case(subscripts, &operands, optimize, true);
+                }
+            }
+        }
+    }
+    batch.finish();
+}
+
+#[test]
 fn einsum_paths_match_numpy_across_strategies_memory_broadcasts_and_empty_axes() {
     let cases: &[(&str, &[&[usize]])] = &[
         ("ab,bc,cd->ad", &[&[5, 1], &[1, 5], &[5, 26]]),

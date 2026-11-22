@@ -38,11 +38,16 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 - Preserve exact wide integers through `from_storage_with_dtype` casts, including
   narrowing, signedness changes, and single-rounding conversion to float32. Keep
   invalid raw integer buffers and inexact temporal conversions rejected.
-- Match NumPy 2.4's singularity checks for solves with zero RHS columns, including
-  real, complex, and batched systems. Empty outer batches still skip factorization.
+- Combine sum/product tuple axes, accumulator dtype, Boolean `where` masks,
+  `keepdims`, and typed scalar initial values through `ReductionOptions`. Preserve
+  exact integer seeds and mask-dependent conversion/reduction buffer boundaries.
+- Factor occupied real, complex, and batched coefficient matrices even when the
+  RHS has zero columns. Empty outer batches still skip factorization.
 - Broadcast batched solves across individual leading dimensions, including
   singleton-to-zero batches and zero-order systems. Reject incompatible batch
   shapes, overflowing output sizes, and malformed LU permutations before indexing.
+- Preserve NumPy's optimized complex matrix-result scaling in einsum, including
+  nonfinite values produced by narrow intermediates under memory-limited paths.
 - Check NaN statistics against live NumPy with exact finite-result bits and lock
   the einsum reduction golden to independently verified pairwise accumulation.
   Cover accepted singleton `roll_multi` broadcasting and rejected length mismatches.

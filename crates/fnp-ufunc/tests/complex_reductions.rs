@@ -2,8 +2,9 @@
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
-    FloatErrorKind, FloatErrorMode, MaskedArray, UFuncArray, UFuncError, UnaryOp, errstate, invert,
-    scimath_log, scimath_log2, scimath_log10, scimath_sqrt, seterrcall, take_float_error_events,
+    FloatErrorKind, FloatErrorMode, MaskedArray, ReductionOptions, UFuncArray, UFuncError, UnaryOp,
+    errstate, invert, scimath_log, scimath_log2, scimath_log10, scimath_sqrt, seterrcall,
+    take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -232,6 +233,7 @@ impl OracleBatch {
             "input": input, "op": operation, "dtype": null,
             "axis": axis, "keepdims": keepdims, "ddof": 0,
             "arithmetic_options": true,
+            "legacy_where_truth_cast": true,
             "where_input": mask.map(|(index, _)| index),
             "initial": initial.map(|value| value.to_string()),
         }));
@@ -244,6 +246,30 @@ impl OracleBatch {
             _ => unreachable!("selected reduction test requires a mask or initial"),
         };
         self.actual.push(actual);
+    }
+
+    fn push_options(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        operation: &str,
+        options: ReductionOptions<'_>,
+    ) {
+        let mask = options.where_mask.map(|mask| self.add_input(mask));
+        let initial = options.initial.map(|initial| self.add_input(initial));
+        self.cases.push(json!({
+            "input": input, "op": operation,
+            "dtype": options.dtype.map(numpy_dtype),
+            "axis": options.axes, "keepdims": options.keepdims, "ddof": 0,
+            "arithmetic_options": true,
+            "where_input": mask, "initial_input": initial,
+        }));
+        let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        self.actual.push(match operation {
+            "sum" => array.reduce_sum_with_options(options),
+            "prod" => array.reduce_prod_with_options(options),
+            _ => unreachable!("combined options test requires sum or prod"),
+        });
     }
 
     fn assert_matches_numpy(self) {
@@ -266,7 +292,8 @@ for item in payload['inputs']:
     inputs.append(a.reshape(item['shape']))
 rows = []
 for case in payload['cases']:
-    kw = dict(axis=case['axis'], keepdims=case['keepdims'])
+    axis = tuple(case['axis']) if isinstance(case['axis'], list) else case['axis']
+    kw = dict(axis=axis, keepdims=case['keepdims'])
     if 'cum' in case['op']:
         del kw['keepdims']
     if case['dtype'] is not None:
@@ -274,11 +301,17 @@ for case in payload['cases']:
     if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     if case.get('where_input') is not None:
-        # The Rust where API accepts numeric truth masks, so compare its
-        # documented conversion with an explicitly Boolean NumPy mask.
-        kw['where'] = inputs[case['where_input']].astype(np.bool_)
+        mask = inputs[case['where_input']]
+        if case.get('legacy_where_truth_cast', False):
+            # Only the older single-axis entry points document numeric truth
+            # conversion. Combined options pass the original typed mask so
+            # NumPy independently checks its safe Boolean casting contract.
+            mask = mask.astype(np.bool_)
+        kw['where'] = mask
     if case.get('initial') is not None:
         kw['initial'] = float(case['initial'])
+    if case.get('initial_input') is not None:
+        kw['initial'] = inputs[case['initial_input']]
     try:
         if case['op'] == 'astype':
             source = inputs[case['input']]
@@ -3349,22 +3382,44 @@ fn typed_complex_storage_rejects_invalid_shapes_and_unsupported_casts() {
 
 #[test]
 fn typed_complex_storage_preserves_real_sidecars_and_value_only_cast_behavior() {
+    let mut batch = OracleBatch::default();
     for storage in [
-        ArrayStorage::I64(vec![i64::MIN, i64::MAX]),
-        ArrayStorage::U64(vec![0, u64::MAX]),
+        ArrayStorage::I64(vec![
+            i64::MIN,
+            i64::MAX,
+            (1_i64 << 53) - 1,
+            (1_i64 << 53) + 1,
+            (1_i64 << 53) + 3,
+            -((1_i64 << 53) + 1),
+        ]),
+        ArrayStorage::U64(vec![
+            0,
+            u64::MAX,
+            (1_u64 << 53) - 1,
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 3,
+            (1_u64 << 63) + 1,
+        ]),
     ] {
-        let imported = UFuncArray::from_storage(vec![2], storage.clone()).unwrap();
+        let shape = vec![storage.len()];
+        let imported = UFuncArray::from_storage(shape.clone(), storage.clone()).unwrap();
+        let input = batch.add_input(&imported);
         let same_dtype =
-            UFuncArray::from_storage_with_dtype(vec![2], storage.clone(), storage.dtype()).unwrap();
+            UFuncArray::from_storage_with_dtype(shape.clone(), storage.clone(), storage.dtype())
+                .unwrap();
         for array in [imported, same_dtype] {
             assert!(array.has_integer_sidecar());
             assert_eq!(array.to_storage().unwrap(), storage);
-            assert_eq!(array.shape(), &[2]);
+            assert_eq!(array.shape(), shape.as_slice());
         }
-        // The established real-only bridge remains conservative about these
-        // wide inputs; accepting complex targets must not change that contract.
-        assert!(UFuncArray::from_storage_with_dtype(vec![2], storage, DType::F64).is_err());
+        // Typed casts intentionally accept wide integers and round directly
+        // from the original storage. The required NumPy oracle checks output
+        // shape, dtype, and every f64 bit, including ties beyond 2^53.
+        batch.push_storage_cast(input, &shape, &storage, DType::F64);
     }
+    batch.assert_matches_numpy();
+    // A raw f64 working cell carries no exact integer provenance; its bridge
+    // rejection remains distinct from the typed-storage conversion above.
     let raw_integer = UFuncArray::new(vec![1], vec![2.0_f64.powi(54)], DType::I64).unwrap();
     assert!(raw_integer.to_storage().is_err());
 
@@ -4224,4 +4279,767 @@ fn selected_reduction_refactor_preserves_legacy_temporal_entry_points() {
         assert_eq!(result.dtype(), DType::TimeDelta64);
     }
     assert!(array.reduce_prod_where(&mask, None, false).is_err());
+}
+
+#[test]
+fn combined_reduction_options_keep_typed_seeds_masks_and_integer_wrapping() {
+    let array =
+        UFuncArray::from_storage(vec![2, 3], ArrayStorage::I8(vec![100, 100, 100, 1, 2, 3]))
+            .unwrap();
+    assert_eq!(
+        array
+            .reduce_sum_with_options(ReductionOptions::default())
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I64(vec![306])
+    );
+    assert_eq!(
+        array
+            .reduce_prod_with_options(ReductionOptions::default())
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I64(vec![6_000_000])
+    );
+    let mask =
+        UFuncArray::from_storage(vec![1, 3], ArrayStorage::Bool(vec![true, false, true])).unwrap();
+    let initial = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![2])).unwrap();
+    let options = ReductionOptions {
+        axes: Some(&[0, 1]),
+        dtype: Some(DType::I8),
+        where_mask: Some(&mask),
+        initial: Some(&initial),
+        ..ReductionOptions::default()
+    };
+    assert_eq!(
+        array
+            .reduce_sum_with_options(options)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I8(vec![-50])
+    );
+    assert_eq!(
+        array
+            .reduce_prod_with_options(options)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I8(vec![96])
+    );
+
+    let initial = complex_array(&[], &[(2.0, 3.0)], DType::Complex128);
+    let options = ReductionOptions {
+        dtype: Some(DType::Complex64),
+        initial: Some(&initial),
+        ..options
+    };
+    let sum = array.reduce_sum_with_options(options).unwrap();
+    let product = array.reduce_prod_with_options(options).unwrap();
+    assert_eq!(sum.shape(), &[2]);
+    assert_eq!(sum.values(), &[206.0, 3.0]);
+    assert_eq!(sum.dtype(), DType::Complex64);
+    assert_eq!(product.values(), &[60_000.0, 90_000.0]);
+
+    let array = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![3, 5])).unwrap();
+    let initial = UFuncArray::from_storage(vec![], ArrayStorage::U64(vec![u64::MAX])).unwrap();
+    let options = ReductionOptions {
+        initial: Some(&initial),
+        ..ReductionOptions::default()
+    };
+    assert_eq!(
+        array
+            .reduce_sum_with_options(options)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![7])
+    );
+    assert_eq!(
+        array
+            .reduce_prod_with_options(options)
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![u64::MAX.wrapping_mul(15)])
+    );
+    let exclude = UFuncArray::scalar(0.0, DType::Bool);
+    assert_eq!(
+        array
+            .reduce_sum_with_options(ReductionOptions {
+                where_mask: Some(&exclude),
+                ..options
+            })
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::U64(vec![u64::MAX])
+    );
+    // A Python float cannot encode that seed: the existing API must retain
+    // its out-of-range scalar error rather than adopt typed-array wrapping.
+    assert!(
+        array
+            .reduce_sum_initial(None, false, u64::MAX as f64)
+            .is_err()
+    );
+
+    let empty = UFuncArray::from_storage(vec![0], ArrayStorage::I8(vec![])).unwrap();
+    assert_eq!(
+        empty
+            .reduce_sum_with_options(ReductionOptions::default())
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I64(vec![0])
+    );
+    assert_eq!(
+        empty
+            .reduce_prod_with_options(ReductionOptions::default())
+            .unwrap()
+            .to_storage()
+            .unwrap(),
+        ArrayStorage::I64(vec![1])
+    );
+    let initial = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![200])).unwrap();
+    let result = empty
+        .reduce_sum_with_options(ReductionOptions {
+            dtype: Some(DType::I8),
+            initial: Some(&initial),
+            ..ReductionOptions::default()
+        })
+        .unwrap();
+    assert_eq!(result.to_storage().unwrap(), ArrayStorage::I8(vec![-56]));
+
+    let array = UFuncArray::new(vec![2], vec![1e308, 1e308], DType::F64).unwrap();
+    let initial = UFuncArray::scalar(0.0, DType::F64);
+    assert_eq!(
+        array
+            .reduce_prod_with_options(ReductionOptions {
+                initial: Some(&initial),
+                ..ReductionOptions::default()
+            })
+            .unwrap()
+            .values(),
+        &[0.0]
+    );
+}
+
+#[test]
+fn combined_reduction_options_numeric_dtype_matrix_matches_numpy() {
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let mask = UFuncArray::from_storage(vec![4], ArrayStorage::Bool(vec![true, false, true, true]))
+        .unwrap();
+    let initial = complex_array(&[], &[(1.25, -0.5)], DType::Complex128);
+    let axes: [Option<&[isize]>; 3] = [None, Some(&[-3, -1]), Some(&[])];
+    let mut batch = OracleBatch::default();
+    for source_dtype in dtypes {
+        let array = if source_dtype.is_complex() {
+            complex_array(
+                &[2, 3, 4],
+                &(0..24)
+                    .map(|index| {
+                        (
+                            1.0 + (index % 5) as f64 / 16.0,
+                            ((index % 3) as f64 - 1.0) / 32.0,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                source_dtype,
+            )
+        } else {
+            UFuncArray::new(
+                vec![2, 3, 4],
+                (0..24)
+                    .map(|index| {
+                        if source_dtype.is_integer() || source_dtype == DType::Bool {
+                            (index % 4) as f64
+                        } else {
+                            [-3.25, 0.5, 1.25, 0.125][index % 4]
+                        }
+                    })
+                    .collect(),
+                source_dtype,
+            )
+            .unwrap()
+        };
+        let input = batch.add_input(&array);
+        for dtype in dtypes {
+            for axes in axes {
+                for keepdims in [false, true] {
+                    for operation in ["sum", "prod"] {
+                        batch.push_options(
+                            input,
+                            &array,
+                            operation,
+                            ReductionOptions {
+                                axes,
+                                keepdims,
+                                dtype: Some(dtype),
+                                where_mask: Some(&mask),
+                                initial: Some(&initial),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn combined_reduction_options_axes_masks_and_empty_lanes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let initial = complex_array(&[], &[(-0.0, -0.0)], DType::Complex64);
+    let axes: [Option<&[isize]>; 7] = [
+        None,
+        Some(&[]),
+        Some(&[0]),
+        Some(&[-1]),
+        Some(&[2, 0]),
+        Some(&[0, 0]),
+        Some(&[4]),
+    ];
+    for shape in [vec![], vec![0], vec![2, 0, 3], vec![2, 1, 3], vec![2, 3, 4]] {
+        let count = shape.iter().product::<usize>();
+        for source_dtype in [DType::F16, DType::F64, DType::Complex64] {
+            let array = if source_dtype.is_complex() {
+                complex_array(
+                    &shape,
+                    &(0..count)
+                        .map(|index| ((index % 5) as f64 / 8.0, ((index % 3) as f64 - 1.0) / 16.0))
+                        .collect::<Vec<_>>(),
+                    source_dtype,
+                )
+            } else {
+                UFuncArray::new(
+                    shape.clone(),
+                    (0..count).map(|index| (index % 5) as f64 / 8.0).collect(),
+                    source_dtype,
+                )
+                .unwrap()
+            };
+            let mut masks = vec![
+                UFuncArray::scalar(0.0, DType::Bool),
+                UFuncArray::scalar(1.0, DType::Bool),
+                UFuncArray::new(vec![5], vec![1.0; 5], DType::Bool).unwrap(),
+            ];
+            if let Some(&last) = shape.last() {
+                masks.push(
+                    UFuncArray::new(
+                        vec![last],
+                        (0..last)
+                            .map(|index| if index % 2 == 0 { 1.0 } else { 0.0 })
+                            .collect(),
+                        DType::Bool,
+                    )
+                    .unwrap(),
+                );
+            }
+            let input = batch.add_input(&array);
+            for axes in axes {
+                for keepdims in [false, true] {
+                    for operation in ["sum", "prod"] {
+                        for mask in std::iter::once(None).chain(masks.iter().map(Some)) {
+                            batch.push_options(
+                                input,
+                                &array,
+                                operation,
+                                ReductionOptions {
+                                    axes,
+                                    keepdims,
+                                    dtype: None,
+                                    where_mask: mask,
+                                    initial: Some(&initial),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn combined_reduction_options_require_boolean_masks_including_scalars_and_empty_inputs() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for shape in [vec![], vec![2], vec![0]] {
+            let count = shape.iter().product::<usize>();
+            let mask = if dtype.is_complex() {
+                complex_array(
+                    &shape,
+                    &(0..count)
+                        .map(|index| (if index == 0 { 1.0 } else { 0.0 }, 0.0))
+                        .collect::<Vec<_>>(),
+                    dtype,
+                )
+            } else {
+                UFuncArray::new(
+                    shape.clone(),
+                    (0..count)
+                        .map(|index| if index == 0 { 1.0 } else { 0.0 })
+                        .collect(),
+                    dtype,
+                )
+                .unwrap()
+            };
+            let array = if count == 0 {
+                UFuncArray::new(vec![0], vec![], DType::F64).unwrap()
+            } else {
+                UFuncArray::new(vec![2], vec![2.0, 3.0], DType::F64).unwrap()
+            };
+            let options = ReductionOptions {
+                where_mask: Some(&mask),
+                ..ReductionOptions::default()
+            };
+            if dtype != DType::Bool {
+                for result in [
+                    array.reduce_sum_with_options(options),
+                    array.reduce_prod_with_options(options),
+                ] {
+                    let error =
+                        result.expect_err("typed non-Boolean masks require an explicit cast");
+                    assert!(error.to_string().contains("boolean dtype"));
+                }
+            }
+            let input = batch.add_input(&array);
+            for operation in ["sum", "prod"] {
+                batch.push_options(input, &array, operation, options);
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+
+    // Preserve the separately documented numeric-truth legacy entry points.
+    let array = UFuncArray::new(vec![2], vec![2.0, 3.0], DType::F64).unwrap();
+    let mask = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 0])).unwrap();
+    assert_eq!(
+        array.reduce_sum_where(&mask, None, false).unwrap().values(),
+        &[2.0]
+    );
+    assert_eq!(
+        array
+            .reduce_prod_where(&mask, None, false)
+            .unwrap()
+            .values(),
+        &[2.0]
+    );
+}
+
+#[test]
+fn combined_reduction_options_validate_initials_layouts_and_capacity() {
+    let array = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+    let invalid_initials = [
+        UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap(),
+        UFuncArray::new(vec![0], vec![], DType::F64).unwrap(),
+        UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex128).unwrap(),
+        UFuncArray::scalar(1.0, DType::DateTime64),
+    ];
+    for initial in &invalid_initials {
+        let options = ReductionOptions {
+            initial: Some(initial),
+            ..ReductionOptions::default()
+        };
+        assert!(array.reduce_sum_with_options(options).is_err());
+        assert!(array.reduce_prod_with_options(options).is_err());
+    }
+    let malformed = &invalid_initials[2];
+    for options in [
+        ReductionOptions::default(),
+        ReductionOptions {
+            where_mask: Some(malformed),
+            ..ReductionOptions::default()
+        },
+        ReductionOptions {
+            dtype: Some(DType::DateTime64),
+            ..ReductionOptions::default()
+        },
+    ] {
+        assert!(malformed.reduce_sum_with_options(options).is_err());
+        assert!(malformed.reduce_prod_with_options(options).is_err());
+    }
+    assert!(
+        array
+            .reduce_sum_with_options(ReductionOptions {
+                where_mask: Some(malformed),
+                ..ReductionOptions::default()
+            })
+            .is_err()
+    );
+    assert!(
+        array
+            .reduce_prod_with_options(ReductionOptions {
+                dtype: Some(DType::DateTime64),
+                ..ReductionOptions::default()
+            })
+            .is_err()
+    );
+
+    let huge = isize::MAX as usize / std::mem::size_of::<(f64, f64)>() + 1;
+    let empty = UFuncArray::new(vec![0, huge], vec![], DType::F64).unwrap();
+    let options = ReductionOptions {
+        axes: Some(&[0]),
+        dtype: Some(DType::Complex128),
+        ..ReductionOptions::default()
+    };
+    assert!(matches!(
+        empty.reduce_sum_with_options(options),
+        Err(UFuncError::Shape(_))
+    ));
+    assert!(matches!(
+        empty.reduce_prod_with_options(options),
+        Err(UFuncError::Shape(_))
+    ));
+    let empty = UFuncArray::new(vec![0, usize::MAX, 2], vec![], DType::F64).unwrap();
+    let initial = complex_array(&[], &[(2.0, 3.0)], DType::Complex128);
+    let options = ReductionOptions {
+        axes: Some(&[1, 2]),
+        dtype: Some(DType::Complex128),
+        initial: Some(&initial),
+        ..ReductionOptions::default()
+    };
+    for result in [
+        empty.reduce_sum_with_options(options).unwrap(),
+        empty.reduce_prod_with_options(options).unwrap(),
+    ] {
+        assert_eq!(result.shape(), &[0, 2]);
+        assert!(result.values().is_empty());
+    }
+    assert!(
+        empty
+            .reduce_sum_with_options(ReductionOptions {
+                initial: Some(&invalid_initials[0]),
+                ..options
+            })
+            .is_err()
+    );
+
+    let mut batch = OracleBatch::default();
+    let input = batch.add_input(&array);
+    for initial in &invalid_initials[..2] {
+        for operation in ["sum", "prod"] {
+            batch.push_options(
+                input,
+                &array,
+                operation,
+                ReductionOptions {
+                    initial: Some(initial),
+                    ..ReductionOptions::default()
+                },
+            );
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn combined_reduction_options_conversion_buffers_precede_selected_runs() {
+    // NumPy 2.4.3 returns 1.0 here; compacting the selected values first
+    // returns 0.0. The conversion buffer ends at source index 8192, even
+    // though the first selected run begins at index one.
+    let mut values = vec![0.0; 8193];
+    values[1] = -16_777_216.0;
+    values[8191] = 16_777_216.0;
+    values[8192] = 1.0;
+    let array = UFuncArray::new(vec![8193], values, DType::F64).unwrap();
+    let mut selected = vec![true; 8193];
+    selected[0] = false;
+    let mask = UFuncArray::from_storage(vec![8193], ArrayStorage::Bool(selected)).unwrap();
+    let options = ReductionOptions {
+        dtype: Some(DType::F32),
+        where_mask: Some(&mask),
+        ..ReductionOptions::default()
+    };
+    let result = array.reduce_sum_with_options(options).unwrap();
+    assert_eq!(result.values()[0].to_bits(), 1.0_f64.to_bits());
+    let mut batch = OracleBatch::default();
+    let input = batch.add_input(&array);
+    batch.push_options(input, &array, "sum", options);
+
+    // A complex cast's scalar tail restarts at every conversion transfer.
+    // Casting all 8193 elements before reduction incorrectly returns 2^31.
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let mut values = vec![(0.0, 0.0); 8193];
+        values[8191] = (f64::NAN, 0.0);
+        let array = complex_array(&[8193], &values, dtype);
+        let options = ReductionOptions {
+            dtype: Some(DType::U32),
+            ..ReductionOptions::default()
+        };
+        assert_eq!(
+            array
+                .reduce_sum_with_options(options)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::U32(vec![0])
+        );
+        let input = batch.add_input(&array);
+        batch.push_options(input, &array, "sum", options);
+    }
+
+    // Broadcasting changes iteration geometry even when every mask value is
+    // true. The trailing mask keeps row boundaries; a dense or scalar mask
+    // permits one flat iteration. NumPy 2.4.3 returns 0 versus 1 respectively.
+    let mut values = vec![0.0; 2 * 8193];
+    values[8192] = -16_777_216.0;
+    values[8193] = 16_777_216.0;
+    values[16384] = 1.0;
+    let array = UFuncArray::new(vec![2, 8193], values, DType::F64).unwrap();
+    let masks = [
+        (UFuncArray::scalar(1.0, DType::Bool), 1.0),
+        (
+            UFuncArray::new(vec![8193], vec![1.0; 8193], DType::Bool).unwrap(),
+            0.0,
+        ),
+        (
+            UFuncArray::new(vec![2, 8193], vec![1.0; 2 * 8193], DType::Bool).unwrap(),
+            1.0,
+        ),
+    ];
+    let input = batch.add_input(&array);
+    for (mask, expected) in &masks {
+        let options = ReductionOptions {
+            dtype: Some(DType::F32),
+            where_mask: Some(mask),
+            ..ReductionOptions::default()
+        };
+        assert_eq!(
+            array.reduce_sum_with_options(options).unwrap().values(),
+            &[*expected]
+        );
+        batch.push_options(input, &array, "sum", options);
+    }
+
+    type TransferCase = (Vec<usize>, Option<&'static [isize]>, usize);
+    let transfer_cases: [TransferCase; 6] = [
+        (vec![2, 8193], None, 8192),
+        (vec![2, 8193], Some(&[0]), 8191),
+        (vec![8193, 2], Some(&[1]), 8191),
+        (vec![2000, 5], Some(&[0]), 8189),
+        (vec![2, 3, 4000], Some(&[0, 2]), 7999),
+        (vec![2, 3, 6000], None, 5999),
+    ];
+    for (shape, axes, invalid_index) in transfer_cases {
+        let count = shape.iter().product::<usize>();
+        let trailing = *shape.last().unwrap();
+        let row_mask = UFuncArray::new(vec![trailing], vec![1.0; trailing], DType::Bool).unwrap();
+        for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+            for operation in ["sum", "prod"] {
+                let identity = if operation == "sum" { 0.0 } else { 1.0 };
+                let mut values = vec![identity; count];
+                values[invalid_index] = f64::NAN;
+                let array = if dtype.is_complex() {
+                    complex_array(
+                        &shape,
+                        &values
+                            .into_iter()
+                            .map(|value| (value, 0.0))
+                            .collect::<Vec<_>>(),
+                        dtype,
+                    )
+                } else {
+                    UFuncArray::new(shape.clone(), values, dtype).unwrap()
+                };
+                let input = batch.add_input(&array);
+                for mask in [None, Some(&row_mask)] {
+                    batch.push_options(
+                        input,
+                        &array,
+                        operation,
+                        ReductionOptions {
+                            axes,
+                            dtype: Some(DType::U32),
+                            where_mask: mask,
+                            ..ReductionOptions::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let initial = complex_array(&[], &[(0.5, 0.25)], DType::Complex128);
+    let axes: [Option<&[isize]>; 3] = [None, Some(&[0]), Some(&[-1])];
+    for (source_dtype, dtype) in [
+        (DType::F64, DType::F16),
+        (DType::F64, DType::F32),
+        (DType::Complex128, DType::F32),
+        (DType::Complex128, DType::Complex64),
+    ] {
+        for len in [8191, 8192, 8193] {
+            for shape in [vec![len], vec![2, len], vec![len, 2]] {
+                let count = shape.iter().product::<usize>();
+                for operation in ["sum", "prod"] {
+                    let large = if dtype == DType::F16 {
+                        4096.0
+                    } else {
+                        16_777_216.0
+                    };
+                    let pattern = [large, 1.0, -large, 1.0, 1.0, 1.0, 1.0, 1.0];
+                    let values: Vec<f64> = (0..count)
+                        .map(|index| {
+                            if operation == "sum" {
+                                pattern[index % pattern.len()]
+                            } else {
+                                1.0 + ((index % 7) as f64 - 3.0) / 1024.0
+                            }
+                        })
+                        .collect();
+                    let array = if source_dtype.is_complex() {
+                        let pairs = values
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &real)| {
+                                let imaginary = if operation == "sum" {
+                                    pattern[(index + 3) % pattern.len()]
+                                } else {
+                                    ((index % 3) as f64 - 1.0) / 4096.0
+                                };
+                                (real, imaginary)
+                            })
+                            .collect::<Vec<_>>();
+                        complex_array(&shape, &pairs, source_dtype)
+                    } else {
+                        UFuncArray::new(shape.clone(), values, source_dtype).unwrap()
+                    };
+                    let masks = [
+                        UFuncArray::from_storage(
+                            shape.clone(),
+                            ArrayStorage::Bool((0..count).map(|index| index != 0).collect()),
+                        )
+                        .unwrap(),
+                        UFuncArray::from_storage(
+                            shape.clone(),
+                            ArrayStorage::Bool(
+                                (0..count)
+                                    .map(|index| index % 17 != 7 && index % 129 != 128)
+                                    .collect(),
+                            ),
+                        )
+                        .unwrap(),
+                    ];
+                    let input = batch.add_input(&array);
+                    for axes in axes {
+                        for mask in std::iter::once(None).chain(masks.iter().map(Some)) {
+                            batch.push_options(
+                                input,
+                                &array,
+                                operation,
+                                ReductionOptions {
+                                    axes,
+                                    dtype: Some(dtype),
+                                    where_mask: mask,
+                                    initial: Some(&initial),
+                                    ..ReductionOptions::default()
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn combined_reduction_options_typed_initial_precision_and_nonfinite_values_match_numpy() {
+    let initials = [
+        UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![i64::MIN + 17])).unwrap(),
+        UFuncArray::from_storage(vec![], ArrayStorage::U64(vec![u64::MAX])).unwrap(),
+        UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![200])).unwrap(),
+        UFuncArray::scalar(-0.0, DType::F64),
+        UFuncArray::scalar(f64::NAN, DType::F64),
+        UFuncArray::scalar(f64::INFINITY, DType::F64),
+        complex_array(&[], &[(1.000_000_01, -0.0)], DType::Complex64),
+        complex_array(&[], &[(f64::INFINITY, f64::NAN)], DType::Complex128),
+    ];
+    let dtypes = [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ];
+    let arrays = [
+        UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![(1_u64 << 53) + 1, 3])).unwrap(),
+        UFuncArray::new(vec![0], vec![], DType::F64).unwrap(),
+        UFuncArray::new(vec![2], vec![-0.0, f64::INFINITY], DType::F64).unwrap(),
+        complex_array(
+            &[2],
+            &[(1.000_000_01, 1e-50), (f64::NAN, f64::INFINITY)],
+            DType::Complex64,
+        ),
+    ];
+    let exclude = UFuncArray::scalar(0.0, DType::Bool);
+    let first_only =
+        UFuncArray::from_storage(vec![2], ArrayStorage::Bool(vec![true, false])).unwrap();
+    let mut batch = OracleBatch::default();
+    for array in &arrays {
+        let input = batch.add_input(array);
+        for dtype in dtypes {
+            for initial in &initials {
+                for operation in ["sum", "prod"] {
+                    for mask in [None, Some(&exclude), Some(&first_only)] {
+                        batch.push_options(
+                            input,
+                            array,
+                            operation,
+                            ReductionOptions {
+                                dtype: Some(dtype),
+                                where_mask: mask,
+                                initial: Some(initial),
+                                ..ReductionOptions::default()
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
