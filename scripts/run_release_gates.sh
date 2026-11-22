@@ -50,10 +50,19 @@ else
   export RUSTFLAGS="-D warnings" CARGO_TERM_COLOR=never
 fi
 export CARGO_TARGET_DIR="$WORK/target"
+export CARGO_INCREMENTAL=0
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+# Resolve PYTHON and prepend its directory to PATH so subprocesses and tools that invoke
+# `python3` pick up the configured oracle interpreter consistently across all gates.
+PYTHON_BIN="$(command -v "$PYTHON" 2>/dev/null || printf '%s' "$PYTHON")"
+PYTHON_DIR="$(dirname "$PYTHON_BIN")"
+[[ -d "$PYTHON_DIR" ]] && export PATH="$PYTHON_DIR:$PATH"
 # CI's setup-python makes the interpreter's shared libpython loadable; pyo3's test binaries link it
 # dynamically and fail with "libpython3.X.so: cannot open shared object file" without it.
-export PYO3_PYTHON="$PYTHON"
-pylibdir="$("$PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')" || exit 70
+export PYO3_PYTHON="$PYTHON_BIN"
+export FNP_ORACLE_PYTHON="$PYTHON_BIN"
+pylibdir="$("$PYTHON_BIN" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')" || exit 70
 [[ -n "$pylibdir" ]] && export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # scripts/e2e/*.sh offload through `rch exec -- cargo ...` whenever rch is on PATH; CI has no rch.
 # The receipt describes a run on this host, so `rch exec -- <cmd>` runs <cmd> here.
@@ -72,8 +81,9 @@ STARTED_AT="$(date -u +%FT%TZ)"
   echo "# perf_reference=$REFERENCE"
   echo "# host=$(hostname) arch=$(uname -m) started=$STARTED_AT"
   echo "# rustc=$(rustc --version)"
-  echo "# python=$("$PYTHON" -c 'import sys, numpy; print(sys.version.split()[0], "numpy", numpy.__version__)' 2>&1)"
+  echo "# python=$("$PYTHON_BIN" -c 'import sys, numpy; print(sys.version.split()[0], "numpy", numpy.__version__)' 2>&1)"
   echo "# python_g9=$("$PYTHON_G9" -c 'import sys; print(sys.version.split()[0])' 2>&1)"
+  echo "# threadpoolctl=$("$PYTHON_BIN" -c 'import json; import threadpoolctl; print(json.dumps(threadpoolctl.threadpool_info()))' 2>/dev/null || echo unavailable)"
 } >"$RECEIPT"
 
 gate() { # gate <G#> <function>: run it in a subshell, log it, append its receipt line
@@ -123,7 +133,7 @@ g9() {
   # shellcheck disable=SC1091
   source "$WORK/venv-g9/bin/activate" || return
   # maturin must build against this venv's interpreter, as in CI, not the outer PYO3_PYTHON.
-  unset PYO3_PYTHON
+  unset PYO3_PYTHON FNP_ORACLE_PYTHON
   python -m pip install -q --upgrade pip maturin "numpy<2.5" || return
   maturin build --release --out "$WORK/dist" || return
   python -m pip install -q "$WORK"/dist/*.whl || return

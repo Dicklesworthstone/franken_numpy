@@ -4536,7 +4536,10 @@ result = (cells, bad)
 "#,
         )?;
         assert_eq!(cells, 54, "the legacy geometric probe drifted");
-        assert!(bad.is_empty(), "legacy geometric differs from numpy: {bad:#?}");
+        assert!(
+            bad.is_empty(),
+            "legacy geometric differs from numpy: {bad:#?}"
+        );
         Ok(())
     });
 }
@@ -4603,7 +4606,10 @@ result = (cells, bad)
 "#,
         )?;
         assert_eq!(cells, 76, "the geometric search-stall probe drifted");
-        assert!(bad.is_empty(), "geometric boundary handling is wrong: {bad:#?}");
+        assert!(
+            bad.is_empty(),
+            "geometric boundary handling is wrong: {bad:#?}"
+        );
         Ok(())
     });
 }

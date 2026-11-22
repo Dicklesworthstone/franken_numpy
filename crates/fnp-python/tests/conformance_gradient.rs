@@ -2,10 +2,8 @@
 //!
 //! Tests gradient (gradient of an N-dimensional array).
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
@@ -80,7 +78,7 @@ print('ok')
 "#
         .into(),
     );
-    let output = Command::new("python3")
+    let output = support::python_command()
         .env("RAYON_NUM_THREADS", "2")
         .args(["-c", &script])
         .output()
@@ -160,7 +158,7 @@ print('ok')
 "#
         .into(),
     );
-    let output = Command::new("python3")
+    let output = support::python_command()
         .env("RAYON_NUM_THREADS", "2")
         .args(["-c", &script])
         .output()
@@ -258,7 +256,7 @@ print('ok')
 "#
         .into(),
     );
-    let output = Command::new("python3")
+    let output = support::python_command()
         .env("RAYON_NUM_THREADS", "2")
         .args(["-c", &script])
         .output()
@@ -446,7 +444,7 @@ print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
 }
 
 fn classify_error(script: &str) -> String {
-    let output = std::process::Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .expect("python3 should be available");

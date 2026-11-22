@@ -1223,8 +1223,8 @@ print(bad or "OK")
 
 fn classify_error(script: &str) -> String {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("python3")
+    use std::process::Stdio;
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

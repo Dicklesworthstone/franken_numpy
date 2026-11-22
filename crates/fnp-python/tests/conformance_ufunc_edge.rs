@@ -3,14 +3,16 @@
 //! Tests verify PyUFunc reduce/accumulate/outer behaviors match NumPy on
 //! edge cases like empty arrays and identity element semantics.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let py = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let output = Command::new(&py)
+    let output = support::python_command()
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("{py} should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| {
+            format!(
+                "{} should be available: {error}\nScript: {script}",
+                support::resolve_oracle_python()
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));

@@ -24,8 +24,10 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Newest `<child>/out/<name>` among a directory's immediate children.
@@ -163,10 +165,99 @@ pub fn fnp_script_with(extra_imports: &str, register_in_sys_modules: bool, body:
     )
 }
 
+/// Resolves the NumPy oracle Python interpreter from explicit env-var values.
+///
+/// Precedence: `FNP_ORACLE_PYTHON` -> `PYO3_PYTHON` -> `"python3"`.
+/// Blank or whitespace-only values are ignored so callers can unset via `=""`.
+pub fn resolve_oracle_python_from(
+    fnp_oracle_python: Option<&str>,
+    pyo3_python: Option<&str>,
+) -> String {
+    fnp_oracle_python
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| pyo3_python.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("python3")
+        .to_string()
+}
+
+/// Resolves the configured NumPy oracle Python interpreter from the process environment.
+pub fn resolve_oracle_python() -> String {
+    let fnp = std::env::var("FNP_ORACLE_PYTHON").ok();
+    let pyo3 = std::env::var("PYO3_PYTHON").ok();
+    resolve_oracle_python_from(fnp.as_deref(), pyo3.as_deref())
+}
+
+/// Queries `<python>` for its `major.minor` CPython version string (e.g. `"3.12"`).
+pub fn python_minor_version(python: &str) -> Result<String, String> {
+    let output = Command::new(python)
+        .args([
+            "-c",
+            "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')",
+        ])
+        .output()
+        .map_err(|error| format!("failed to invoke oracle interpreter {python:?}: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "oracle interpreter {python:?} failed version probe: {stderr}"
+        ));
+    }
+    let xy = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if xy.split('.').count() != 2 {
+        return Err(format!(
+            "oracle interpreter {python:?} returned unexpected version {xy:?}"
+        ));
+    }
+    Ok(xy)
+}
+
+/// Verifies that the oracle interpreter's `major.minor` matches the CPython ABI
+/// the `fnp_python` extension was compiled against (`FNP_BUILT_PYTHON_XY`).
+///
+/// A mismatch would otherwise fail deep inside `pyo3-ffi` with a misaligned-pointer
+/// panic or segfault when the subprocess loads the compiled cdylib.
+pub fn check_python_abi_match(python: &str, built_xy: Option<&str>) -> Result<(), String> {
+    let Some(expected_xy) = built_xy.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let Ok(actual_xy) = python_minor_version(python) else {
+        // Leave missing/unrunnable executable errors to the caller's own `.output()` error path.
+        return Ok(());
+    };
+    if actual_xy != expected_xy {
+        return Err(format!(
+            "fnp_python ABI mismatch: extension was built against Python {expected_xy}, \
+             but oracle interpreter {python:?} is Python {actual_xy}. \
+             Set FNP_ORACLE_PYTHON and PYO3_PYTHON to matching Python minor versions."
+        ));
+    }
+    Ok(())
+}
+
+fn verify_oracle_abi_cached(python: &str) {
+    static CACHE: OnceLock<Mutex<HashMap<String, Result<(), String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let verdict = {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(python.to_string())
+            .or_insert_with(|| check_python_abi_match(python, option_env!("FNP_BUILT_PYTHON_XY")))
+            .clone()
+    };
+    if let Err(message) = verdict {
+        panic!("{message}");
+    }
+}
+
 /// Returns a `std::process::Command` targeting the configured NumPy oracle interpreter.
 ///
-/// Defaults to `python3`, but respects `FNP_ORACLE_PYTHON` when set in the environment.
+/// Precedence: `FNP_ORACLE_PYTHON` -> `PYO3_PYTHON` -> `"python3"`.
+/// Also verifies once per interpreter that its `major.minor` matches the build-time
+/// CPython ABI (`FNP_BUILT_PYTHON_XY`) so mismatches report a clear error instead of
+/// panicking inside `pyo3-ffi`.
 pub fn python_command() -> Command {
-    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let python = resolve_oracle_python();
+    verify_oracle_abi_cached(&python);
     Command::new(python)
 }

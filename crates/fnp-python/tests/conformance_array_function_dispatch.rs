@@ -7,10 +7,8 @@
 //! dispatcher names fnp implements natively. These suites pin the protocol for EVERY such
 //! name, not a sample, so a newly added native function cannot regress it unnoticed.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

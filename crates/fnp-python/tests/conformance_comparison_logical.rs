@@ -3,10 +3,8 @@
 //! Tests: equal, not_equal, greater, greater_equal, less, less_equal,
 //! logical_and, logical_or, logical_xor, logical_not.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

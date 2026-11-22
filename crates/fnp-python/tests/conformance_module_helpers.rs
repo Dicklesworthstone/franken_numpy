@@ -1,13 +1,10 @@
 //! Conformance tests for numpy module-level helpers:
 //! fromregex, min_scalar_type, get_printoptions, mintypecode.
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+use std::{io::Write, process::Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

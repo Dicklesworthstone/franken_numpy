@@ -4,10 +4,8 @@
 //! - nan_to_num(x, nan=0.0, posinf=None, neginf=None): replace NaN/inf values
 //! - clip(a, a_min, a_max): limit array values to [a_min, a_max]
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

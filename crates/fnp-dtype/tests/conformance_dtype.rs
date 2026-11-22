@@ -4,11 +4,26 @@
 
 use std::process::Command;
 
+fn oracle_python() -> String {
+    std::env::var("FNP_ORACLE_PYTHON")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("PYO3_PYTHON")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "python3".to_string())
+}
+
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let python = oracle_python();
+    let output = Command::new(&python)
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| format!("{python} should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));

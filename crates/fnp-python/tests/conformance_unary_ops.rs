@@ -2,8 +2,6 @@
 //!
 //! Tests positive, negative, reciprocal functions.
 
-use std::process::Command;
-
 // The out= probe is shared so that its strictness is decided in one place; see the
 // module docs for the three shards whose hand-rolled copies silently discarded the
 // mutated values (deadlock-audit-au3z4).
@@ -11,7 +9,7 @@ use std::process::Command;
 mod out_keyword;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

@@ -18,15 +18,17 @@
 //! theoretical: an earlier version of this suite using `array_equal` reported a false
 //! mismatch on the signed-zero case while being unable to detect a real one.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    // Same interpreter selection as every other oracle suite: FNP_ORACLE_PYTHON, else python3.
-    let py = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let output = Command::new(&py)
+    // Same interpreter selection as every other oracle suite: FNP_ORACLE_PYTHON -> PYO3_PYTHON -> python3.
+    let output = support::python_command()
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("{py} should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| {
+            format!(
+                "{} should be available: {error}\nScript: {script}",
+                support::resolve_oracle_python()
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("oracle failed: {stderr}\nScript: {script}"));

@@ -3,10 +3,8 @@
 //! Tests the Heaviside step function:
 //! - heaviside(x1, x2): 0 for x1 < 0, x2 for x1 == 0, 1 for x1 > 0
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

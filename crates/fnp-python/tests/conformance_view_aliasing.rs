@@ -18,10 +18,8 @@
 //! The converse matters too: `np.broadcast_to` returns a READ-ONLY view, so a
 //! wrapper handing back a writeable copy lets callers mutate what numpy froze.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

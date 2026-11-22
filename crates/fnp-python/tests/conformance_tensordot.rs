@@ -2,10 +2,8 @@
 //!
 //! Tests tensordot (tensor dot product).
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
@@ -149,7 +147,7 @@ print(np.allclose(fnp_result, np_result))
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn classify_error(script: &str) -> String {
-    let output = std::process::Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .expect("python3 should be available");

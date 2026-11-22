@@ -49,7 +49,7 @@ criterion.workspace = true
 # A hash computed by a shell step next to the run proves nothing about which ELF
 # actually executed: rch compiles into an opaque per-worker pool target dir that
 # the caller cannot predict, and concurrent agents have edited crates mid-run.
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 
 [[bench]]
 name = "criterion_python_surface"

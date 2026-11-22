@@ -2,15 +2,13 @@
 //!
 //! Tests floor, ceil, trunc, rint functions.
 
-use std::process::Command;
-
 // Shared so that this contract's strictness lives in one file rather than in each
 // shard's hand-rolled copy (deadlock-audit-au3z4).
 #[path = "common/out_keyword.rs"]
 mod out_keyword;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

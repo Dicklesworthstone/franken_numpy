@@ -4,13 +4,10 @@
 //! error-handling functions (errstate, seterr, geterr, seterrcall, geterrcall),
 //! diagnostic functions (show_config, show_runtime, info).
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+use std::{io::Write, process::Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

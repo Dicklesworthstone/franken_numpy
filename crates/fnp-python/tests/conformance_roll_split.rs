@@ -46,7 +46,7 @@ fn roll_flat_and_each_2d_axis_match_numpy_exactly() {
 }
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = std::process::Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

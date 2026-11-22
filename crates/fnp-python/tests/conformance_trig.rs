@@ -3,7 +3,7 @@
 //! Tests sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 // Shared so that this contract's strictness lives in one file rather than in each
 // shard's hand-rolled copy (deadlock-audit-au3z4).
@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 mod out_keyword;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

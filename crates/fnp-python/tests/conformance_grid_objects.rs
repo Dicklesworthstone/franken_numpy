@@ -1,10 +1,8 @@
 //! Conformance tests for fnp_python.mgrid and fnp_python.ogrid — the
 //! bracket-indexable grid-class instances re-exported from numpy.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

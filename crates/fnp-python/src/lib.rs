@@ -143613,7 +143613,7 @@ fn ensure_cpu_supports_compiled_isa() -> PyResult<()> {
     Ok(())
 }
 
-#[pymodule]
+#[pymodule(gil_used = true)]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_cpu_supports_compiled_isa()?;
     install_recoverable_alloc_failure();

@@ -5,13 +5,10 @@
 //! and `strings` are shallow native overlays for ASCII upper/lower, so the tests
 //! verify reachability, copied non-overridden attributes, and numpy-equal output.
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+use std::{io::Write, process::Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

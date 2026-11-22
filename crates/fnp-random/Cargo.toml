@@ -46,7 +46,7 @@ rayon = ["dep:rayon"]
 [dev-dependencies]
 criterion.workspace = true
 # sha2: golden-output digest for bit-exact RNG stream preservation tests.
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 
 [[bench]]
 name = "random_ops"

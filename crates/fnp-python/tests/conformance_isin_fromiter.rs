@@ -8,10 +8,10 @@ use common::with_fnp_and_numpy;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let mut child = Command::new("python3")
+    let mut child = support::python_command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

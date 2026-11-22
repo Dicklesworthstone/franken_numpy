@@ -13,7 +13,7 @@ fn ensure_numpy_site_dir() -> Result<PathBuf, String> {
         .get_or_init(|| {
             let site_dir =
                 std::env::temp_dir().join(format!("fnp_numpy_oracle_site_{}", std::process::id()));
-            let pip_install_output = Command::new("python3")
+            let pip_install_output = support::python_command()
                 .args(["-m", "pip", "install", "--target"])
                 .arg(&site_dir)
                 .arg("numpy")
@@ -24,7 +24,13 @@ fn ensure_numpy_site_dir() -> Result<PathBuf, String> {
             }
 
             let install_output = Command::new("uv")
-                .args(["pip", "install", "--python", "python3", "--target"])
+                .args([
+                    "pip",
+                    "install",
+                    "--python",
+                    &support::resolve_oracle_python(),
+                    "--target",
+                ])
                 .arg(&site_dir)
                 .arg("numpy")
                 .output()
@@ -51,12 +57,8 @@ fn pythonpath_with_site_dir(site_dir: &Path) -> OsString {
     path
 }
 
-fn command_python(
-    script: &str,
-    python: impl AsRef<std::ffi::OsStr>,
-    pythonpath: Option<&OsString>,
-) -> Result<Output, String> {
-    let mut command = Command::new(python);
+fn command_python(script: &str, pythonpath: Option<&OsString>) -> Result<Output, String> {
+    let mut command = support::python_command();
     command
         .arg("-")
         .stdin(Stdio::piped())
@@ -82,11 +84,14 @@ fn command_python(
 }
 
 fn run_numpy_oracle(script: &str) -> Result<Output, String> {
-    if let Ok(python) = std::env::var("FNP_ORACLE_PYTHON") {
-        return command_python(script, python, None);
+    if std::env::var("FNP_ORACLE_PYTHON")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return command_python(script, None);
     }
 
-    let first_output = command_python(script, "python3", None)?;
+    let first_output = command_python(script, None)?;
     if first_output.status.success() {
         return Ok(first_output);
     }
@@ -98,7 +103,7 @@ fn run_numpy_oracle(script: &str) -> Result<Output, String> {
 
     let site_dir = ensure_numpy_site_dir()?;
     let pythonpath = pythonpath_with_site_dir(&site_dir);
-    command_python(script, "python3", Some(&pythonpath))
+    command_python(script, Some(&pythonpath))
 }
 
 fn numpy_oracle(script: &str) -> Result<String, String> {

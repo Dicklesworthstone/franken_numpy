@@ -18,18 +18,18 @@ fnp-dtype = { path = "../fnp-dtype", version = "0.5.0" }
 # allocation. Only Pod-derived types are eligible (see ArrayStorage in fnp-dtype).
 bytemuck = "1.25.2"
 # crc32fast: hardware-accelerated IEEE CRC-32 for ZIP/NPZ entries.
-crc32fast = "1.5.0"
+crc32fast = "1.5.5"
 # flate2: DEFLATE compression for NPZ archives (savez_compressed + load_npz).
 # Configured with the default backend; no native zlib system dependency.
-flate2 = "1.1.9"
+flate2 = "1.1.11"
 
 [dev-dependencies]
 # insta: snapshot testing for the NPY/NPZ binary writer and diagnostic-oracle
 # golden output (see crates/fnp-io/tests/npy_npz_diagnostic.rs).
-insta = "1.47.2"
+insta = "1.49.0"
 criterion.workspace = true
 # sha2: deterministic golden-output digests for byte-for-byte IO writer tests.
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 
 [[bench]]
 name = "criterion_io"

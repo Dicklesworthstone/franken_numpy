@@ -3,10 +3,8 @@
 //! Tests the native Rust min implementation against NumPy across various
 //! input shapes, axis parameters, keepdims, and data types.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

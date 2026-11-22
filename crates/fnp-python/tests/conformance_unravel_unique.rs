@@ -32,10 +32,8 @@
 //! numpy's x86-simd-sort fp16 defect. Reproduced at base commit with the split reverted.
 //! Tracked by bead `deadlock-audit-f7qjf`.
 
-use std::process::Command;
-
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let output = support::python_command()
         .args(["-c", script])
         .output()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;

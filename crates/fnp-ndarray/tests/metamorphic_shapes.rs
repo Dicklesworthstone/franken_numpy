@@ -710,16 +710,31 @@ fn mr_zero_stride_overlap() {
 // Fault sensitivity: 5/5 — catches any divergence from NumPy
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn oracle_python() -> String {
+    std::env::var("FNP_ORACLE_PYTHON")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("PYO3_PYTHON")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "python3".to_string())
+}
+
 fn numpy_broadcast(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
     use std::process::Command;
+    let python = oracle_python();
     let script = format!(
         "import numpy as np; print(list(np.broadcast_shapes({:?}, {:?})))",
         a, b
     );
-    let output = Command::new("python3")
+    let output = Command::new(&python)
         .args(["-c", &script])
         .output()
-        .map_err(|e| format!("python3 failed: {e}"))?;
+        .map_err(|e| format!("{python} failed: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("could not be broadcast") {
@@ -796,14 +811,15 @@ fn mr_numpy_conformance_broadcast_incompatible() {
 
 fn numpy_reshape(count: usize, new_shape: &[isize]) -> Result<Vec<usize>, String> {
     use std::process::Command;
+    let python = oracle_python();
     let script = format!(
         "import numpy as np; a = np.zeros({}); print(list(a.reshape({:?}).shape))",
         count, new_shape
     );
-    let output = Command::new("python3")
+    let output = Command::new(&python)
         .args(["-c", &script])
         .output()
-        .map_err(|e| format!("python3 failed: {e}"))?;
+        .map_err(|e| format!("{python} failed: {e}"))?;
     if !output.status.success() {
         return Err("reshape failed".to_string());
     }
