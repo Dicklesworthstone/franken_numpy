@@ -1447,10 +1447,14 @@ fn complex_multi_rhs_solve_handles_empty_extreme_and_invalid_systems() {
     );
     assert!(complex_solve_nxn_multi(&[], &[], 0, 3).unwrap().is_empty());
     assert!(
-        complex_solve_nxn_multi(&[0.0; 8], &[], 2, 0)
+        complex_solve_nxn_multi(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[], 2, 0)
             .unwrap()
             .is_empty()
     );
+    assert!(matches!(
+        complex_solve_nxn_multi(&[0.0; 8], &[], 2, 0),
+        Err(LinAlgError::SolverSingularity)
+    ));
     assert!(matches!(
         complex_solve_nxn_multi(&[0.0; 8], &[0.0; 8], 2, 2),
         Err(LinAlgError::SolverSingularity)
@@ -1461,7 +1465,13 @@ fn complex_multi_rhs_solve_handles_empty_extreme_and_invalid_systems() {
     for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(complex_solve_nxn_multi(&[1.0, nonfinite], &[1.0, 0.0], 1, 1).is_err());
         assert!(complex_solve_nxn_multi(&[1.0, 0.0], &[1.0, nonfinite], 1, 1).is_err());
-        assert!(complex_solve_nxn_multi(&[1.0, nonfinite], &[], 1, 0).is_err());
+        // Factor-only nrhs == 0 matches live NumPy 2.4.3 empty-RHS semantics
+        // (see zero_column_solve_factors_real_and_complex_coefficients).
+        assert!(
+            complex_solve_nxn_multi(&[1.0, nonfinite], &[], 1, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

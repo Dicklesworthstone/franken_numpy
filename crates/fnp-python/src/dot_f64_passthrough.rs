@@ -38,7 +38,17 @@ pub(super) fn try_full_thread_f64_dot(
     b: &Bound<'_, PyAny>,
     out: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if out.is_some_and(|value| !value.bind(py).is_none()) || blas_is_single_threaded() {
+    try_full_thread_f64_dot_with_single_threaded(py, a, b, out, blas_is_single_threaded())
+}
+
+fn try_full_thread_f64_dot_with_single_threaded(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    out: Option<&Py<PyAny>>,
+    single_threaded: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if out.is_some_and(|value| !value.bind(py).is_none()) || single_threaded {
         return Ok(None);
     }
 
@@ -62,7 +72,10 @@ pub(super) fn try_full_thread_f64_dot(
 
 #[cfg(test)]
 mod tests {
-    use super::try_full_thread_f64_dot;
+    use super::{
+        blas_is_single_threaded, try_full_thread_f64_dot,
+        try_full_thread_f64_dot_with_single_threaded,
+    };
     use pyo3::prelude::*;
 
     #[test]
@@ -85,9 +98,19 @@ mod tests {
                 .call_method1("astype", ("float64",))
                 .unwrap();
 
-            let passthrough = try_full_thread_f64_dot(py, &a_f64, &b_f64, None)
-                .expect("passthrough call succeeds")
-                .expect("exact f64 ndarrays engage passthrough");
+            let passthrough =
+                try_full_thread_f64_dot_with_single_threaded(py, &a_f64, &b_f64, None, false)
+                    .expect("passthrough call succeeds")
+                    .expect("exact f64 ndarrays engage passthrough");
+            assert!(
+                try_full_thread_f64_dot_with_single_threaded(py, &a_f64, &b_f64, None, true)
+                    .expect("single-threaded probe succeeds")
+                    .is_none()
+            );
+            let ambient = try_full_thread_f64_dot(py, &a_f64, &b_f64, None)
+                .expect("ambient passthrough probe succeeds");
+            assert_eq!(ambient.is_none(), blas_is_single_threaded());
+
             let via_dot = crate::dot(py, a_f64.clone().unbind(), b_f64.clone().unbind(), None)
                 .expect("crate::dot succeeds");
             let expected = np.call_method1("dot", (&a_f64, &b_f64)).unwrap();
@@ -107,7 +130,7 @@ mod tests {
 
             let a_i32 = a_f64.call_method1("astype", ("int32",)).unwrap();
             assert!(
-                try_full_thread_f64_dot(py, &a_i32, &b_f64, None)
+                try_full_thread_f64_dot_with_single_threaded(py, &a_i32, &b_f64, None, false)
                     .expect("non-f64 probe succeeds")
                     .is_none()
             );

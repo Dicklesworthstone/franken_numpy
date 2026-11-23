@@ -86166,6 +86166,23 @@ fn triangular_impl(
     if let Some(result) = try_zerocopy_any_triangular(py, m.bind(py), k, upper)? {
         return Ok(result);
     }
+    // NumPy's triu/tril preserve non-C-contiguous strides on >=3-D inputs via
+    // `where(mask, m, 0)` keeporder allocation, while `build_numpy_array_from_ufunc`
+    // always emits a C-contiguous buffer. Delegate non-C-contiguous >=3-D ndarrays
+    // to NumPy so output strides match byte-for-byte.
+    let m_bound = m.bind(py);
+    if m_bound.is_exact_instance(cached_ndarray_type(py)?) {
+        let ndim = m_bound.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+        if ndim > 2 {
+            let c_contiguous = m_bound
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "c_contiguous"))?
+                .extract::<bool>()?;
+            if !c_contiguous {
+                return fallback();
+            }
+        }
+    }
     let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
         Ok(array) => array,
         Err(_) => return fallback(),

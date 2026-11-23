@@ -6108,6 +6108,8 @@ for dt, real, snan in (("c8", np.float32, 0x7fa00000), ("c16", np.float64, 0x7ff
     specials = {"zero": 0j, "one": 1 + 0j, "minus one": -1 + 0j, "i": 1j, "minus i": -1j,
                 "subnormal real": complex(tiny, 0.5), "subnormal imag": complex(0.5, tiny)}
     for name in ops:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(base)
         native = array_calls(name, base) == []
         for label, value in {**specials, "signaling nan": None}.items():
             x = base.copy()
@@ -6188,6 +6190,8 @@ for dt, big, under, huge, large in (("c16", 710.0, 700.0, 1e308, 1e300),
     short = {"exp": complex(under, 0), "sin": complex(0, under), "cos": complex(0, -under),
              "sinh": complex(-under, 0), "cosh": complex(under, 0), "sign": complex(large, 0)}
     for name in past:
+        with np.errstate(all="ignore"):
+            getattr(fnp, name)(base)
         native = array_calls(name, base) == []
         cases = {"inf": (complex(np.inf, 0), True), "nan": (complex(0, np.nan), True),
                  "inf imag": (complex(0.5, -np.inf), True), "past threshold": (past[name], True),
