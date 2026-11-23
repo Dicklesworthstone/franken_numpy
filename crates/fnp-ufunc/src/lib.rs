@@ -92573,8 +92573,20 @@ print(json.dumps(rows))
         let a = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::Complex128).unwrap();
         let err = a
             .inv()
-            .expect_err("missing trailing complex axis should fail");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("[rows, cols, 2]")));
+            .expect_err("1-D logical complex array should fail square-matrix check");
+        assert!(matches!(
+            err,
+            UFuncError::Msg(message) if message.contains("the final two dimensions must form a square matrix")
+        ));
+        let bad_trailing =
+            UFuncArray::new(vec![2, 2, 3], vec![1.0; 12], DType::Complex128).unwrap();
+        let err = bad_trailing
+            .inv()
+            .expect_err("non-interleaved trailing complex axis should fail");
+        assert!(matches!(
+            err,
+            UFuncError::Msg(message) if message.contains("[..., 2]")
+        ));
     }
 
     #[test]
