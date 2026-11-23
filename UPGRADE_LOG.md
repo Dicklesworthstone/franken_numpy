@@ -1,9 +1,17 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-11-08 (latest pass); 2026-10-07; 2026-09-11
+**Date:** 2026-11-23 (v0.6.0 release pass); 2026-11-08; 2026-10-07; 2026-09-11
 **Project:** franken_numpy
 **Language:** Rust
 **Manifest:** Cargo.toml / Cargo.lock
+
+---
+
+## 2026-11-23 — v0.6.0 release dependency pass (`asupersync =0.7.0`, `ftui 0.11.0`, `anyhow 1.0.105`, 0 audit vulns)
+
+- Workspace floors updated to `asupersync = "=0.7.0"` (bringing `franken-kernel`, `franken-evidence`, `franken-decision` to `0.7.0`), `ftui = "0.11.0"` (optional `frankentui` feature on `fnp-runtime`), `serde_json = "1.0.154"`, `proptest = "1.12.0"`, and `anyhow = "1.0.105"` via `cargo update`.
+- Held `pyo3 = "0.29.3"` (tracked in #4: 1,187 deprecated `PyBuffer` slice calls block 0.30 migration; 0.29.3 already clears RUSTSEC-2026-0176/0177).
+- Verified `cargo audit` reports **0 vulnerabilities** across root `Cargo.lock` and all 8 fuzz lockfiles (`fuzz/Cargo.lock` and `crates/fnp-{dtype,io,iter,linalg,ndarray,random,ufunc}/fuzz/Cargo.lock`); only 1 allowed unmaintained warning (`RUSTSEC-2024-0449` on `unsafe-libyaml 0.2.11` via `serde_yaml_ng 0.10.0` in `fnp-conformance`).
 
 ---
 

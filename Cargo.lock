@@ -94,9 +94,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anyhow"
-version = "1.0.104"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
 
 [[package]]
 name = "arc-swap"
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-conformance"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "asupersync",
  "base64",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-dtype"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "half",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-io"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "crc32fast",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-iter"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "serde",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-linalg"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-ndarray"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "sha2 0.11.1",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-python"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "fnp-dtype",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-random"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
@@ -849,11 +849,11 @@ dependencies = [
 
 [[package]]
 name = "fnp-random-core"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "fnp-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "asupersync",
  "ftui",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-ufunc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "fnp-dtype",

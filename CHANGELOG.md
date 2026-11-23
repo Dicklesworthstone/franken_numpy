@@ -21,6 +21,7 @@ so that readers can quickly find what changed in the subsystem they care about.
 | Version | Date | Kind | Summary |
 |---|---|---|---|
 | `[Unreleased]` | | dev head on `main` | |
+| [`v0.6.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.6.0) | 2026-11-23 | GitHub Release + crates.io + PyPI | Typed complex/batched native norms, stacked determinants (`det_array`/`slogdet_array`), typed batched inverse/Cholesky, signed multi-rank partial selection (`partition_many`/`argpartition_many`), combined reduction controls, geometric parity + stagnation guard, non-contiguous 3-D `triu`/`tril` stride parity, explicit `opt-level = 3` release profile, `asupersync =0.7.0` + `ftui 0.11.0`, and full `#8` release qualification fixes. |
 | [`v0.5.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.5.0) | 2026-10-14 | GitHub Release + crates.io | Native `numpy.polynomial` evaluators and fits, non-square and boolean products back on their native routes, early-exit NaN/True scans as NumPy's loops, correctness and hardened-mode fixes; first release gated without GitHub Actions (`scripts/run_release_gates.sh` receipt). |
 | [`v0.4.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.4.0) | 2026-10-07 | GitHub Release + crates.io | NumPy drop-in fidelity: floating-point warning/event parity (overflow, underflow, invalid, signaling NaN) across reductions, scans, linalg and libm routes; ufunc objects with numpy's protocol, NEP 18 `__array_function__`, numpy's signatures and keyword binding; random-state fidelity (pickling, `_seed_seq`, `advance()`); strict vs hardened runtime modes; numpy's own test modules run against fnp via a drop-in harness; ~300 measured `perf` commits; PyO3 0.29.3 (clears RUSTSEC-2026-0176/0177). |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.3.0) | 2026-09-11 | GitHub Release | Comprehensive Python-dispatch overhead reduction & NumPy C-API call caching (reusing cached modules/callables, positional empty/zeros, preshaped allocation avoiding reshape, zero-copy roll/take/put/choose/bincount/digitize/trapezoid/cumulative), planning doc reorg under `docs/planning/`, and 79 dependency updates. |
@@ -32,6 +33,18 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.6.0] — Typed batched linalg, complex norms, multi-rank selection, and NumPy 2.4.3 parity release (2026-10-14 → 2026-11-23)
+
+### Highlights
+
+- **Typed native linear algebra & norms**: logical complex and batched native norms (`norm`, `vector_norm`, `vector_norm_axes`, `matrix_norm`), typed stacked determinants (`det_array`, `slogdet_array`) with scaled pivot products, typed batched inverse and Cholesky factorizations, and broadcast batched solves with LU permutation validation.
+- **Signed multi-rank partial selection & combined reductions**: `partition_many` and `argpartition_many` supporting negative, repeated, and unordered ranks; `ReductionOptions` combining tuple axes, accumulator dtype, Boolean `where` masks, `keepdims`, and typed scalar initials; optimized complex `einsum` scaling.
+- **Random & Python-extension parity**: legacy small-probability geometric inversion parity and shared stagnation guard (`#1`, `#6`); non-C-contiguous >=3-D `triu`/`tril` stride parity; `complex_solve_nxn_multi` finite-coefficient enforcement on empty RHS; explicit `#[pymodule(gil_used = true)]`; runtime complex libm byte-equality probes.
+- **Release profile & dependency floors**: explicit `[profile.release] opt-level = 3`, `asupersync =0.7.0`, `ftui 0.11.0`, `serde_json 1.0.154`, `proptest 1.12.0`, `anyhow 1.0.105`, and 0 `cargo audit` vulnerabilities across root and all 8 fuzz lockfiles.
+- **Distribution**: 11/11 workspace crates published to crates.io (including `fnp-conformance`) and first-ever `frankennumpy` Python wheels + sdist published to PyPI and attached to the signed GitHub Release.
 
 ### Release qualification regressions ([#8](https://github.com/Dicklesworthstone/franken_numpy/issues/8))
 
