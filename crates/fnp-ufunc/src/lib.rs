@@ -18387,203 +18387,297 @@ impl UFuncArray {
 
     // ── linalg bridge methods ─────────────────────────────────────
 
-    /// Compute vector or matrix norm (np.linalg.norm).
-    /// For 1-D arrays, computes vector norm. For 2-D arrays, computes matrix norm.
-    /// `ord` follows NumPy convention: "1", "2", "inf", "-inf", "fro", "nuc", "-1", "-2",
-    /// "0" (vector only), or any float string for arbitrary p-norms.
+    /// Compute a scalar vector or matrix norm (`np.linalg.norm`).
+    ///
+    /// The default flattens any logical shape, including scalars and complex
+    /// arrays. Explicit orders select a vector norm for one dimension or a
+    /// matrix norm for two dimensions. Use [`Self::vector_norm`] or
+    /// [`Self::matrix_norm`] for array-valued, axis-aware results.
     pub fn norm(&self, ord: Option<&str>) -> Result<f64, UFuncError> {
-        let ndim = self.shape.len();
-        if ndim <= 1 {
-            let vord = match ord {
-                None => None,
-                Some(s) => Some(
-                    fnp_linalg::VectorNormOrder::from_token(s)
-                        .map_err(|e| UFuncError::Msg(format!("{e}")))?,
-                ),
-            };
-            fnp_linalg::vector_norm(&self.values, vord).map_err(|e| UFuncError::Msg(format!("{e}")))
-        } else if ndim == 2 {
-            let ord_str = ord.unwrap_or("fro");
-            fnp_linalg::matrix_norm_nxn(&self.values, self.shape[0], self.shape[1], ord_str)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))
-        } else {
-            Err(UFuncError::Msg(
-                "norm: only 1-D and 2-D arrays are supported".into(),
-            ))
+        let shape = self.complex_logical_shape("norm")?;
+        if self.dtype == DType::F16
+            && (ord.is_none()
+                || (shape.len() == 1
+                    && ord.and_then(|value| value.parse::<f64>().ok()) == Some(2.0))
+                || (shape.len() == 2 && matches!(ord, Some("f" | "fro"))))
+        {
+            // The scalar norm's fast path uses dot: half products accumulate
+            // in float32 and only the final dot is narrowed. vector_norm uses
+            // elementwise half squares instead, which can underflow separately.
+            let source = self.cast_numeric_storage(DType::F16, false)?;
+            let squared = source.values.iter().fold(0.0f32, |sum, &value| {
+                let value = value as f32;
+                sum + value * value
+            });
+            return Ok(f16::from_f32(f16::from_f32(squared).to_f32().sqrt()).to_f64());
         }
+        let result = if let Some(ord) = ord {
+            match shape.len() {
+                1 => {
+                    let order = ord.parse::<f64>().map_err(|_| {
+                        UFuncError::Msg(format!("norm: invalid vector norm order '{ord}'"))
+                    })?;
+                    self.vector_norm(Some(order), None, false)?
+                }
+                2 => self.matrix_norm(Some(ord), false)?,
+                _ => {
+                    return Err(UFuncError::Msg(
+                        "norm: an explicit order requires one or two logical dimensions".into(),
+                    ));
+                }
+            }
+        } else {
+            self.vector_norm(None, None, false)?
+        };
+        Ok(result.values[0])
     }
 
-    /// Compute the vector norm of an array (np.linalg.vector_norm, NumPy 2.0+).
+    /// Vector norms over one axis or the flattened logical array.
     ///
-    /// This is the NumPy 2.0 API for vector norms, providing a cleaner interface
-    /// than the old `norm` function. Works on arrays of any dimension.
-    ///
-    /// - `ord`: Norm order. Default is 2 (Euclidean norm).
-    ///   - `None` or 2: L2 (Euclidean) norm
-    ///   - 1: L1 (sum of absolute values)
-    ///   - inf: max(|x|)
-    ///   - -inf: min(|x|)
-    ///   - 0: count of non-zero elements
-    ///   - Other: p-norm
-    /// - `axis`: Axis or axes along which to compute the norm. Default is all axes (flatten).
-    /// - `keepdims`: If true, reduced axes are left with size 1.
+    /// Complex magnitudes combine both components before reduction. Floating
+    /// inputs retain their real component dtype; integers and Booleans use
+    /// float64. Orders 0, 1, 2, +/-infinity and arbitrary real powers follow
+    /// NumPy's arithmetic, including its overflow and NaN propagation.
     pub fn vector_norm(
         &self,
         ord: Option<f64>,
         axis: Option<isize>,
         keepdims: bool,
     ) -> Result<Self, UFuncError> {
-        let ord_val = ord.unwrap_or(2.0);
+        let shape = self.complex_logical_shape("vector_norm")?;
+        let axes = match axis {
+            Some(axis) => vec![normalize_axis(axis, shape.len())? as isize],
+            None => (0..shape.len()).map(|axis| axis as isize).collect(),
+        };
+        self.vector_norm_axes_impl(ord.unwrap_or(2.0), &axes, keepdims, false)
+    }
 
-        match axis {
-            None => {
-                // Flatten and compute norm over all elements
-                let norm_val = compute_vector_norm(&self.values, ord_val)?;
-                let out_shape = if keepdims {
-                    vec![1; self.shape.len()]
-                } else {
-                    vec![]
+    /// Vector norms over a tuple of logical axes (`np.linalg.vector_norm`).
+    ///
+    /// Selected axes form a single vector in their supplied order, while the
+    /// unselected axes identify independent vectors. Negative axes are accepted;
+    /// repeated axes are rejected. An empty tuple computes one norm per element.
+    pub fn vector_norm_axes(
+        &self,
+        ord: Option<f64>,
+        axes: &[isize],
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        self.vector_norm_axes_impl(ord.unwrap_or(2.0), axes, keepdims, true)
+    }
+
+    fn vector_norm_axes_impl(
+        &self,
+        order: f64,
+        axes: &[isize],
+        keepdims: bool,
+        tuple_axes: bool,
+    ) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("vector_norm")?;
+        let plan = AxesReductionPlan::new(&shape, axes, keepdims)?;
+        let mut terms = self.norm_real_terms(order)?;
+        let mut reduction_axes = axes.to_vec();
+        if tuple_axes && axes.len() > 1 && !terms.values.is_empty() {
+            // NumPy moves the requested axes to the front, in tuple order,
+            // before combining them into one vector axis. Reusing the ordinary
+            // tuple reducer would silently ignore that ordering for (2, 0).
+            let mut permutation: Vec<usize> = axes
+                .iter()
+                .map(|&axis| normalize_axis(axis, shape.len()))
+                .collect::<Result<_, _>>()?;
+            let retained: Vec<usize> = (0..shape.len())
+                .filter(|axis| !permutation.contains(axis))
+                .collect();
+            permutation.extend(&retained);
+            terms = terms.transpose(Some(&permutation))?;
+            terms.shape = std::iter::once(plan.reduction_count)
+                .chain(retained.iter().map(|&axis| shape[axis]))
+                .collect();
+            reduction_axes = vec![0];
+        }
+        let mut result = if order.is_infinite() {
+            terms.norm_extrema_axes(&reduction_axes, order.is_sign_positive())?
+        } else {
+            let mut reduced =
+                terms.reduce_sum_axes_with_dtype(&reduction_axes, false, terms.dtype)?;
+            if order == 2.0 {
+                reduced = reduced.sqrt_statistical_reduction()?;
+            } else if order != 0.0 && order != 1.0 {
+                let reciprocal = match reduced.dtype {
+                    DType::F16 => f16::from_f32(1.0 / f16::from_f64(order).to_f32()).to_f64(),
+                    DType::F32 => f64::from(1.0f32 / order as f32),
+                    _ => 1.0 / order,
                 };
-                Ok(Self {
-                    shape: out_shape,
-                    values: vec![norm_val],
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                })
+                for value in &mut reduced.values {
+                    *value = Self::norm_real_power(*value, reciprocal, reduced.dtype);
+                }
             }
-            Some(ax) => {
-                let ndim = self.shape.len();
-                let norm_axis = normalize_axis(ax, ndim)?;
+            reduced
+        };
+        result.shape = plan.output_shape;
+        Ok(result)
+    }
 
-                // Compute norm along the specified axis
-                let axis_len = self.shape[norm_axis];
-                let strides = c_strides_elems(&self.shape);
-
-                // Calculate output shape
-                let mut out_shape: Vec<usize> = self.shape.clone();
-                if keepdims {
-                    out_shape[norm_axis] = 1;
+    /// Real norm terms in the declared source precision. This is shared by
+    /// vector norms and nonspectral matrix norms, so neither treats the complex
+    /// component axis as a data axis or discards exact integer source storage.
+    fn norm_real_terms(&self, order: f64) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape("norm")?;
+        let dtype = match self.dtype {
+            DType::Bool
+            | DType::I8
+            | DType::I16
+            | DType::I32
+            | DType::I64
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64 => DType::F64,
+            DType::F16 | DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128 => {
+                self.dtype
+            }
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "norm: unsupported input dtype {:?}",
+                    self.dtype
+                )));
+            }
+        };
+        let source = self.cast_numeric_storage(dtype, false)?;
+        let real_dtype = match dtype {
+            DType::Complex64 => DType::F32,
+            DType::Complex128 => DType::F64,
+            _ => dtype,
+        };
+        let term = |real: f64, imaginary: f64| {
+            if order == 0.0 {
+                if real != 0.0 || imaginary != 0.0 {
+                    1.0
                 } else {
-                    out_shape.remove(norm_axis);
+                    0.0
                 }
-
-                let out_size = out_shape.iter().product::<usize>().max(1);
-                let mut out_values = Vec::with_capacity(out_size);
-
-                // Iterate over all positions except the norm axis
-                let outer_count: usize = self.shape[..norm_axis].iter().product();
-                let inner_count: usize = self.shape[norm_axis + 1..].iter().product();
-
-                for outer in 0..outer_count {
-                    for inner in 0..inner_count {
-                        let mut slice = Vec::with_capacity(axis_len);
-                        for k in 0..axis_len {
-                            // Correct index formula for C-order:
-                            // outer selects position in axes before norm_axis
-                            // k iterates along norm_axis
-                            // inner selects position in axes after norm_axis
-                            let outer_base = if norm_axis > 0 {
-                                outer * strides[norm_axis - 1]
-                            } else {
-                                0
-                            };
-                            let idx = outer_base + k * strides[norm_axis] + inner;
-                            if idx < self.values.len() {
-                                slice.push(self.values[idx]);
-                            }
-                        }
-                        out_values.push(compute_vector_norm(&slice, ord_val)?);
+            } else if order == 2.0 {
+                match real_dtype {
+                    DType::F16 => f16::from_f32((real as f32) * (real as f32)).to_f64(),
+                    DType::F32 => {
+                        let real = real as f32;
+                        let imaginary = imaginary as f32;
+                        f64::from(real * real + imaginary * imaginary)
                     }
+                    _ => real * real + imaginary * imaginary,
                 }
-
-                // Handle edge case where computation didn't work correctly
-                if out_values.len() != out_size {
-                    // Fallback: use simpler iteration
-                    out_values.clear();
-                    let flat_idx_to_coords = |flat: usize| -> Vec<usize> {
-                        let mut coords = Vec::with_capacity(ndim);
-                        let mut rem = flat;
-                        for &s in strides.iter() {
-                            coords.push(rem / s);
-                            rem %= s;
-                        }
-                        coords
-                    };
-
-                    let total = self.values.len();
-                    let mut processed = std::collections::HashSet::new();
-
-                    for flat in 0..total {
-                        let coords = flat_idx_to_coords(flat);
-                        let mut out_coords = coords.clone();
-                        out_coords[norm_axis] = 0;
-
-                        if processed.contains(&out_coords) {
-                            continue;
-                        }
-                        processed.insert(out_coords.clone());
-
-                        let mut slice = Vec::with_capacity(axis_len);
-                        for k in 0..axis_len {
-                            let mut idx_coords = coords.clone();
-                            idx_coords[norm_axis] = k;
-                            let idx: usize = idx_coords
-                                .iter()
-                                .zip(strides.iter())
-                                .map(|(&c, &s)| c * s)
-                                .sum();
-                            if idx < self.values.len() {
-                                slice.push(self.values[idx]);
-                            }
-                        }
-                        out_values.push(compute_vector_norm(&slice, ord_val)?);
+            } else {
+                let magnitude = if dtype.is_complex() {
+                    if real_dtype == DType::F32 {
+                        f64::from((real as f32).hypot(imaginary as f32))
+                    } else {
+                        real.hypot(imaginary)
                     }
+                } else {
+                    real.abs()
+                };
+                if order == 1.0 || order.is_infinite() {
+                    magnitude
+                } else {
+                    Self::norm_real_power(magnitude, order, real_dtype)
                 }
-
-                Ok(Self {
-                    shape: out_shape,
-                    values: out_values,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                })
             }
+        };
+        let values = if dtype.is_complex() {
+            try_collect_f64(
+                source
+                    .values
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[re, im]| term(re, im)),
+                "norm",
+            )?
+        } else {
+            let mut values = source.values;
+            for value in &mut values {
+                *value = term(*value, 0.0);
+            }
+            values
+        };
+        Self::new(shape, values, real_dtype)
+    }
+
+    fn norm_real_power(value: f64, power: f64, dtype: DType) -> f64 {
+        match dtype {
+            DType::F16 => {
+                f16::from_f32((value as f32).powf(f16::from_f64(power).to_f32())).to_f64()
+            }
+            DType::F32 => f64::from((value as f32).powf(power as f32)),
+            _ => value.powf(power),
         }
     }
 
-    /// Compute the matrix norm of a 2-D array (np.linalg.matrix_norm, NumPy 2.0+).
+    fn norm_extrema_axes(&self, axes: &[isize], maximum: bool) -> Result<Self, UFuncError> {
+        // NumPy's maximum norm has an initial value of zero. Its minimum norm
+        // has no identity and still rejects a zero-length reduction axis.
+        let reduced = normalize_reduction_axes(axes, self.shape.len())?;
+        if maximum && reduced.iter().any(|&axis| self.shape[axis] == 0) {
+            let plan = AxesReductionPlan::new(&self.shape, axes, false)?;
+            return Self::new(
+                plan.output_shape,
+                try_zeroed_f64(plan.output_count, "norm")?,
+                self.dtype,
+            );
+        }
+        if maximum {
+            self.reduce_max_axes(axes, false)
+        } else {
+            self.reduce_min_axes(axes, false)
+        }
+    }
+
+    /// Matrix norms over the final two logical axes (`np.linalg.matrix_norm`).
     ///
-    /// This is the NumPy 2.0 API for matrix norms. The input must be 2-D.
-    ///
-    /// - `ord`: Norm order. Default is "fro" (Frobenius norm).
-    ///   - "fro" or None: Frobenius norm (sqrt of sum of squares)
-    ///   - "nuc": nuclear norm (sum of singular values)
-    ///   - 1: max column sum
-    ///   - -1: min column sum
-    ///   - 2: spectral norm (largest singular value)
-    ///   - -2: smallest singular value
-    ///   - inf: max row sum
-    ///   - -inf: min row sum
-    /// - `keepdims`: If true, output has shape (1, 1) instead of scalar.
+    /// Leading dimensions are independent matrices. Frobenius, row/column-sum,
+    /// spectral and nuclear norms support real and complex inputs; results use
+    /// the corresponding real dtype. Spectral orders share the native stacked
+    /// SVD implementation, including its float16 rejection and shape checks.
     pub fn matrix_norm(&self, ord: Option<&str>, keepdims: bool) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 {
+        let shape = self.complex_logical_shape("matrix_norm")?;
+        if shape.len() < 2 {
             return Err(UFuncError::Msg(
-                "matrix_norm: input must be a 2-D array".into(),
+                "matrix_norm: input must have at least two logical dimensions".into(),
             ));
         }
-
-        let ord_str = ord.unwrap_or("fro");
-        let norm_val =
-            fnp_linalg::matrix_norm_nxn(&self.values, self.shape[0], self.shape[1], ord_str)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-
-        let out_shape = if keepdims { vec![1, 1] } else { vec![] };
-
-        Ok(Self {
-            shape: out_shape,
-            values: vec![norm_val],
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        // Check the actual output before any input-sized intermediate. Empty
+        // input dimensions can otherwise hide an unrepresentable batch shape.
+        let plan = AxesReductionPlan::new(&shape, &[-2, -1], keepdims)?;
+        let order = ord.unwrap_or("fro");
+        let mut result = match order {
+            "fro" | "f" => {
+                let terms = self.norm_real_terms(2.0)?;
+                terms
+                    .reduce_sum_axes_with_dtype(&[-2, -1], false, terms.dtype)?
+                    .sqrt_statistical_reduction()?
+            }
+            "1" | "-1" | "inf" | "+inf" | "-inf" => {
+                let terms = self.norm_real_terms(1.0)?;
+                let axis = if matches!(order, "1" | "-1") { -2 } else { -1 };
+                let sums = terms.reduce_sum_with_dtype(Some(axis), false, terms.dtype)?;
+                sums.norm_extrema_axes(&[-1], !order.starts_with('-'))?
+            }
+            "2" | "-2" | "nuc" => {
+                let spectrum = self.svdvals()?;
+                if order == "nuc" {
+                    spectrum.reduce_sum_with_dtype(Some(-1), false, spectrum.dtype)?
+                } else {
+                    spectrum.norm_extrema_axes(&[-1], order == "2")?
+                }
+            }
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "matrix_norm: invalid order '{order}'"
+                )));
+            }
+        };
+        result.shape = plan.output_shape;
+        Ok(result)
     }
 
     /// Least-squares solution (`np.linalg.lstsq`).
@@ -42555,38 +42649,6 @@ fn resolve_multi_index_value(
                 UFuncError::Msg("ravel_multi_index: clipped index exceeds usize".to_string())
             })
         }
-    }
-}
-
-/// Compute vector norm with the given order.
-/// Handles: 0, 1, 2, inf, -inf, and arbitrary p-norms.
-fn compute_vector_norm(values: &[f64], ord: f64) -> Result<f64, UFuncError> {
-    if values.is_empty() {
-        return Ok(0.0);
-    }
-
-    if ord == 0.0 {
-        // Count of non-zero elements
-        Ok(values.iter().filter(|&&v| v != 0.0).count() as f64)
-    } else if ord == 1.0 {
-        // L1 norm: sum of absolute values
-        Ok(values.iter().map(|v| v.abs()).sum())
-    } else if ord == 2.0 {
-        // L2 norm: Euclidean norm
-        Ok(values.iter().map(|v| v * v).sum::<f64>().sqrt())
-    } else if ord == f64::INFINITY {
-        // Max absolute value
-        Ok(values
-            .iter()
-            .map(|v| v.abs())
-            .fold(f64::NEG_INFINITY, f64::max))
-    } else if ord == f64::NEG_INFINITY {
-        // Min absolute value
-        Ok(values.iter().map(|v| v.abs()).fold(f64::INFINITY, f64::min))
-    } else {
-        // General p-norm: (sum |x_i|^p)^(1/p)
-        let sum: f64 = values.iter().map(|v| v.abs().powf(ord)).sum();
-        Ok(sum.powf(1.0 / ord))
     }
 }
 
