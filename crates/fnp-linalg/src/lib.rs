@@ -17855,7 +17855,7 @@ print(",".join(repr(float(x)) for x in s))
     fn determinant_retains_finite_products_across_extreme_partial_products() {
         let mut stack = Vec::new();
         for diagonal in [
-            [1e200, 1e200, 1e-200, 1e-200],
+            [1e200_f64, 1e200, 1e-200, 1e-200],
             [1e-200, 1e-200, 1e200, 1e200],
             [-1e200, 1e200, 1e-200, 1e-200],
             [-1e-200, 1e-200, 1e200, 1e200],

@@ -110,6 +110,21 @@ impl OracleBatch {
         }
     }
 
+    fn partition_many(&mut self, array: &UFuncArray, kth: &[isize], axis: Option<isize>) {
+        for operation in ["partition", "argpartition"] {
+            let actual = if operation == "partition" {
+                array.partition_many(kth, axis)
+            } else {
+                array.argpartition_many(kth, axis)
+            };
+            self.cases.push(json!({
+                "op": operation, "array": input_spec(array), "axis": axis, "kth": kth,
+                "actual": actual.as_ref().ok().map(input_spec),
+            }));
+            self.actual.push(actual);
+        }
+    }
+
     fn check(self) {
         const SCRIPT: &str = r#"
 import json, sys, warnings
@@ -141,6 +156,10 @@ def checked_partition(case, source, reference):
         source = source.ravel()
         axis = -1
     length = source.shape[axis]
+    positions = case['kth'] if isinstance(case['kth'], list) else [case['kth']]
+    positions = [position + length if position < 0 else position for position in positions]
+    if not positions:
+        assert actual.tobytes() == reference.tobytes(), 'empty kth must preserve order'
     if case['op'] == 'argpartition':
         expected_indices = np.broadcast_to(np.arange(length),
                                            np.moveaxis(actual, axis, -1).shape)
@@ -151,20 +170,21 @@ def checked_partition(case, source, reference):
     else:
         candidate = actual
     lanes = lambda value: np.moveaxis(value, axis, -1).reshape(-1, length)
-    def pair_bits(row):
-        parts = np.column_stack((row.real, row.imag)).astype(np.float64)
-        return sorted(tuple(int(part) for part in pair)
-                      for pair in parts.view(np.uint64))
-    kth = case['kth']
+    def element_bits(row):
+        # Preserve whole complex pairs, NaN payloads, signed zero and exact
+        # wide integers. Converting integer values through float64 would hide
+        # lost low bits in the permutation check.
+        return sorted(row[index:index + 1].tobytes() for index in range(row.size))
     for original, selected, expected in zip(lanes(source), lanes(candidate), lanes(reference)):
-        assert pair_bits(selected) == pair_bits(original), 'complete-pair permutation'
+        assert element_bits(selected) == element_bits(original), 'logical-element permutation'
         ordered = np.sort(original)
         lower = np.searchsorted(ordered, selected, side='left')
         upper = np.searchsorted(ordered, selected, side='right')
-        assert lower[kth] <= kth < upper[kth], 'selected order statistic'
-        assert lower[kth] == np.searchsorted(ordered, expected[kth]), 'NumPy kth rank'
-        assert np.all(lower[:kth] <= lower[kth]), 'lower partition'
-        assert np.all(lower[kth + 1:] >= lower[kth]), 'upper partition'
+        for kth in positions:
+            assert lower[kth] <= kth < upper[kth], 'selected order statistic'
+            assert lower[kth] == np.searchsorted(ordered, expected[kth]), 'NumPy kth rank'
+            assert np.all(lower[:kth] <= lower[kth]), 'lower partition'
+            assert np.all(lower[kth + 1:] >= lower[kth]), 'upper partition'
     return actual
 
 outputs = []
@@ -182,7 +202,10 @@ with warnings.catch_warnings():
                     options['sorter'] = np.array(case['sorter'], dtype=np.uint64).astype(np.intp)
                 result = np.asarray(np.searchsorted(source, array(case['needles']), **options))
             elif case['op'] in ('partition', 'argpartition'):
-                reference = np.asarray(getattr(np, case['op'])(source, case['kth'], axis=case['axis']))
+                kth = case['kth']
+                if isinstance(kth, list):
+                    kth = np.asarray(kth, dtype=np.intp)
+                reference = np.asarray(getattr(np, case['op'])(source, kth, axis=case['axis']))
                 result = checked_partition(case, source, reference)
             else:
                 options = {'axis': case['axis']}
@@ -733,4 +756,259 @@ fn complex_partition_preserves_nan_payloads_and_validates_empty_and_malformed_la
     }
     assert!(empty.partition(0, Some(3)).is_err());
     assert!(empty.argpartition(0, Some(-4)).is_err());
+}
+
+#[test]
+fn partition_many_signed_positions_and_numeric_dtypes_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        for shape in [
+            vec![],
+            vec![1],
+            vec![7],
+            vec![2, 3, 4],
+            vec![2, 0, 3],
+            vec![0, 3],
+        ] {
+            let count: usize = shape.iter().product();
+            let array = if dtype.is_complex() {
+                let pairs: Vec<_> = (0..count)
+                    .map(|i| (((i * 7) % 13) as f64 - 4.0, 5.0 - i as f64))
+                    .collect();
+                complex_array(&shape, &pairs, dtype)
+            } else {
+                let values = (0..count).map(|i| ((i * 7) % 13) as f64).collect();
+                UFuncArray::new(shape.clone(), values, dtype).unwrap()
+            };
+            for axis in [
+                None,
+                Some(0),
+                Some(-1),
+                Some(1),
+                Some(-2),
+                Some(3),
+                Some(-4),
+            ] {
+                for kth in [
+                    vec![],
+                    vec![0],
+                    vec![-1],
+                    vec![0, -1],
+                    vec![2, 0, -1, 2],
+                    vec![1, -2, 0, 1],
+                    vec![isize::MIN],
+                    vec![isize::MAX],
+                ] {
+                    batch.partition_many(&array, &kth, axis);
+                }
+            }
+        }
+    }
+    batch.check();
+}
+
+#[test]
+fn partition_many_nan_order_ties_and_source_precision_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        let array = UFuncArray::new(
+            vec![2, 7],
+            vec![
+                f64::from_bits(0xfff8_0000_0000_0123),
+                1.0 + 2.0_f64.powi(-24),
+                1.0,
+                -0.0,
+                1e-50,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                1.0 + 2.0_f64.powi(-11),
+                1.0,
+                0.0,
+                -1e-50,
+                -3.0,
+                4.0,
+            ],
+            dtype,
+        )
+        .unwrap();
+        for axis in [None, Some(0), Some(1), Some(-1)] {
+            for kth in [&[][..], &[0, -1], &[-2, 0, -1, 0]] {
+                batch.partition_many(&array, kth, axis);
+            }
+            // The original scalar APIs share the typed/NaN-correct path.
+            batch.partition(&array, 0, axis);
+            batch.partition(&array, 1, axis);
+        }
+    }
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let pairs: Vec<_> = (0..195)
+            .map(|index| {
+                let re = if index % 17 == 0 {
+                    f64::NAN
+                } else {
+                    ((index * 73) % 97) as f64 - 48.0 + 2.0_f64.powi(-25)
+                };
+                let im = if index % 19 == 0 {
+                    f64::NAN
+                } else {
+                    ((index * 29) % 31) as f64 - 15.0
+                };
+                (re, im)
+            })
+            .collect();
+        let array = complex_array(&[3, 65], &pairs, dtype);
+        for axis in [None, Some(0), Some(1), Some(-1)] {
+            for kth in [&[][..], &[0, -1], &[2, -2, 0, -1, 2]] {
+                batch.partition_many(&array, kth, axis);
+            }
+        }
+    }
+    batch.check();
+}
+
+#[test]
+fn partition_many_preserves_exact_wide_integer_storage() {
+    let signed = [
+        i64::MAX,
+        -(1_i64 << 53) - 1,
+        (1_i64 << 53) + 1,
+        i64::MIN,
+        (1_i64 << 53) + 3,
+        -(1_i64 << 53) - 3,
+        -1,
+        0,
+    ];
+    let unsigned = [
+        u64::MAX,
+        (1_u64 << 53) + 1,
+        (1_u64 << 63) + 1,
+        0,
+        (1_u64 << 53) + 3,
+        u64::MAX - 1,
+        1,
+        (1_u64 << 63) - 1,
+    ];
+    let mut batch = OracleBatch::default();
+    for storage in [
+        ArrayStorage::I64(signed.to_vec()),
+        ArrayStorage::U64(unsigned.to_vec()),
+    ] {
+        let array = UFuncArray::from_storage(vec![2, 4], storage.clone()).unwrap();
+        for axis in [None, Some(0), Some(1), Some(-1)] {
+            for kth in [&[][..], &[0, -1], &[0, -2, -1, 0]] {
+                batch.partition_many(&array, kth, axis);
+                let output = array.partition_many(kth, axis).unwrap();
+                assert!(output.has_integer_sidecar());
+                let indices = array.argpartition_many(kth, axis).unwrap();
+                let gathered = match axis {
+                    Some(axis) => array.take_along_axis(&indices, axis).unwrap(),
+                    None => array.flatten().take_along_axis(&indices, 0).unwrap(),
+                };
+                for selected in [&output, &gathered] {
+                    match selected.to_storage().unwrap() {
+                        ArrayStorage::I64(mut actual) => {
+                            let mut expected = signed.to_vec();
+                            actual.sort_unstable();
+                            expected.sort_unstable();
+                            assert_eq!(actual, expected);
+                        }
+                        ArrayStorage::U64(mut actual) => {
+                            let mut expected = unsigned.to_vec();
+                            actual.sort_unstable();
+                            expected.sort_unstable();
+                            assert_eq!(actual, expected);
+                        }
+                        other => panic!("wide integer selection changed dtype: {other:?}"),
+                    }
+                }
+            }
+        }
+        assert_eq!(array.to_storage().unwrap(), storage);
+    }
+    batch.check();
+}
+
+#[test]
+fn partition_many_validates_layouts_and_preserves_empty_copy_semantics() {
+    let array = UFuncArray::new(
+        vec![2, 3],
+        vec![1.0 + 2.0_f64.powi(-25), -0.0, 3.0, 4.0, 5.0, 6.0],
+        DType::F32,
+    )
+    .unwrap();
+    let copy = array.partition_many(&[], None).unwrap();
+    assert_eq!(copy.shape(), &[6]);
+    assert_eq!(copy.dtype(), DType::F32);
+    assert_eq!(copy.values()[0], 1.0);
+    assert_eq!(copy.values()[1].to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(
+        array.argpartition_many(&[], Some(0)).unwrap().values(),
+        &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        array.argpartition_many(&[], Some(1)).unwrap().values(),
+        &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+    );
+    for dtype in [DType::F64, DType::Complex128] {
+        let mut shape = vec![usize::MAX, 0, usize::MAX];
+        if dtype.is_complex() {
+            shape.push(2);
+        }
+        let empty = UFuncArray::new(shape, vec![], dtype).unwrap();
+        for axis in [None, Some(0), Some(1), Some(2), Some(-1)] {
+            for kth in [&[][..], &[isize::MIN, isize::MAX], &[-1, 0, -1]] {
+                let values = empty.partition_many(kth, axis).unwrap();
+                let indices = empty.argpartition_many(kth, axis).unwrap();
+                assert!(values.values().is_empty());
+                assert!(indices.values().is_empty());
+                assert_eq!(values.dtype(), dtype);
+                assert_eq!(indices.dtype(), DType::I64);
+                let expected_indices: &[usize] = if axis.is_none() {
+                    &[0]
+                } else {
+                    &[usize::MAX, 0, usize::MAX]
+                };
+                assert_eq!(indices.shape(), expected_indices);
+                if axis.is_none() {
+                    assert_eq!(
+                        values.shape(),
+                        if dtype.is_complex() {
+                            &[0, 2][..]
+                        } else {
+                            &[0][..]
+                        }
+                    );
+                } else {
+                    assert_eq!(values.shape(), empty.shape());
+                }
+            }
+        }
+        assert!(empty.partition_many(&[], Some(3)).is_err());
+        assert!(empty.argpartition_many(&[], Some(-4)).is_err());
+    }
+    for (shape, values) in [
+        (vec![], vec![1.0]),
+        (vec![3], vec![1.0, 2.0, 3.0]),
+        (vec![2, 1], vec![1.0, 2.0]),
+    ] {
+        let malformed = UFuncArray::new(shape, values, DType::Complex128).unwrap();
+        assert!(malformed.partition_many(&[], None).is_err());
+        assert!(malformed.argpartition_many(&[], None).is_err());
+    }
 }

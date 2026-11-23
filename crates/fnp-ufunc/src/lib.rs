@@ -14780,11 +14780,176 @@ impl UFuncArray {
         })
     }
 
-    /// Select a logical complex order statistic without separating components
+    /// Partition at one nonnegative order statistic along a logical axis.
+    /// Use [`Self::partition_many`] for negative positions or several ranks.
+    pub fn partition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.partition_elements(std::iter::once(kth as i128), axis, false)
+    }
+
+    /// Partition at several order statistics, accepting NumPy-style negative
+    /// positions relative to the selected axis. Duplicate and unsorted positions
+    /// are allowed. `axis=None` flattens logical elements; an empty `kth` slice
+    /// returns a typed copy without rearranging elements.
+    ///
+    /// Each requested position contains a value with its final sorted rank,
+    /// with no larger values before it and no smaller values after it. The
+    /// remaining order and the order of ties are unspecified.
+    pub fn partition_many(&self, kth: &[isize], axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.partition_elements(kth.iter().map(|&position| position as i128), axis, false)
+    }
+
+    /// Return indices that partition at one nonnegative order statistic.
+    /// Indices are relative to the selected logical axis, or the flattened
+    /// logical array when `axis=None`.
+    pub fn argpartition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.partition_elements(std::iter::once(kth as i128), axis, true)
+    }
+
+    /// Return indices that partition at several signed order statistics.
+    /// Positions follow [`Self::partition_many`]; an empty `kth` slice returns
+    /// the identity index permutation along the selected logical axis.
+    pub fn argpartition_many(
+        &self,
+        kth: &[isize],
+        axis: Option<isize>,
+    ) -> Result<Self, UFuncError> {
+        self.partition_elements(kth.iter().map(|&position| position as i128), axis, true)
+    }
+
+    fn partition_elements(
+        &self,
+        kth: impl ExactSizeIterator<Item = i128>,
+        axis: Option<isize>,
+        return_indices: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if return_indices {
+            "argpartition"
+        } else {
+            "partition"
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        let count = self.values.len() / if self.dtype.is_complex() { 2 } else { 1 };
+        let (mut output_shape, axis_len, selected_axis) = match axis {
+            None => (vec![count], count, None),
+            Some(0 | -1) if return_indices && shape.is_empty() => (vec![1], 1, None),
+            Some(axis) => {
+                let axis = normalize_axis(axis, shape.len())?;
+                (shape.clone(), shape[axis], Some(axis))
+            }
+        };
+        // NumPy still checks the axis on empty inputs but skips kth bounds
+        // when there is no visited lane. Do not calculate unvisited strides:
+        // a zero-size array can carry otherwise overflowing dimensions.
+        if count == 0 {
+            let dtype = if return_indices {
+                DType::I64
+            } else {
+                if self.dtype.is_complex() {
+                    output_shape.push(2);
+                }
+                self.dtype
+            };
+            return Self::new(output_shape, Vec::new(), dtype);
+        }
+        let mut positions = Vec::new();
+        positions.try_reserve_exact(kth.len()).map_err(|_| {
+            UFuncError::Msg(format!(
+                "{operation}: unable to allocate requested positions"
+            ))
+        })?;
+        for position in kth {
+            let normalized = if position < 0 {
+                position + axis_len as i128
+            } else {
+                position
+            };
+            if normalized < 0 || normalized >= axis_len as i128 {
+                return Err(UFuncError::Msg(format!("{operation}: kth out of bounds")));
+            }
+            positions.push(normalized as usize);
+        }
+        positions.sort_unstable();
+        positions.dedup();
+
+        if positions.is_empty() && return_indices {
+            let inner = match selected_axis {
+                Some(axis) => element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?,
+                None => 1,
+            };
+            let values = try_collect_f64(
+                (0..count).map(|index| ((index / inner) % axis_len) as f64),
+                operation,
+            )?;
+            return Self::new(output_shape, values, DType::I64);
+        }
+        // Comparisons and returned cells must both use declared source
+        // precision. The existing wide-integer and complex selection paths
+        // already read exact sidecars or round each component on access, so
+        // they need no additional whole-array conversion during selection.
+        // Empty value selections still return canonical source-typed cells.
+        let needs_normalization = match self.dtype {
+            DType::F64 | DType::Complex128 => false,
+            DType::I64 | DType::U64 | DType::Complex64 => positions.is_empty(),
+            dtype => dtype.is_numeric() || dtype == DType::Bool,
+        };
+        let normalized_source;
+        let source = if needs_normalization {
+            normalized_source = Self::from_storage(shape.clone(), self.to_storage()?)?;
+            &normalized_source
+        } else {
+            self
+        };
+
+        if positions.is_empty() {
+            let mut result = source.clone();
+            if self.dtype.is_complex() {
+                output_shape.push(2);
+            }
+            result.shape = output_shape;
+            return Ok(result);
+        }
+        // Scalar argpartition accepts axes 0 and -1 by first promoting the
+        // scalar to a one-element vector, unlike value-returning partition.
+        let axis = selected_axis.map(|axis| axis as isize);
+        if return_indices {
+            source.argpartition_prepared(&positions, axis)
+        } else {
+            source.partition_prepared(&positions, axis)
+        }
+    }
+
+    /// Select requested ranks by recursively splitting around their middle
+    /// rank. Each partitioned interval is visited only by ranks inside it,
+    /// bounding work by O(n log(k + 1)) without fully sorting the input or
+    /// repeatedly selecting the entire lane for each requested position.
+    fn select_partition_positions<T>(
+        values: &mut [T],
+        positions: &[usize],
+        compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) {
+        fn select<T, F: Fn(&T, &T) -> std::cmp::Ordering>(
+            values: &mut [T],
+            positions: &[usize],
+            offset: usize,
+            compare: &F,
+        ) {
+            if positions.is_empty() {
+                return;
+            }
+            let middle = positions.len() / 2;
+            let pivot = positions[middle];
+            let (left, _, right) = values.select_nth_unstable_by(pivot - offset, compare);
+            select(left, &positions[..middle], offset, compare);
+            select(right, &positions[middle + 1..], pivot + 1, compare);
+        }
+        select(values, positions, 0, &compare);
+    }
+
+    /// Select logical complex order statistics without separating components
     /// or sorting the remaining elements. Each lane reuses one index buffer.
     fn partition_complex_elements(
         &self,
-        kth: usize,
+        kth: &[usize],
         axis: Option<isize>,
         return_indices: bool,
     ) -> Result<Self, UFuncError> {
@@ -14805,7 +14970,7 @@ impl UFuncArray {
         };
         // NumPy validates the axis even for empty arrays, but there is no
         // order statistic to validate when no lane contains any elements.
-        if count != 0 && kth >= axis_len {
+        if count != 0 && kth.iter().any(|&position| position >= axis_len) {
             return Err(UFuncError::Msg(format!("{operation}: kth out of bounds")));
         }
         let mut values = try_zeroed_f64(
@@ -14833,7 +14998,7 @@ impl UFuncArray {
                     for (index, slot) in indices.iter_mut().enumerate() {
                         *slot = index;
                     }
-                    indices.select_nth_unstable_by(kth, |lhs, rhs| {
+                    Self::select_partition_positions(&mut indices, kth, |lhs, rhs| {
                         Self::complex_order_cmp(
                             self.complex_extrema_value(base + *lhs * inner),
                             self.complex_extrema_value(base + *rhs * inner),
@@ -14867,7 +15032,7 @@ impl UFuncArray {
     ///
     /// Mimics `np.partition(a, kth, axis)`. When `axis` is `None`, operates
     /// on the flattened array. Complex axes refer to complete logical elements.
-    pub fn partition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+    fn partition_prepared(&self, kth: &[usize], axis: Option<isize>) -> Result<Self, UFuncError> {
         if self.uses_complex_interleaved_storage() {
             return self.partition_complex_elements(kth, axis, false);
         }
@@ -14876,14 +15041,10 @@ impl UFuncArray {
                 IntegerSidecar::I64(values) => match axis {
                     None => {
                         let n = values.len();
-                        if kth >= n {
-                            return Err(UFuncError::Msg(
-                                "partition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let mut source_indices: Vec<usize> = (0..n).collect();
-                        source_indices
-                            .select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Self::select_partition_positions(&mut source_indices, kth, |a, b| {
+                            values[*a].cmp(&values[*b])
+                        });
                         let out_values = source_indices
                             .iter()
                             .map(|&idx| values[idx] as f64)
@@ -14898,11 +15059,6 @@ impl UFuncArray {
                     Some(ax) => {
                         let axis = normalize_axis(ax, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        if kth >= axis_len {
-                            return Err(UFuncError::Msg(
-                                "partition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                             .map_err(UFuncError::Shape)?;
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
@@ -14921,7 +15077,7 @@ impl UFuncArray {
                                 let base = outer_idx * axis_len;
                                 let mut lane_indices: Vec<usize> =
                                     (base..base + axis_len).collect();
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[*a].cmp(&values[*b])
                                 });
                                 for (k, &src) in lane_indices.iter().enumerate() {
@@ -14959,7 +15115,7 @@ impl UFuncArray {
                                 for (k, idx) in lane_indices.iter_mut().enumerate() {
                                     *idx = base + k * inner + inner_idx;
                                 }
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[*a].cmp(&values[*b])
                                 });
                                 for (k, &src) in lane_indices.iter().enumerate() {
@@ -14980,14 +15136,10 @@ impl UFuncArray {
                 IntegerSidecar::U64(values) => match axis {
                     None => {
                         let n = values.len();
-                        if kth >= n {
-                            return Err(UFuncError::Msg(
-                                "partition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let mut source_indices: Vec<usize> = (0..n).collect();
-                        source_indices
-                            .select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Self::select_partition_positions(&mut source_indices, kth, |a, b| {
+                            values[*a].cmp(&values[*b])
+                        });
                         let out_values = source_indices
                             .iter()
                             .map(|&idx| values[idx] as f64)
@@ -15002,11 +15154,6 @@ impl UFuncArray {
                     Some(ax) => {
                         let axis = normalize_axis(ax, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        if kth >= axis_len {
-                            return Err(UFuncError::Msg(
-                                "partition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                             .map_err(UFuncError::Shape)?;
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
@@ -15024,7 +15171,7 @@ impl UFuncArray {
                                 let base = outer_idx * axis_len;
                                 let mut lane_indices: Vec<usize> =
                                     (base..base + axis_len).collect();
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[*a].cmp(&values[*b])
                                 });
                                 for (k, &src) in lane_indices.iter().enumerate() {
@@ -15062,7 +15209,7 @@ impl UFuncArray {
                                 for (k, idx) in lane_indices.iter_mut().enumerate() {
                                     *idx = base + k * inner + inner_idx;
                                 }
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[*a].cmp(&values[*b])
                                 });
                                 for (k, &src) in lane_indices.iter().enumerate() {
@@ -15085,11 +15232,10 @@ impl UFuncArray {
         match axis {
             None => {
                 let n = self.values.len();
-                if kth >= n {
-                    return Err(UFuncError::Msg("partition: kth out of bounds".to_string()));
-                }
                 let mut values = self.values.clone();
-                values.select_nth_unstable_by(kth, |a, b| a.total_cmp(b));
+                Self::select_partition_positions(&mut values, kth, |&a, &b| {
+                    Self::float_membership_cmp(a, b)
+                });
                 Ok(Self {
                     shape: vec![n],
                     values,
@@ -15100,9 +15246,6 @@ impl UFuncArray {
             Some(ax) => {
                 let axis = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[axis];
-                if kth >= axis_len {
-                    return Err(UFuncError::Msg("partition: kth out of bounds".to_string()));
-                }
                 let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                     .map_err(UFuncError::Shape)?;
                 let outer: usize =
@@ -15119,11 +15262,15 @@ impl UFuncArray {
                         && rayon::current_num_threads() >= 2
                     {
                         values.par_chunks_mut(axis_len).for_each(|lane| {
-                            lane.select_nth_unstable_by(kth, f64::total_cmp);
+                            Self::select_partition_positions(lane, kth, |&a, &b| {
+                                Self::float_membership_cmp(a, b)
+                            });
                         });
                     } else {
                         values.chunks_mut(axis_len).for_each(|lane| {
-                            lane.select_nth_unstable_by(kth, f64::total_cmp);
+                            Self::select_partition_positions(lane, kth, |&a, &b| {
+                                Self::float_membership_cmp(a, b)
+                            });
                         });
                     }
                     return Ok(Self {
@@ -15140,7 +15287,9 @@ impl UFuncArray {
                         for k in 0..axis_len {
                             lane[k] = values[base + k * inner + inner_idx];
                         }
-                        lane.select_nth_unstable_by(kth, |a, b| a.total_cmp(b));
+                        Self::select_partition_positions(&mut lane, kth, |&a, &b| {
+                            Self::float_membership_cmp(a, b)
+                        });
                         for k in 0..axis_len {
                             values[base + k * inner + inner_idx] = lane[k];
                         }
@@ -15160,7 +15309,11 @@ impl UFuncArray {
     ///
     /// Mimics `np.argpartition(a, kth, axis)`. When `axis` is `None`, operates
     /// on the flattened array.
-    pub fn argpartition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+    fn argpartition_prepared(
+        &self,
+        kth: &[usize],
+        axis: Option<isize>,
+    ) -> Result<Self, UFuncError> {
         if self.uses_complex_interleaved_storage() {
             return self.partition_complex_elements(kth, axis, true);
         }
@@ -15169,13 +15322,10 @@ impl UFuncArray {
                 IntegerSidecar::I64(values) => match axis {
                     None => {
                         let n = values.len();
-                        if kth >= n {
-                            return Err(UFuncError::Msg(
-                                "argpartition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let mut indices: Vec<usize> = (0..n).collect();
-                        indices.select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Self::select_partition_positions(&mut indices, kth, |a, b| {
+                            values[*a].cmp(&values[*b])
+                        });
                         Ok(Self {
                             shape: vec![n],
                             values: indices.iter().map(|&i| i as f64).collect(),
@@ -15186,11 +15336,6 @@ impl UFuncArray {
                     Some(ax) => {
                         let axis = normalize_axis(ax, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        if kth >= axis_len {
-                            return Err(UFuncError::Msg(
-                                "argpartition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                             .map_err(UFuncError::Shape)?;
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
@@ -15206,7 +15351,7 @@ impl UFuncArray {
                             let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
                                 let base = outer_idx * axis_len;
                                 let mut lane_indices: Vec<usize> = (0..axis_len).collect();
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[base + a].cmp(&values[base + b])
                                 });
                                 for (k, &idx) in lane_indices.iter().enumerate() {
@@ -15241,7 +15386,7 @@ impl UFuncArray {
                                 for (k, idx) in indices.iter_mut().enumerate() {
                                     *idx = k;
                                 }
-                                indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut indices, kth, |a, b| {
                                     values[base + a * inner + inner_idx]
                                         .cmp(&values[base + b * inner + inner_idx])
                                 });
@@ -15261,13 +15406,10 @@ impl UFuncArray {
                 IntegerSidecar::U64(values) => match axis {
                     None => {
                         let n = values.len();
-                        if kth >= n {
-                            return Err(UFuncError::Msg(
-                                "argpartition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let mut indices: Vec<usize> = (0..n).collect();
-                        indices.select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Self::select_partition_positions(&mut indices, kth, |a, b| {
+                            values[*a].cmp(&values[*b])
+                        });
                         Ok(Self {
                             shape: vec![n],
                             values: indices.iter().map(|&i| i as f64).collect(),
@@ -15278,11 +15420,6 @@ impl UFuncArray {
                     Some(ax) => {
                         let axis = normalize_axis(ax, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        if kth >= axis_len {
-                            return Err(UFuncError::Msg(
-                                "argpartition: kth out of bounds".to_string(),
-                            ));
-                        }
                         let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                             .map_err(UFuncError::Shape)?;
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
@@ -15296,7 +15433,7 @@ impl UFuncArray {
                             let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
                                 let base = outer_idx * axis_len;
                                 let mut lane_indices: Vec<usize> = (0..axis_len).collect();
-                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut lane_indices, kth, |a, b| {
                                     values[base + a].cmp(&values[base + b])
                                 });
                                 for (k, &idx) in lane_indices.iter().enumerate() {
@@ -15331,7 +15468,7 @@ impl UFuncArray {
                                 for (k, idx) in indices.iter_mut().enumerate() {
                                     *idx = k;
                                 }
-                                indices.select_nth_unstable_by(kth, |a, b| {
+                                Self::select_partition_positions(&mut indices, kth, |a, b| {
                                     values[base + a * inner + inner_idx]
                                         .cmp(&values[base + b * inner + inner_idx])
                                 });
@@ -15353,14 +15490,9 @@ impl UFuncArray {
         match axis {
             None => {
                 let n = self.values.len();
-                if kth >= n {
-                    return Err(UFuncError::Msg(
-                        "argpartition: kth out of bounds".to_string(),
-                    ));
-                }
                 let mut indices: Vec<usize> = (0..n).collect();
-                indices.select_nth_unstable_by(kth, |&a, &b| {
-                    self.values[a].total_cmp(&self.values[b])
+                Self::select_partition_positions(&mut indices, kth, |&a, &b| {
+                    Self::float_membership_cmp(self.values[a], self.values[b])
                 });
                 let values: Vec<f64> = indices.iter().map(|&i| i as f64).collect();
                 Ok(Self {
@@ -15373,11 +15505,6 @@ impl UFuncArray {
             Some(ax) => {
                 let axis = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[axis];
-                if kth >= axis_len {
-                    return Err(UFuncError::Msg(
-                        "argpartition: kth out of bounds".to_string(),
-                    ));
-                }
                 let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
                     .map_err(UFuncError::Shape)?;
                 let outer: usize =
@@ -15394,8 +15521,8 @@ impl UFuncArray {
                     let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
                         let base = outer_idx * axis_len;
                         let mut lane_indices: Vec<usize> = (0..axis_len).collect();
-                        lane_indices.select_nth_unstable_by(kth, |&a, &b| {
-                            values[base + a].total_cmp(&values[base + b])
+                        Self::select_partition_positions(&mut lane_indices, kth, |&a, &b| {
+                            Self::float_membership_cmp(values[base + a], values[base + b])
                         });
                         for (k, &idx) in lane_indices.iter().enumerate() {
                             out_chunk[k] = idx as f64;
@@ -15429,10 +15556,10 @@ impl UFuncArray {
                         for (k, idx) in indices.iter_mut().enumerate() {
                             *idx = k;
                         }
-                        indices.select_nth_unstable_by(kth, |&a, &b| {
+                        Self::select_partition_positions(&mut indices, kth, |&a, &b| {
                             let va = self.values[base + a * inner + inner_idx];
                             let vb = self.values[base + b * inner + inner_idx];
-                            va.total_cmp(&vb)
+                            Self::float_membership_cmp(va, vb)
                         });
                         for k in 0..axis_len {
                             result[base + k * inner + inner_idx] = indices[k] as f64;

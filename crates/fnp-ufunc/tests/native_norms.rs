@@ -27,6 +27,21 @@ fn dtype_name(dtype: DType) -> &'static str {
 }
 
 fn input(shape: &[usize], dtype: DType, data: &[f64]) -> UFuncArray {
+    // Wide integers require typed provenance: the raw f64 bridge deliberately
+    // rejects fractional cells. Construct the integer values NumPy receives
+    // after converting these finite, in-range fixture values.
+    let wide_storage = match dtype {
+        DType::I64 => Some(ArrayStorage::I64(
+            data.iter().map(|&value| value as i64).collect(),
+        )),
+        DType::U64 => Some(ArrayStorage::U64(
+            data.iter().map(|&value| value as u64).collect(),
+        )),
+        _ => None,
+    };
+    if let Some(storage) = wide_storage {
+        return UFuncArray::from_storage(shape.to_vec(), storage).unwrap();
+    }
     let mut physical_shape = shape.to_vec();
     if dtype.is_complex() {
         physical_shape.push(2);
@@ -179,7 +194,13 @@ fn complex_norms_reduce_whole_elements_and_preserve_component_precision() {
     }
     let scalar = input(&[], DType::Complex128, &[3.0, 4.0]);
     assert_eq!(scalar.norm(None).unwrap(), 5.0);
-    assert_eq!(scalar.vector_norm(None, None, true).unwrap().shape(), &[]);
+    assert!(
+        scalar
+            .vector_norm(None, None, true)
+            .unwrap()
+            .shape()
+            .is_empty()
+    );
     assert!(scalar.norm(Some("2")).is_err());
     assert!(scalar.vector_norm(None, Some(0), false).is_err());
 }
@@ -420,10 +441,20 @@ fn matrix_spectral_and_induced_norms_obey_complex_diagonal_identities() {
 
 #[test]
 fn norms_normalize_storage_reject_invalid_inputs_and_check_empty_output_capacity() {
-    let wide =
-        UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX, 1 << 63])).unwrap();
-    let expected = u64::MAX as f64 + (1u64 << 63) as f64;
-    assert_eq!(wide.norm(Some("1")).unwrap(), expected);
+    for (storage, expected) in [
+        (
+            ArrayStorage::I64(vec![i64::MIN, 9_007_199_254_740_993]),
+            (i64::MIN as f64).abs() + 9_007_199_254_740_993i64 as f64,
+        ),
+        (
+            ArrayStorage::U64(vec![u64::MAX, 1 << 63]),
+            u64::MAX as f64 + (1u64 << 63) as f64,
+        ),
+    ] {
+        let wide = UFuncArray::from_storage(vec![2], storage.clone()).unwrap();
+        assert_eq!(wide.norm(Some("1")).unwrap(), expected);
+        assert_eq!(wide.to_storage().unwrap(), storage);
+    }
     let rounded = input(&[1], DType::F32, &[16_777_217.0]);
     assert_eq!(rounded.norm(Some("1")).unwrap(), 16_777_216.0);
     let scalar = input(&[], DType::F32, &[4.0]);
@@ -450,6 +481,56 @@ fn norms_normalize_storage_reject_invalid_inputs_and_check_empty_output_capacity
             .values()
             .is_empty()
     );
+}
+
+#[test]
+fn norms_reject_raw_wide_integer_cells_without_exact_typed_provenance() {
+    for dtype in [DType::I64, DType::U64] {
+        let mut invalid = vec![
+            1.25,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            9_007_199_254_740_994.0,
+        ];
+        if dtype == DType::U64 {
+            invalid.push(-1.0);
+        }
+        for value in invalid {
+            // The raw constructor validates shape, not integer provenance.
+            // Every norm route must keep the fallible storage bridge's guard.
+            let raw = UFuncArray::new(vec![1, 1], vec![value], dtype).unwrap();
+            for (operation, result) in [
+                ("to_storage", raw.to_storage().map(|_| ())),
+                ("norm", raw.norm(None).map(|_| ())),
+                (
+                    "vector_norm",
+                    raw.vector_norm(None, None, false).map(|_| ()),
+                ),
+                (
+                    "vector_norm_axes",
+                    raw.vector_norm_axes(Some(0.0), &[], false).map(|_| ()),
+                ),
+                (
+                    "matrix_norm fro",
+                    raw.matrix_norm(Some("fro"), false).map(|_| ()),
+                ),
+                (
+                    "matrix_norm inf",
+                    raw.matrix_norm(Some("inf"), false).map(|_| ()),
+                ),
+                (
+                    "matrix_norm nuc",
+                    raw.matrix_norm(Some("nuc"), false).map(|_| ()),
+                ),
+            ] {
+                assert!(
+                    matches!(&result, Err(UFuncError::Msg(message)) if message.contains("cannot be represented exactly")),
+                    "{operation} {dtype:?} {value}: {result:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
