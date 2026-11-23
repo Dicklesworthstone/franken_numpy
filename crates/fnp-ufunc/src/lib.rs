@@ -21338,27 +21338,161 @@ impl UFuncArray {
         Self::from_linalg_values(shape, source.values, dtype)
     }
 
-    /// Determinant (np.linalg.det).
+    /// Determinant of one real square matrix as a scalar.
+    ///
+    /// Use [`Self::det_array`] for typed complex or stacked-matrix results.
     pub fn det(&self) -> Result<f64, UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+        if self.dtype.is_complex() || self.shape.len() != 2 {
             return Err(UFuncError::Msg(
-                "det: input must be a square 2-D array".into(),
+                "det: scalar output requires one real square 2-D array; use det_array for complex or stacked matrices".into(),
             ));
         }
-        fnp_linalg::det_nxn(&self.values, self.shape[0])
-            .map_err(|e| UFuncError::Msg(format!("{e}")))
+        Ok(self.det_array()?.values[0])
     }
 
-    /// Sign and log-determinant (np.linalg.slogdet).
-    /// Returns (sign, logabsdet).
+    /// Sign and log-absolute-determinant of one real square matrix as scalars.
+    ///
+    /// Use [`Self::slogdet_array`] for complex phases or stacked-matrix results.
     pub fn slogdet(&self) -> Result<(f64, f64), UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+        if self.dtype.is_complex() || self.shape.len() != 2 {
             return Err(UFuncError::Msg(
-                "slogdet: input must be a square 2-D array".into(),
+                "slogdet: scalar output requires one real square 2-D array; use slogdet_array for complex or stacked matrices".into(),
             ));
         }
-        fnp_linalg::slogdet_nxn(&self.values, self.shape[0])
-            .map_err(|e| UFuncError::Msg(format!("{e}")))
+        let (sign, logabsdet) = self.slogdet_array()?;
+        Ok((sign.values[0], logabsdet.values[0]))
+    }
+
+    /// Determinants of real or complex square matrices (np.linalg.det).
+    ///
+    /// The final two logical dimensions form each matrix; every leading batch
+    /// dimension is retained in the output. A single matrix produces a logical
+    /// scalar. Float32 and complex64 retain their output precision, while
+    /// integer and Boolean inputs produce float64. Empty 0-by-0 matrices have
+    /// determinant one, independently of whether the batch itself is empty.
+    pub fn det_array(&self) -> Result<Self, UFuncError> {
+        Ok(self.determinant_arrays(false)?.0)
+    }
+
+    /// Determinant signs/phases and logarithms for square matrix stacks.
+    ///
+    /// Both outputs have the leading batch shape. The first uses the input's
+    /// linalg result dtype and retains complex phases; log-absolute-determinants
+    /// always use the corresponding real precision. Singular matrices produce
+    /// zero sign/phase and negative infinity, and 0-by-0 matrices produce one
+    /// and zero. Logarithms are accumulated without forming the determinant.
+    pub fn slogdet_array(&self) -> Result<(Self, Self), UFuncError> {
+        let (sign, logabsdet) = self.determinant_arrays(true)?;
+        Ok((sign, logabsdet.expect("logarithms were requested")))
+    }
+
+    fn determinant_arrays(&self, logarithmic: bool) -> Result<(Self, Option<Self>), UFuncError> {
+        let operation = if logarithmic { "slogdet" } else { "det" };
+        let shape = self.complex_logical_shape(operation)?;
+        let ndim = shape.len();
+        if ndim < 2 || shape[ndim - 2] != shape[ndim - 1] {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: the final two dimensions must form a square matrix"
+            )));
+        }
+        let dtype = Self::linalg_output_dtype(&[self], operation)?;
+        let real_dtype = if matches!(dtype, DType::F32 | DType::Complex64) {
+            DType::F32
+        } else {
+            DType::F64
+        };
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let batch_shape = &shape[..ndim - 2];
+        let capacity = |dimensions: &[usize], components: usize| {
+            let count = if dimensions.contains(&0) {
+                0
+            } else {
+                element_count(dimensions).map_err(UFuncError::Shape)?
+            };
+            count
+                .checked_mul(components)
+                .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+                .ok_or(UFuncError::Shape(ShapeError::Overflow))
+        };
+        let input_count = capacity(&shape, components)?;
+        if input_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: input_count,
+                actual: self.values.len(),
+            });
+        }
+        // A zero core can require a nonempty result even though input storage
+        // is empty. Check output capacity independently before allocating it.
+        let value_count = capacity(batch_shape, components)?;
+        let log_count = if logarithmic {
+            capacity(batch_shape, 1)?
+        } else {
+            0
+        };
+        let n = shape[ndim - 1];
+        let (values, logarithms) = if input_count == 0 {
+            let mut values = try_zeroed_f64(value_count, operation)?;
+            for real in values.iter_mut().step_by(components) {
+                *real = 1.0;
+            }
+            (values, try_zeroed_f64(log_count, operation)?)
+        } else {
+            // Read declared source storage before widening. Raw working cells
+            // can retain extra float32 precision or rounded wide integers.
+            let source = self.cast_numeric_storage(
+                if dtype.is_complex() {
+                    DType::Complex128
+                } else {
+                    DType::F64
+                },
+                false,
+            )?;
+            if dtype.is_complex() {
+                let matrix_len = capacity(&[n, n], components)?;
+                let mut values = try_zeroed_f64(value_count, operation)?;
+                let mut logarithms = try_zeroed_f64(log_count, operation)?;
+                for (lane, matrix) in source.values.chunks_exact(matrix_len).enumerate() {
+                    let (phase, logabsdet) = fnp_linalg::complex_slogdet_nxn(matrix, n)
+                        .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+                    let value = if logarithmic {
+                        logarithms[lane] = logabsdet;
+                        phase
+                    } else {
+                        // NumPy reconstructs complex determinants from phase
+                        // and log magnitude, including 0*Inf -> NaN in an
+                        // otherwise zero component of an overflowing result.
+                        let magnitude = logabsdet.exp();
+                        (phase.0 * magnitude, phase.1 * magnitude)
+                    };
+                    values[2 * lane] = value.0;
+                    values[2 * lane + 1] = value.1;
+                }
+                (values, logarithms)
+            } else if logarithmic {
+                // The native batch kernels reuse LU workspace for small
+                // matrices and parallelize substantial independent batches.
+                fnp_linalg::batch_slogdet(&source.values, &shape)
+                    .map_err(|error| UFuncError::Msg(format!("{error}")))?
+            } else {
+                (
+                    fnp_linalg::batch_det(&source.values, &shape)
+                        .map_err(|error| UFuncError::Msg(format!("{error}")))?,
+                    Vec::new(),
+                )
+            }
+        };
+        Ok((
+            Self::from_linalg_values(batch_shape.to_vec(), values, dtype)?,
+            if logarithmic {
+                Some(Self::from_linalg_values(
+                    batch_shape.to_vec(),
+                    logarithms,
+                    real_dtype,
+                )?)
+            } else {
+                None
+            },
+        ))
     }
 
     /// Inverse of real or complex matrix stacks (np.linalg.inv).

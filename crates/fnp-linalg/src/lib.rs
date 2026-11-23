@@ -1207,11 +1207,17 @@ fn solve_nxn_multi_into_out(
 
 #[inline]
 fn det_from_lu_diagonal(lu: &[f64], n: usize, sign: f64) -> f64 {
-    let mut det = sign;
-    for i in 0..n {
-        det *= lu[i * n + i];
+    // Preserve the established nonfinite LU policy, including IEEE zero/Inf
+    // interactions. Finite factors need a separate exponent: an overflowing
+    // or underflowing partial product need not make the final product extreme.
+    if (0..n).any(|i| !lu[i * n + i].is_finite()) {
+        return (0..n).fold(sign, |det, i| det * lu[i * n + i]);
     }
-    det
+    let mut det = ScaledReal::new(sign);
+    for i in 0..n {
+        det = det.multiply(ScaledReal::new(lu[i * n + i]));
+    }
+    det.value()
 }
 
 #[inline]
@@ -1248,15 +1254,13 @@ fn det_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<f64> {
     }
 
     let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-    let mut det = 1.0;
     for diagonal in 0..n {
         let value = a[diagonal * n + diagonal];
         if value.abs() <= singularity_threshold {
             return None;
         }
-        det *= value;
     }
-    Some(det)
+    Some(det_from_lu_diagonal(a, n, 1.0))
 }
 
 fn det_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<f64> {
@@ -1276,7 +1280,6 @@ fn det_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<f64> {
     }
 
     let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
-    let mut det = 1.0;
     for col in 0..n {
         let diagonal = a[col * n + col];
         if diagonal.abs() <= singularity_threshold
@@ -1284,9 +1287,8 @@ fn det_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<f64> {
         {
             return None;
         }
-        det *= diagonal;
     }
-    Some(det)
+    Some(det_from_lu_diagonal(a, n, 1.0))
 }
 
 fn slogdet_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<(f64, f64)> {
@@ -17847,6 +17849,61 @@ print(",".join(repr(float(x)) for x in s))
     fn det_empty_matrix_returns_one() {
         let d0 = det_nxn(&[], 0).expect("empty det");
         assert_eq!(d0, 1.0);
+    }
+
+    #[test]
+    fn determinant_retains_finite_products_across_extreme_partial_products() {
+        let mut stack = Vec::new();
+        for diagonal in [
+            [1e200, 1e200, 1e-200, 1e-200],
+            [1e-200, 1e-200, 1e200, 1e200],
+            [-1e200, 1e200, 1e-200, 1e-200],
+            [-1e-200, 1e-200, 1e200, 1e200],
+        ] {
+            let mut matrix = vec![0.0; 16];
+            for (index, value) in diagonal.into_iter().enumerate() {
+                matrix[index * 5] = value;
+            }
+            let expected = diagonal[0].signum();
+            for determinant in [
+                det_nxn(&matrix, 4).unwrap(),
+                det_nxn_general_control(&matrix, 4).unwrap(),
+            ] {
+                assert!(
+                    (determinant - expected).abs() < 8.0 * f64::EPSILON,
+                    "determinant {determinant} must retain finite product {expected}"
+                );
+            }
+            stack.extend(matrix);
+        }
+        for (actual, expected) in batch_det(&stack, &[4, 4, 4])
+            .unwrap()
+            .into_iter()
+            .zip([1.0, 1.0, -1.0, -1.0])
+        {
+            assert!((actual - expected).abs() < 8.0 * f64::EPSILON);
+        }
+
+        // These modest individual factors satisfy the triangular fast-path
+        // admission threshold but still overflow/underflow halfway through.
+        let n = 128;
+        for small_first in [false, true] {
+            let mut matrix = vec![0.0; n * n];
+            for i in 0..n {
+                matrix[i * n + i] = if (i < n / 2) == small_first {
+                    1e-5
+                } else {
+                    1e5
+                };
+            }
+            for determinant in [
+                det_nxn(&matrix, n).unwrap(),
+                super::det_nxn_exact_upper_triangular(&matrix, n).unwrap(),
+                super::det_nxn_exact_lower_triangular_no_pivot(&matrix, n).unwrap(),
+            ] {
+                assert!((determinant - 1.0).abs() < 128.0 * f64::EPSILON);
+            }
+        }
     }
 
     #[test]
