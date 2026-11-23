@@ -18988,53 +18988,6 @@ impl UFuncArray {
         matches!(self.dtype, DType::Complex64 | DType::Complex128)
     }
 
-    fn interleave_real_values(values: &[f64]) -> Vec<f64> {
-        let mut interleaved = Vec::with_capacity(values.len() * 2);
-        for &value in values {
-            interleaved.push(value);
-            interleaved.push(0.0);
-        }
-        interleaved
-    }
-
-    fn as_complex_matrix_input(
-        &self,
-        op: &str,
-        require_square: bool,
-    ) -> Result<(Vec<f64>, usize, usize), UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            if self.shape.len() != 3 || self.shape[2] != 2 {
-                return Err(UFuncError::Msg(format!(
-                    "{op}: complex input must have shape [rows, cols, 2]"
-                )));
-            }
-            let rows = self.shape[0];
-            let cols = self.shape[1];
-            if require_square && rows != cols {
-                return Err(UFuncError::Msg(format!(
-                    "{op}: complex input must be a square [n, n, 2] array"
-                )));
-            }
-            return Ok((self.values.clone(), rows, cols));
-        }
-
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg(format!(
-                "{op}: input must be a 2-D array or complex [rows, cols, 2] array"
-            )));
-        }
-
-        let rows = self.shape[0];
-        let cols = self.shape[1];
-        if require_square && rows != cols {
-            return Err(UFuncError::Msg(format!(
-                "{op}: input must be a square 2-D array"
-            )));
-        }
-
-        Ok((Self::interleave_real_values(&self.values), rows, cols))
-    }
-
     /// NumPy linalg widens every operand to double precision internally, then
     /// returns single precision only when every source is float32/complex64.
     /// Integer and Boolean operands therefore force a double-precision result.
@@ -21275,131 +21228,114 @@ impl UFuncArray {
         Self::from_values_with_dtype(shape, values, DType::Bool)
     }
 
-    fn complex_matrix_from_interleaved(
-        rows: usize,
-        cols: usize,
-        values: Vec<f64>,
-        dtype: DType,
-    ) -> Result<Self, UFuncError> {
-        Self::new(vec![rows, cols, 2], values, dtype)
-    }
-
-    fn reflect_upper_triangle_to_lower(values: &[f64], n: usize) -> Vec<f64> {
-        let mut reflected = vec![0.0; n * n];
-        for row in 0..n {
-            for col in 0..=row {
-                reflected[row * n + col] = values[col * n + row];
-            }
-        }
-        reflected
-    }
-
-    fn transpose_lower_triangle_to_upper(values: &[f64], n: usize) -> Vec<f64> {
-        let mut transposed = vec![0.0; n * n];
-        for row in 0..n {
-            for col in 0..=row {
-                transposed[col * n + row] = values[row * n + col];
-            }
-        }
-        transposed
-    }
-
-    fn reflect_complex_upper_triangle_to_lower(values: &[f64], n: usize) -> Vec<f64> {
-        let mut reflected = vec![0.0; 2 * n * n];
-        for row in 0..n {
-            for col in 0..=row {
-                let src = 2 * (col * n + row);
-                let dst = 2 * (row * n + col);
-                reflected[dst] = values[src];
-                reflected[dst + 1] = if row == col {
-                    values[src + 1]
-                } else {
-                    -values[src + 1]
-                };
-            }
-        }
-        reflected
-    }
-
-    fn complex_lower_triangle_to_upper_hermitian(values: &[f64], n: usize) -> Vec<f64> {
-        let mut upper = vec![0.0; 2 * n * n];
-        for row in 0..n {
-            for col in 0..=row {
-                let src = 2 * (row * n + col);
-                let dst = 2 * (col * n + row);
-                upper[dst] = values[src];
-                upper[dst + 1] = if row == col {
-                    values[src + 1]
-                } else {
-                    -values[src + 1]
-                };
-            }
-        }
-        upper
-    }
-
     // ── Additional linalg bridge methods ─────────────────────────
 
-    /// Cholesky decomposition (np.linalg.cholesky).
-    /// Returns the lower-triangular factor L such that A = L L^T.
+    /// Cholesky decomposition of real or complex matrix stacks (np.linalg.cholesky).
+    /// Returns the lower-triangular factor L such that A = L L^H.
     pub fn cholesky(&self) -> Result<Self, UFuncError> {
         self.cholesky_with_upper(false)
     }
 
-    /// Cholesky decomposition (np.linalg.cholesky) with explicit triangle selection.
+    /// Cholesky decomposition with explicit triangle selection.
+    ///
+    /// The final two logical axes must form square matrices. Only the selected
+    /// triangle and real diagonal define each matrix; unused entries, including
+    /// nonfinite values, do not affect the factorization. Float32/complex64
+    /// inputs retain their precision, while integer/Boolean inputs return
+    /// float64. Empty matrices and batches preserve their logical shape.
     pub fn cholesky_with_upper(&self, upper: bool) -> Result<Self, UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            let (values, n, _) = self.as_complex_matrix_input("cholesky", true)?;
-            if n == 0 {
-                return Self::complex_matrix_from_interleaved(0, 0, Vec::new(), self.dtype);
-            }
-            let selected = if upper {
-                Self::reflect_complex_upper_triangle_to_lower(&values, n)
-            } else {
-                values
-            };
-            let result = fnp_linalg::complex_cholesky_nxn(&selected, n)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-            let result = if upper {
-                Self::complex_lower_triangle_to_upper_hermitian(&result, n)
-            } else {
-                result
-            };
-            return Self::complex_matrix_from_interleaved(n, n, result, self.dtype);
-        }
-
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+        let shape = self.complex_logical_shape("cholesky")?;
+        let ndim = shape.len();
+        if ndim < 2 || shape[ndim - 2] != shape[ndim - 1] {
             return Err(UFuncError::Msg(
-                "cholesky: input must be a square 2-D array".into(),
+                "cholesky: the final two dimensions must form a square matrix".into(),
             ));
         }
-        let n = self.shape[0];
-        if n == 0 {
-            return Ok(Self {
-                shape: vec![0, 0],
-                values: Vec::new(),
-                dtype: DType::F64,
-                integer_sidecar: None,
+        let dtype = Self::linalg_output_dtype(&[self], "cholesky")?;
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if physical_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: physical_count,
+                actual: self.values.len(),
             });
         }
-        let selected = if upper {
-            Self::reflect_upper_triangle_to_lower(&self.values, n)
-        } else {
-            self.values.clone()
-        };
-        let result =
-            fnp_linalg::cholesky_nxn(&selected, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        let result = if upper {
-            Self::transpose_lower_triangle_to_upper(&result, n)
-        } else {
-            result
-        };
-        Ok(Self {
-            shape: vec![n, n],
-            values: result,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        if physical_count == 0 {
+            // Unvisited matrix dimensions may be arbitrarily large: avoid
+            // multiplying them or asking scalar kernels to factor n=0.
+            return Self::from_linalg_values(shape, Vec::new(), dtype);
+        }
+        let n = shape[ndim - 1];
+        let matrix_len = n
+            .checked_mul(n)
+            .and_then(|count| count.checked_mul(components))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut source = self.cast_numeric_storage(
+            if dtype.is_complex() {
+                DType::Complex128
+            } else {
+                DType::F64
+            },
+            false,
+        )?;
+        // The kernels validate all input cells. Zero the unused triangle and
+        // imaginary diagonal so their finite-input checks see only the matrix
+        // NumPy actually factors. Reuse this buffer across the whole stack.
+        let mut selected = try_zeroed_f64(matrix_len, "cholesky")?;
+        for matrix in source.values.chunks_exact_mut(matrix_len) {
+            for row in 0..n {
+                for column in 0..=row {
+                    let input = if upper {
+                        (column * n + row) * components
+                    } else {
+                        (row * n + column) * components
+                    };
+                    let output = (row * n + column) * components;
+                    selected[output] = matrix[input];
+                    if components == 2 && row != column {
+                        selected[output + 1] = if upper {
+                            -matrix[input + 1]
+                        } else {
+                            matrix[input + 1]
+                        };
+                    }
+                }
+            }
+            let factor = if dtype.is_complex() {
+                fnp_linalg::complex_cholesky_nxn(&selected, n)
+            } else {
+                fnp_linalg::cholesky_nxn(&selected, n)
+            }
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            if upper {
+                matrix.fill(0.0);
+                for row in 0..n {
+                    for column in 0..=row {
+                        let input = (row * n + column) * components;
+                        let output = (column * n + row) * components;
+                        matrix[output] = factor[input];
+                        if components == 2 {
+                            matrix[output + 1] = if row == column {
+                                factor[input + 1]
+                            } else {
+                                -factor[input + 1]
+                            };
+                        }
+                    }
+                }
+            } else {
+                matrix.copy_from_slice(&factor);
+            }
+        }
+        Self::from_linalg_values(shape, source.values, dtype)
     }
 
     /// Determinant (np.linalg.det).
@@ -21425,29 +21361,65 @@ impl UFuncArray {
             .map_err(|e| UFuncError::Msg(format!("{e}")))
     }
 
-    /// Matrix inverse (np.linalg.inv).
+    /// Inverse of real or complex matrix stacks (np.linalg.inv).
+    ///
+    /// The final two logical axes must be square; leading batch dimensions
+    /// and declared floating precision are preserved. Integer/Boolean sources
+    /// are read from typed storage before promotion to float64. A singular
+    /// matrix anywhere in a nonempty stack fails the operation.
     pub fn inv(&self) -> Result<Self, UFuncError> {
-        if self.uses_complex_interleaved_storage() {
-            let (values, n, _) = self.as_complex_matrix_input("inv", true)?;
-            let result = fnp_linalg::complex_inv_nxn(&values, n)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-            return Self::complex_matrix_from_interleaved(n, n, result, self.dtype);
-        }
-
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+        let shape = self.complex_logical_shape("inv")?;
+        let ndim = shape.len();
+        if ndim < 2 || shape[ndim - 2] != shape[ndim - 1] {
             return Err(UFuncError::Msg(
-                "inv: input must be a square 2-D array".into(),
+                "inv: the final two dimensions must form a square matrix".into(),
             ));
         }
-        let n = self.shape[0];
-        let result =
-            fnp_linalg::inv_nxn(&self.values, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: vec![n, n],
-            values: result,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        let dtype = Self::linalg_output_dtype(&[self], "inv")?;
+        let components = if dtype.is_complex() { 2 } else { 1 };
+        let count = if shape.contains(&0) {
+            0
+        } else {
+            element_count(&shape).map_err(UFuncError::Shape)?
+        };
+        let physical_count = count
+            .checked_mul(components)
+            .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        if physical_count != self.values.len() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: physical_count,
+                actual: self.values.len(),
+            });
+        }
+        if physical_count == 0 {
+            return Self::from_linalg_values(shape, Vec::new(), dtype);
+        }
+        let n = shape[ndim - 1];
+        let matrix_len = n
+            .checked_mul(n)
+            .and_then(|count| count.checked_mul(components))
+            .ok_or(UFuncError::Shape(ShapeError::Overflow))?;
+        let mut source = self.cast_numeric_storage(
+            if dtype.is_complex() {
+                DType::Complex128
+            } else {
+                DType::F64
+            },
+            false,
+        )?;
+        // Reuse the typed input copy for the result; only one matrix's kernel
+        // scratch is live at a time, independent of the number of batches.
+        for matrix in source.values.chunks_exact_mut(matrix_len) {
+            let inverse = if dtype.is_complex() {
+                fnp_linalg::complex_inv_nxn(matrix, n)
+            } else {
+                fnp_linalg::inv_nxn(matrix, n)
+            }
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+            matrix.copy_from_slice(&inverse);
+        }
+        Self::from_linalg_values(shape, source.values, dtype)
     }
 
     /// Moore-Penrose pseudoinverse of a matrix or stack of matrices.

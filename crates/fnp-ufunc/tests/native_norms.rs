@@ -466,8 +466,7 @@ fn half_scalar_norm_retains_float32_dot_accumulation_before_the_final_cast() {
     assert_eq!(a.norm(None).unwrap(), a.norm(Some("2e0")).unwrap());
     let matrix = input(&[32, 32], DType::F16, &[0.0001; 1024]);
     assert_eq!(a.norm(None).unwrap(), matrix.norm(Some("fro")).unwrap());
-    let script =
-        "import numpy as n; a=n.full(1024, 0.0001, dtype=n.float16); print(float(n.linalg.norm(a)))";
+    let script = "import numpy as n; a=n.full(1024, 0.0001, dtype=n.float16); print(float(n.linalg.norm(a)))";
     let interpreter = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let output = Command::new(interpreter)
         .args(["-c", script])
