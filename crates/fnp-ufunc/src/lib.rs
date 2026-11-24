@@ -3133,6 +3133,26 @@ pub struct ReductionOptions<'a> {
     pub initial: Option<&'a UFuncArray>,
 }
 
+/// Combined controls for mean, variance, and standard-deviation reductions.
+///
+/// Axes and Boolean masks address logical elements, so a complex pair has one
+/// selection bit and contributes one item to the divisor. Each output lane
+/// counts its own selected elements after broadcasting the mask.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatisticalReductionOptions<'a> {
+    /// `None` reduces all axes; `Some(&[])` reduces no axes. Explicit axes
+    /// follow NumPy's tuple rules, including negative axes and scalar inputs.
+    pub axes: Option<&'a [isize]>,
+    pub keepdims: bool,
+    /// The accumulator and result dtype. By default, integer and Boolean
+    /// inputs promote to float64. A float16 mean uses float32 accumulation
+    /// and returns float16; float16 variance retains float16 intermediates.
+    pub dtype: Option<DType>,
+    /// A Boolean mask broadcast over the logical input shape. Other mask
+    /// dtypes are rejected, matching NumPy's safe `where` conversion rule.
+    pub where_mask: Option<&'a UFuncArray>,
+}
+
 pub type UniqueInfo = (
     UFuncArray,
     Option<UFuncArray>,
@@ -10562,6 +10582,212 @@ impl UFuncArray {
             .divide_complex_reduction_by_count(plan.reduction_count)
     }
 
+    /// Mean with joint tuple axes, an accumulator dtype, and a `where` mask.
+    ///
+    /// The mask selects whole logical values. Selected contiguous runs retain
+    /// the sum kernel's accumulation order, and empty selections divide zero
+    /// by zero in the requested result dtype, as NumPy does.
+    pub fn reduce_mean_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+    ) -> Result<Self, UFuncError> {
+        let dtype = options.dtype.unwrap_or_else(|| {
+            if self.dtype == DType::F16 {
+                DType::F32
+            } else {
+                promote_for_mean_reduction(self.dtype)
+            }
+        });
+        let (axes, _, counts) = self.statistical_selection_plan(options, dtype, "mean")?;
+        let mean = self
+            .reduce_sum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: options.keepdims,
+                dtype: Some(dtype),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_statistical_reduction_by_counts(&counts, 0)?;
+        if self.dtype == DType::F16 && options.dtype.is_none() {
+            mean.cast_numeric_storage(DType::F16, false)
+        } else {
+            Ok(mean)
+        }
+    }
+
+    /// Variance with joint tuple axes, an accumulator dtype, and a `where` mask.
+    ///
+    /// Each output uses its own selected count minus `ddof`, clamped at zero.
+    /// The mean and squared-deviation reductions share the same selection, but
+    /// deviations retain the original source precision and imaginary parts.
+    /// A default complex variance returns the corresponding real dtype.
+    pub fn reduce_var_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        let dtype = options
+            .dtype
+            .unwrap_or_else(|| promote_for_mean_reduction(self.dtype));
+        let (axes, plan, counts) = self.statistical_selection_plan(options, dtype, "var")?;
+        // Unlike mean(), variance does not widen a default float16 mean.
+        let mean = self
+            .reduce_sum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: true,
+                dtype: Some(dtype),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_statistical_reduction_by_counts(&counts, 0)?;
+        let squared = self.squared_statistical_reduction_deviations(&mean, &plan)?;
+        squared
+            .reduce_sum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: options.keepdims,
+                dtype: Some(options.dtype.unwrap_or(squared.dtype)),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_statistical_reduction_by_counts(&counts, ddof)
+    }
+
+    /// Standard deviation with combined statistical reduction controls.
+    pub fn reduce_std_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_var_with_options(options, ddof)?
+            .sqrt_statistical_reduction()
+    }
+
+    fn statistical_selection_plan(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        dtype: DType,
+        operation: &str,
+    ) -> Result<(Vec<isize>, AxesReductionPlan, Vec<usize>), UFuncError> {
+        if let Some(mask) = options.where_mask
+            && mask.dtype != DType::Bool
+        {
+            return Err(UFuncError::ReductionContractViolation {
+                detail: format!(
+                    "{operation}: where mask must have boolean dtype, got {:?}",
+                    mask.dtype
+                ),
+            });
+        }
+        for (role, dtype) in [("input", self.dtype), ("accumulator", dtype)] {
+            if !(dtype.is_numeric() || dtype == DType::Bool) {
+                return Err(UFuncError::Msg(format!(
+                    "{operation}: unsupported {role} dtype {dtype:?}"
+                )));
+            }
+        }
+        let shape = self.complex_logical_shape(operation)?;
+        let axes = options.axes.map_or_else(
+            || (0..shape.len()).map(|axis| axis as isize).collect(),
+            <[isize]>::to_vec,
+        );
+        let plan = AxesReductionPlan::new(&shape, &axes, options.keepdims)?;
+        let cell_size = if dtype.is_complex() {
+            std::mem::size_of::<(f64, f64)>()
+        } else {
+            std::mem::size_of::<f64>()
+        };
+        if plan.output_count > isize::MAX as usize / cell_size {
+            return Err(UFuncError::Shape(ShapeError::Overflow));
+        }
+        let counts = if let Some(mask) = options.where_mask {
+            let mask = normalize_reduction_where_mask(mask, &shape)?;
+            let mut counts = vec![0usize; plan.output_count];
+            for (index, &selected) in mask.values.iter().enumerate() {
+                if selected != 0.0 {
+                    counts[plan.output_index(index)] += 1;
+                }
+            }
+            counts
+        } else {
+            vec![plan.reduction_count; plan.output_count]
+        };
+        Ok((axes, plan, counts))
+    }
+
+    fn divide_statistical_reduction_by_counts(
+        mut self,
+        counts: &[usize],
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            for (parts, &count) in self.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
+                let value = Self::divide_complex_value_by_count(
+                    (parts[0], parts[1]),
+                    count.saturating_sub(ddof),
+                    self.dtype,
+                );
+                *parts = [value.0, value.1];
+            }
+            Ok(self)
+        } else {
+            let values = self
+                .values
+                .into_iter()
+                .zip(counts)
+                .map(|(value, &count)| value / count.saturating_sub(ddof) as f64)
+                .collect();
+            Self::from_values_with_dtype(self.shape, values, self.dtype)
+        }
+    }
+
+    fn squared_statistical_reduction_deviations(
+        &self,
+        mean: &Self,
+        plan: &AxesReductionPlan,
+    ) -> Result<Self, UFuncError> {
+        if !self.dtype.is_complex() && !mean.dtype.is_complex() {
+            return self.squared_real_reduction_deviations(mean);
+        }
+        let deviation_dtype = promote(self.dtype, mean.dtype);
+        let inputs = self.complex_reduction_values(deviation_dtype)?;
+        let magnitude = self.dtype.is_complex() || self.dtype == DType::Bool;
+        let mut values = Vec::with_capacity(if magnitude {
+            inputs.len()
+        } else {
+            inputs.len().saturating_mul(2)
+        });
+        for (index, value) in inputs.into_iter().enumerate() {
+            let average = mean.logical_complex_value(plan.output_index(index));
+            let deviation =
+                Self::complex_reduction_add(value, (-average.0, -average.1), deviation_dtype);
+            if magnitude {
+                let square = if deviation_dtype == DType::Complex64 {
+                    let (re, im) = (deviation.0 as f32, deviation.1 as f32);
+                    f64::from(re * re + im * im)
+                } else {
+                    deviation.0 * deviation.0 + deviation.1 * deviation.1
+                };
+                values.push(square);
+            } else {
+                let square =
+                    Self::complex_reduction_multiply(deviation, deviation, deviation_dtype);
+                values.extend([square.0, square.1]);
+            }
+        }
+        let mut shape = self.complex_logical_shape("var")?;
+        let dtype = if magnitude {
+            if deviation_dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            }
+        } else {
+            shape.push(2);
+            deviation_dtype
+        };
+        Self::new(shape, values, dtype)
+    }
+
     /// Variance over an axis tuple with an explicit accumulator/result dtype.
     ///
     /// Only the reductions use `dtype`; deviations retain the promotion of
@@ -10586,48 +10812,7 @@ impl UFuncArray {
         };
         let plan = AxesReductionPlan::new(&logical_shape, axes, keepdims)?;
         let mean = self.reduce_mean_axes_with_dtype(axes, true, dtype)?;
-        let squared = if self.dtype.is_complex() || dtype.is_complex() {
-            let deviation_dtype = promote(self.dtype, dtype);
-            let inputs = self.complex_reduction_values(deviation_dtype)?;
-            let magnitude = self.dtype.is_complex() || self.dtype == DType::Bool;
-            let mut values = Vec::with_capacity(if magnitude {
-                inputs.len()
-            } else {
-                inputs.len().saturating_mul(2)
-            });
-            for (index, value) in inputs.into_iter().enumerate() {
-                let average = mean.logical_complex_value(plan.output_index(index));
-                let deviation =
-                    Self::complex_reduction_add(value, (-average.0, -average.1), deviation_dtype);
-                if magnitude {
-                    let square = if deviation_dtype == DType::Complex64 {
-                        let (re, im) = (deviation.0 as f32, deviation.1 as f32);
-                        f64::from(re * re + im * im)
-                    } else {
-                        deviation.0 * deviation.0 + deviation.1 * deviation.1
-                    };
-                    values.push(square);
-                } else {
-                    let square =
-                        Self::complex_reduction_multiply(deviation, deviation, deviation_dtype);
-                    values.extend([square.0, square.1]);
-                }
-            }
-            let mut shape = logical_shape;
-            let squared_dtype = if magnitude {
-                if deviation_dtype == DType::Complex64 {
-                    DType::F32
-                } else {
-                    DType::F64
-                }
-            } else {
-                shape.push(2);
-                deviation_dtype
-            };
-            Self::new(shape, values, squared_dtype)?
-        } else {
-            self.squared_real_reduction_deviations(&mean)?
-        };
+        let squared = self.squared_statistical_reduction_deviations(&mean, &plan)?;
         squared
             .reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
             .divide_complex_reduction_by_count(count.saturating_sub(ddof))
