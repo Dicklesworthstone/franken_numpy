@@ -36572,6 +36572,110 @@ impl UFuncArray {
         })
     }
 
+    /// NaN-aware sum with joint axes, a Boolean `where` mask, an accumulator
+    /// dtype, and a typed scalar initial value. NaN elements become zero
+    /// before casting, while retaining their positions in the reduction tree.
+    pub fn nansum_with_options(&self, options: ReductionOptions<'_>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(0.0)?
+                .reduce_sum_with_options(options);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_sum_with_options(options);
+        }
+        self.nan_filtered_fill(0.0).reduce_sum_with_options(options)
+    }
+
+    /// NaN-aware product with the combined controls in [`ReductionOptions`].
+    /// Either NaN component replaces a complete complex element with `1 + 0j`.
+    /// The initial value participates in the arithmetic and is never filtered.
+    pub fn nanprod_with_options(&self, options: ReductionOptions<'_>) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            return self
+                .complex_nan_filtered_fill(1.0)?
+                .reduce_prod_with_options(options);
+        }
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_prod_with_options(options);
+        }
+        self.nan_filtered_fill(1.0)
+            .reduce_prod_with_options(options)
+    }
+
+    /// NaN-aware mean with joint axes, an accumulator dtype, and a `where` mask.
+    /// Each output divides by its own selected non-NaN count. NaNs remain zero
+    /// in the sum rather than splitting a selected run, preserving rounding.
+    /// Unlike ordinary mean, a default float16 nanmean accumulates in float16.
+    pub fn nanmean_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_mean_with_options(options);
+        }
+        let dtype = options.dtype.unwrap_or(self.dtype);
+        self.validate_nan_statistical_dtype(dtype, "nanmean")?;
+        let (axes, _, counts) = self.nan_statistical_selection_plan(options, dtype, "nanmean")?;
+        Ok(self
+            .nansum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: options.keepdims,
+                dtype: Some(dtype),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_nan_reduction_by_counts(&counts, None))
+    }
+
+    /// NaN-aware variance with combined statistical reduction controls.
+    /// Counts intersect `where` with the complete logical element's NaN mask;
+    /// the two sums keep source-precision deviations and zero-filled NaNs.
+    /// A lane with no positive degrees of freedom produces NaN, including
+    /// when its squared-deviation sum is nonzero or infinite.
+    pub fn nanvar_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_integer() || self.dtype == DType::Bool {
+            return self.reduce_var_with_options(options, ddof);
+        }
+        let dtype = options.dtype.unwrap_or(self.dtype);
+        self.validate_nan_statistical_dtype(dtype, "nanvar")?;
+        let (axes, plan, counts) = self.nan_statistical_selection_plan(options, dtype, "nanvar")?;
+        let mean = self
+            .nansum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: true,
+                dtype: Some(dtype),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_nan_reduction_by_counts(&counts, None);
+        let squared =
+            self.squared_nan_reduction_deviations(&mean, |index| plan.output_index(index))?;
+        Ok(squared
+            .reduce_sum_with_options(ReductionOptions {
+                axes: Some(&axes),
+                keepdims: options.keepdims,
+                dtype: Some(options.dtype.unwrap_or(squared.dtype)),
+                where_mask: options.where_mask,
+                initial: None,
+            })?
+            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+    }
+
+    /// NaN-aware standard deviation with combined statistical controls.
+    pub fn nanstd_with_options(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        self.nanvar_with_options(options, ddof)?
+            .sqrt_statistical_reduction()
+    }
+
     /// Sum ignoring NaNs over a tuple of logical axes.
     ///
     /// All selected axes share NumPy's C-order reduction tree. Masked values
@@ -37951,6 +38055,31 @@ impl UFuncArray {
             .into_iter()
             .map(|count| count as usize)
             .collect())
+    }
+
+    fn nan_statistical_selection_plan(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        dtype: DType,
+        operation: &str,
+    ) -> Result<(Vec<isize>, AxesReductionPlan, Vec<usize>), UFuncError> {
+        let (axes, plan, mut counts) =
+            self.statistical_selection_plan(options, dtype, operation)?;
+        let shape = self.complex_logical_shape(operation)?;
+        let mask = options
+            .where_mask
+            .map(|mask| normalize_reduction_where_mask(mask, &shape))
+            .transpose()?;
+        let components = if self.dtype.is_complex() { 2 } else { 1 };
+        for index in 0..self.values.len() / components {
+            let (real, imag) = self.logical_complex_value(index);
+            if (real.is_nan() || imag.is_nan())
+                && mask.as_ref().is_none_or(|mask| mask.values[index] != 0.0)
+            {
+                counts[plan.output_index(index)] -= 1;
+            }
+        }
+        Ok((axes, plan, counts))
     }
 
     fn nan_reduction_counts_axes(&self, plan: &AxesReductionPlan) -> Vec<usize> {

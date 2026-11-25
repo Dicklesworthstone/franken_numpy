@@ -1,7 +1,9 @@
 //! Statistical reductions combine logical axes, typed accumulators, and masks.
 
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{FloatErrorMode, StatisticalReductionOptions, UFuncArray, UFuncError, errstate};
+use fnp_ufunc::{
+    FloatErrorMode, ReductionOptions, StatisticalReductionOptions, UFuncArray, UFuncError, errstate,
+};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
 
@@ -60,6 +62,9 @@ fn reduce(
         ("mean", _) => array.reduce_mean_with_options(options),
         ("var", ddof) => array.reduce_var_with_options(options, ddof),
         ("std", ddof) => array.reduce_std_with_options(options, ddof),
+        ("nanmean", _) => array.nanmean_with_options(options),
+        ("nanvar", ddof) => array.nanvar_with_options(options, ddof),
+        ("nanstd", ddof) => array.nanstd_with_options(options, ddof),
         _ => panic!("unknown statistics fixture operation: {operation:?}"),
     }
 }
@@ -112,6 +117,30 @@ impl OracleBatch {
         self.actual.push(reduce(array, operation, options));
     }
 
+    fn push_arithmetic(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        operation: &str,
+        options: ReductionOptions<'_>,
+        auxiliary: (Option<usize>, Option<usize>),
+    ) {
+        let (mask, initial) = auxiliary;
+        assert_eq!(mask.is_some(), options.where_mask.is_some());
+        assert_eq!(initial.is_some(), options.initial.is_some());
+        self.cases.push(json!({
+            "input": input, "op": operation, "axes": options.axes,
+            "keepdims": options.keepdims, "dtype": options.dtype.map(dtype_name),
+            "mask": mask, "initial": initial,
+        }));
+        let _errors = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        self.actual.push(match operation {
+            "nansum" => array.nansum_with_options(options),
+            "nanprod" => array.nanprod_with_options(options),
+            _ => panic!("unknown NaN arithmetic fixture operation: {operation}"),
+        });
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -140,7 +169,9 @@ for case in payload['cases']:
         kw['dtype'] = case['dtype']
     if case['mask'] is not None:
         kw['where'] = inputs[case['mask']]
-    if case['op'] != 'mean':
+    if case.get('initial') is not None:
+        kw['initial'] = inputs[case['initial']]
+    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
         result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
@@ -181,6 +212,12 @@ print(json.dumps(rows))
         );
         let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(expected.len(), self.actual.len());
+        let case_count = expected.len();
+        let nan_case_count = self
+            .cases
+            .iter()
+            .filter(|case| case["op"].as_str().is_some_and(|op| op.starts_with("nan")))
+            .count();
         for ((case, actual), expected) in self.cases.iter().zip(self.actual).zip(expected) {
             if expected["error"] == "AxisError" {
                 assert!(
@@ -237,6 +274,10 @@ print(json.dumps(rows))
                 }
             }
         }
+        eprintln!(
+            "NUMPY_REDUCTION_ORACLE verified_cases={case_count} nan_cases={nan_case_count} test={}",
+            std::thread::current().name().unwrap_or("unnamed")
+        );
     }
 }
 
@@ -446,7 +487,14 @@ fn masked_statistics_retain_exact_integer_sources_before_conversion() {
         ] {
             for (&mask_id, mask) in mask_ids.iter().zip(&masks) {
                 for axes in [None, Some(&[0][..]), Some(&[1][..]), Some(&[][..])] {
-                    for operation in [("mean", 0), ("var", 0), ("std", 1)] {
+                    for operation in [
+                        ("mean", 0),
+                        ("var", 0),
+                        ("std", 1),
+                        ("nanmean", 0),
+                        ("nanvar", 0),
+                        ("nanstd", 1),
+                    ] {
                         batch.push(
                             input,
                             &array,
@@ -593,6 +641,12 @@ fn masked_statistics_exclude_nonfinite_values_without_changing_ddof_rules() {
                             ("var", 9),
                             ("std", 0),
                             ("std", 2),
+                            ("nanmean", 0),
+                            ("nanvar", 0),
+                            ("nanvar", 2),
+                            ("nanvar", 9),
+                            ("nanstd", 0),
+                            ("nanstd", 2),
                         ] {
                             batch.push(
                                 input,
@@ -648,7 +702,14 @@ fn masked_statistics_empty_scalar_and_invalid_axes_match_numpy() {
                     Some(&[6][..]),
                 ] {
                     for keepdims in [false, true] {
-                        for operation in [("mean", 0), ("var", 0), ("std", 1)] {
+                        for operation in [
+                            ("mean", 0),
+                            ("var", 0),
+                            ("std", 1),
+                            ("nanmean", 0),
+                            ("nanvar", 0),
+                            ("nanstd", 1),
+                        ] {
                             batch.push(
                                 input,
                                 &array,
@@ -660,6 +721,20 @@ fn masked_statistics_empty_scalar_and_invalid_axes_match_numpy() {
                                     where_mask: Some(mask),
                                 },
                                 Some(mask_id),
+                            );
+                        }
+                        for operation in ["nansum", "nanprod"] {
+                            batch.push_arithmetic(
+                                input,
+                                &array,
+                                operation,
+                                ReductionOptions {
+                                    axes,
+                                    keepdims,
+                                    where_mask: Some(mask),
+                                    ..Default::default()
+                                },
+                                (Some(mask_id), None),
                             );
                         }
                     }
@@ -685,7 +760,14 @@ fn masked_statistics_reject_nonboolean_and_nonbroadcast_masks() {
     for mask in masks {
         let mask_id = batch.add_input(&mask);
         for axes in [None, Some(&[1][..]), Some(&[][..])] {
-            for operation in [("mean", 0), ("var", 0), ("std", 0)] {
+            for operation in [
+                ("mean", 0),
+                ("var", 0),
+                ("std", 0),
+                ("nanmean", 0),
+                ("nanvar", 0),
+                ("nanstd", 0),
+            ] {
                 batch.push(
                     input,
                     &array,
@@ -698,6 +780,19 @@ fn masked_statistics_reject_nonboolean_and_nonbroadcast_masks() {
                     Some(mask_id),
                 );
             }
+            for operation in ["nansum", "nanprod"] {
+                batch.push_arithmetic(
+                    input,
+                    &array,
+                    operation,
+                    ReductionOptions {
+                        axes,
+                        where_mask: Some(&mask),
+                        ..Default::default()
+                    },
+                    (Some(mask_id), None),
+                );
+            }
         }
     }
     batch.assert_matches_numpy();
@@ -707,7 +802,14 @@ fn masked_statistics_reject_nonboolean_and_nonbroadcast_masks() {
 fn masked_statistics_validate_complex_layout_and_impossible_output_sizes() {
     let mask = boolean(&[], &[true]);
     let malformed = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::Complex128).unwrap();
-    for operation in [("mean", 0), ("var", 0), ("std", 0)] {
+    for operation in [
+        ("mean", 0),
+        ("var", 0),
+        ("std", 0),
+        ("nanmean", 0),
+        ("nanvar", 0),
+        ("nanstd", 0),
+    ] {
         assert!(
             reduce(
                 &malformed,
@@ -726,7 +828,14 @@ fn masked_statistics_validate_complex_layout_and_impossible_output_sizes() {
         } else {
             UFuncArray::new(vec![usize::MAX, 0, 3], vec![], dtype).unwrap()
         };
-        for operation in [("mean", 0), ("var", 0), ("std", 0)] {
+        for operation in [
+            ("mean", 0),
+            ("var", 0),
+            ("std", 0),
+            ("nanmean", 0),
+            ("nanvar", 0),
+            ("nanstd", 0),
+        ] {
             assert!(
                 reduce(
                     &array,
@@ -750,7 +859,7 @@ fn masked_statistics_validate_complex_layout_and_impossible_output_sizes() {
             )
             .unwrap();
             assert!(empty.values().is_empty());
-            let expected = if dtype.is_complex() && operation.0 == "mean" {
+            let expected = if dtype.is_complex() && matches!(operation.0, "mean" | "nanmean") {
                 vec![0, 3, 2]
             } else {
                 vec![0, 3]
@@ -758,4 +867,291 @@ fn masked_statistics_validate_complex_layout_and_impossible_output_sizes() {
             assert_eq!(empty.shape(), expected);
         }
     }
+}
+
+#[test]
+fn nan_statistics_combine_valid_counts_masks_and_accumulator_dtypes() {
+    let mut batch = OracleBatch::default();
+    let masks = [
+        boolean(&[], &[true]),
+        boolean(&[], &[false]),
+        boolean(&[4], &[true, false, true, true]),
+        boolean(&[1, 3, 1], &[true, false, true]),
+        boolean(
+            &[2, 1, 4],
+            &[true, false, true, false, false, true, true, true],
+        ),
+    ];
+    let mask_ids: Vec<usize> = masks.iter().map(|mask| batch.add_input(mask)).collect();
+    for source_dtype in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let parts: Vec<(f64, f64)> = (0..24)
+            .map(|index| {
+                let real = if index % 7 == 0 {
+                    f64::NAN
+                } else {
+                    (index % 9) as f64 * 1.00000003 - 4.0
+                };
+                let imag = if index % 5 == 0 {
+                    f64::NAN
+                } else {
+                    (index % 5) as f64 - 2.0
+                };
+                (real, imag)
+            })
+            .collect();
+        let array = if source_dtype.is_complex() {
+            complex(&[2, 3, 4], &parts, source_dtype)
+        } else {
+            UFuncArray::new(
+                vec![2, 3, 4],
+                parts.iter().map(|value| value.0).collect(),
+                source_dtype,
+            )
+            .unwrap()
+        };
+        let input = batch.add_input(&array);
+        for dtype in [
+            None,
+            Some(DType::F16),
+            Some(DType::F32),
+            Some(DType::F64),
+            Some(DType::Complex64),
+            Some(DType::Complex128),
+            Some(DType::I64),
+            Some(DType::Bool),
+        ] {
+            for (&mask_id, mask) in mask_ids.iter().zip(&masks) {
+                for axes in [
+                    None,
+                    Some(&[][..]),
+                    Some(&[0][..]),
+                    Some(&[1][..]),
+                    Some(&[2][..]),
+                    Some(&[2, 0][..]),
+                    Some(&[-3, -1][..]),
+                ] {
+                    for keepdims in [false, true] {
+                        for operation in
+                            [("nanmean", 0), ("nanvar", 0), ("nanvar", 2), ("nanstd", 1)]
+                        {
+                            batch.push(
+                                input,
+                                &array,
+                                operation,
+                                StatisticalReductionOptions {
+                                    axes,
+                                    keepdims,
+                                    dtype,
+                                    where_mask: Some(mask),
+                                },
+                                Some(mask_id),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_statistics_keep_nan_slots_in_selected_runs_and_conversion_buffers() {
+    let mut batch = OracleBatch::default();
+    for width in [129, 8193] {
+        let mask = boolean(
+            &[1, width],
+            &(0..width)
+                .map(|index| !matches!(index % 137, 7 | 8 | 126 | 127 | 128))
+                .collect::<Vec<_>>(),
+        );
+        let mask_id = batch.add_input(&mask);
+        for (source, large) in [
+            (DType::F16, 16.0),
+            (DType::F32, 16_777_216.0),
+            (DType::F64, 1.0e16),
+            (DType::Complex64, 16_777_216.0),
+        ] {
+            let parts: Vec<(f64, f64)> = (0..2 * width)
+                .map(|index| {
+                    let real = match index % 11 {
+                        0 => large,
+                        1 => f64::NAN,
+                        2 => 1.0,
+                        3 => -large,
+                        4 => -0.0,
+                        _ => 0.125,
+                    };
+                    (
+                        real,
+                        if index % 17 == 0 {
+                            f64::NAN
+                        } else {
+                            (index % 5) as f64 - 2.0
+                        },
+                    )
+                })
+                .collect();
+            let array = if source.is_complex() {
+                complex(&[2, width], &parts, source)
+            } else {
+                UFuncArray::new(
+                    vec![2, width],
+                    parts.iter().map(|value| value.0).collect(),
+                    source,
+                )
+                .unwrap()
+            };
+            let input = batch.add_input(&array);
+            for dtype in [None, Some(DType::F64)] {
+                for axes in [None, Some(&[0][..]), Some(&[1][..]), Some(&[1, 0][..])] {
+                    for (mask, mask_id) in [(None, None), (Some(&mask), Some(mask_id))] {
+                        for operation in [("nanmean", 0), ("nanvar", 0), ("nanstd", 1)] {
+                            batch.push(
+                                input,
+                                &array,
+                                operation,
+                                StatisticalReductionOptions {
+                                    axes,
+                                    keepdims: false,
+                                    dtype,
+                                    where_mask: mask,
+                                },
+                                mask_id,
+                            );
+                        }
+                        batch.push_arithmetic(
+                            input,
+                            &array,
+                            "nansum",
+                            ReductionOptions {
+                                axes,
+                                dtype,
+                                where_mask: mask,
+                                ..Default::default()
+                            },
+                            (mask_id, None),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_arithmetic_combines_typed_initials_masks_and_joint_axes() {
+    let mut batch = OracleBatch::default();
+    let masks = [
+        boolean(&[], &[false]),
+        boolean(&[4], &[true, false, true, true]),
+        boolean(&[2, 1], &[false, true]),
+    ];
+    let mask_ids: Vec<usize> = masks.iter().map(|mask| batch.add_input(mask)).collect();
+    let initials = [
+        UFuncArray::from_storage(vec![], ArrayStorage::U64(vec![(1_u64 << 53) + 3])).unwrap(),
+        UFuncArray::scalar(-0.0, DType::F64),
+        complex(&[], &[(1.25, -2.5)], DType::Complex128),
+        UFuncArray::scalar(f64::NAN, DType::F64),
+    ];
+    let initial_ids: Vec<usize> = initials
+        .iter()
+        .map(|initial| batch.add_input(initial))
+        .collect();
+    let mut arrays = vec![
+        UFuncArray::from_storage(
+            vec![2, 4],
+            ArrayStorage::I64(vec![(1_i64 << 53) + 1, 3, -7, 1, 2, i64::MAX, 0, -1]),
+        )
+        .unwrap(),
+        UFuncArray::from_storage(
+            vec![2, 4],
+            ArrayStorage::U64(vec![(1_u64 << 53) + 1, 3, u64::MAX, 1, 2, 5, 0, 7]),
+        )
+        .unwrap(),
+    ];
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        arrays.push(
+            UFuncArray::new(
+                vec![2, 4],
+                vec![1.0003, f64::NAN, -3.0, -0.0, 2.0, 0.5, f64::NAN, 4.0],
+                dtype,
+            )
+            .unwrap(),
+        );
+    }
+    for dtype in [DType::Complex64, DType::Complex128] {
+        arrays.push(complex(
+            &[2, 4],
+            &[
+                (1.00000003, 2.0),
+                (f64::NAN, 7.0),
+                (-3.0, 2.5),
+                (-0.0, -0.0),
+                (2.0, f64::NAN),
+                (0.5, -1.5),
+                (f64::NAN, f64::NAN),
+                (4.0, 1.0),
+            ],
+            dtype,
+        ));
+    }
+    for array in arrays {
+        let input = batch.add_input(&array);
+        for dtype in [
+            None,
+            Some(DType::Bool),
+            Some(DType::I8),
+            Some(DType::I64),
+            Some(DType::U64),
+            Some(DType::F16),
+            Some(DType::F32),
+            Some(DType::F64),
+            Some(DType::Complex64),
+            Some(DType::Complex128),
+        ] {
+            for (&mask_id, mask) in mask_ids.iter().zip(&masks) {
+                for axes in [
+                    None,
+                    Some(&[][..]),
+                    Some(&[0][..]),
+                    Some(&[1][..]),
+                    Some(&[-1, -2][..]),
+                ] {
+                    for keepdims in [false, true] {
+                        for (initial, initial_id) in std::iter::once((None, None)).chain(
+                            initials
+                                .iter()
+                                .zip(&initial_ids)
+                                .map(|(initial, &id)| (Some(initial), Some(id))),
+                        ) {
+                            for operation in ["nansum", "nanprod"] {
+                                batch.push_arithmetic(
+                                    input,
+                                    &array,
+                                    operation,
+                                    ReductionOptions {
+                                        axes,
+                                        keepdims,
+                                        dtype,
+                                        where_mask: Some(mask),
+                                        initial,
+                                    },
+                                    (Some(mask_id), initial_id),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
