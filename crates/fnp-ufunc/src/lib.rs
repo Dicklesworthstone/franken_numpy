@@ -352,6 +352,7 @@ pub fn errstate(
 ) -> FloatErrorStateGuard {
     FloatErrorStateGuard {
         previous: seterr(all, divide, over, under, invalid),
+        _thread_bound: std::marker::PhantomData,
     }
 }
 
@@ -359,9 +360,26 @@ pub fn take_float_error_events() -> Vec<FloatErrorEvent> {
     FLOAT_ERROR_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }
 
+/// Restores the creating thread's floating-point error policy when dropped.
+///
+/// The guard must stay on that thread: transferring it would restore a different
+/// thread's policy and leave the original thread's temporary policy in place.
+///
+/// ```compile_fail
+/// let guard = fnp_ufunc::errstate(None, None, None, None, None);
+/// std::thread::spawn(move || drop(guard));
+/// ```
+///
+/// The guard also cannot be shared across threads.
+///
+/// ```compile_fail
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<fnp_ufunc::FloatErrorStateGuard>();
+/// ```
 #[must_use = "hold the guard for the scope where the floating-point error state should apply"]
 pub struct FloatErrorStateGuard {
     previous: FloatErrorState,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl Drop for FloatErrorStateGuard {
@@ -478,14 +496,12 @@ fn dispatch_float_error_with_reporting(
             Ok(())
         }
         FloatErrorMode::Call => {
-            let mut handled = false;
-            FLOAT_ERROR_CALLBACK.with(|slot| {
-                if let Some(callback) = slot.borrow().clone() {
-                    callback(event.clone());
-                    handled = true;
-                }
-            });
-            if !handled {
+            // Release the thread-local borrow before running user code. A
+            // callback may replace or clear itself and dispatch another error.
+            let callback = FLOAT_ERROR_CALLBACK.with(|slot| slot.borrow().clone());
+            if let Some(callback) = callback {
+                callback(event);
+            } else {
                 report(event);
             }
             Ok(())
@@ -58608,6 +58624,137 @@ print(json.dumps(payload))
         assert_eq!(events[0].kind, FloatErrorKind::Divide);
         assert_eq!(events[0].mode, FloatErrorMode::Call);
         assert_eq!(events[0].op, "divide");
+    }
+
+    #[test]
+    fn seterr_call_can_replace_itself_before_nested_dispatch() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let replacement_sink = Arc::clone(&sink);
+        let replacement: super::FloatErrorCallback = Arc::new(move |event| {
+            replacement_sink.lock().expect("replacement sink").push((
+                "replacement",
+                event.kind,
+                event.op,
+            ));
+        });
+        let callback_sink = Arc::clone(&sink);
+        let previous_callback = seterrcall(Some(Arc::new(move |event| {
+            callback_sink
+                .lock()
+                .expect("callback sink")
+                .push(("first", event.kind, event.op));
+            let _ = seterrcall(Some(Arc::clone(&replacement)));
+            let source =
+                UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).expect("cast source");
+            source
+                .astype_with_casting(DType::I32, "unsafe")
+                .expect("nested cast should call the replacement");
+        })));
+        take_float_error_events();
+
+        // Restore the caller's callback even when this regression panics.
+        let outcome = std::panic::catch_unwind(|| {
+            let _guard = errstate(Some(FloatErrorMode::Call), None, None, None, None);
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("first divide should call the original handler");
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("later divides should call the replacement");
+        });
+        let _ = seterrcall(previous_callback);
+        outcome.expect("callbacks must be able to replace themselves");
+
+        assert_eq!(
+            *sink.lock().expect("sink"),
+            vec![
+                ("first", FloatErrorKind::Divide, "divide"),
+                ("replacement", FloatErrorKind::Invalid, "cast"),
+                ("replacement", FloatErrorKind::Divide, "divide"),
+            ]
+        );
+        assert!(take_float_error_events().is_empty());
+    }
+
+    #[test]
+    fn seterr_call_can_unregister_itself_before_nested_dispatch() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let callback_sink = Arc::clone(&sink);
+        let previous_callback = seterrcall(Some(Arc::new(move |event| {
+            callback_sink.lock().expect("callback sink").push(event);
+            let _ = seterrcall(None);
+            let source =
+                UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).expect("cast source");
+            source
+                .astype_with_casting(DType::I32, "unsafe")
+                .expect("nested cast should use the unhandled-event queue");
+        })));
+        take_float_error_events();
+
+        let outcome = std::panic::catch_unwind(|| {
+            let _guard = errstate(Some(FloatErrorMode::Call), None, None, None, None);
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("divide should call the handler once");
+            rhs.try_elementwise_unary(UnaryOp::Reciprocal)
+                .expect("subsequent errors should use the unhandled-event queue");
+        });
+        let _ = seterrcall(previous_callback);
+        outcome.expect("callbacks must be able to unregister themselves");
+
+        let callbacks = sink.lock().expect("sink");
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].kind, FloatErrorKind::Divide);
+        assert_eq!(callbacks[0].op, "divide");
+        let events = take_float_error_events();
+        assert!(events.iter().all(|event| event.mode == FloatErrorMode::Call));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.kind, event.op))
+                .collect::<Vec<_>>(),
+            vec![
+                (FloatErrorKind::Invalid, "cast"),
+                (FloatErrorKind::Divide, "reciprocal"),
+            ]
+        );
+    }
+
+    #[test]
+    fn errstate_nested_scopes_restore_independently_in_each_thread() {
+        let original = geterr();
+        {
+            let _caller_guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            let caller_state = geterr();
+            std::thread::spawn(|| {
+                let original = geterr();
+                assert_eq!(original, super::FloatErrorState::default());
+                {
+                    let _outer = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+                    let outer_state = geterr();
+                    {
+                        let _inner = errstate(
+                            None,
+                            Some(FloatErrorMode::Call),
+                            None,
+                            None,
+                            Some(FloatErrorMode::Raise),
+                        );
+                        assert_eq!(geterr().divide, FloatErrorMode::Call);
+                        assert_eq!(geterr().invalid, FloatErrorMode::Raise);
+                        assert_eq!(geterr().over, FloatErrorMode::Ignore);
+                        assert_eq!(geterr().under, FloatErrorMode::Ignore);
+                    }
+                    assert_eq!(geterr(), outer_state);
+                }
+                assert_eq!(geterr(), original);
+            })
+            .join()
+            .expect("thread-local error state should restore");
+            assert_eq!(geterr(), caller_state);
+        }
+        assert_eq!(geterr(), original);
     }
 
     #[test]
