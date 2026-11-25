@@ -1,9 +1,202 @@
-//! Logical complex-element accumulation, including NumPy's first-element rule.
+//! Cumulative and segmented reductions, including NumPy's first-element rule.
 
 use fnp_dtype::DType;
 use fnp_ufunc::{UFuncArray, UFuncError};
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
+
+#[test]
+fn generic_accumulate_copies_the_first_value_without_calling_the_operation() {
+    for value in [-0.0, f64::INFINITY, f64::from_bits(0xfff8_1234_5678_9abc)] {
+        let array = UFuncArray::new(vec![], vec![value], DType::F64).unwrap();
+        let result = array.accumulate(|_, _| panic!("singleton must not call op"), 0.0);
+        assert_eq!(result.shape(), &[1]);
+        assert_eq!(result.values()[0].to_bits(), value.to_bits());
+    }
+    let array = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = array.accumulate(
+        |accumulator, value| {
+            calls.set(calls.get() + 1);
+            accumulator - value
+        },
+        0.0,
+    );
+    assert_eq!(result.values(), &[1.0, -1.0, -4.0]);
+    assert_eq!(calls.get(), 2);
+    let empty = UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap();
+    let result = empty.accumulate(|_, _| panic!("empty input must not call op"), 0.0);
+    assert_eq!(result.shape(), &[0]);
+    assert!(result.values().is_empty());
+}
+
+#[test]
+fn generic_reduceat_checks_all_indices_before_calling_the_operation() {
+    let array = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+    for indices in [&[4][..], &[0, 2, 4], &[usize::MAX]] {
+        let calls = std::cell::Cell::new(0);
+        let result = array.reduceat(
+            |accumulator, value| {
+                calls.set(calls.get() + 1);
+                accumulator + value
+            },
+            indices,
+            0.0,
+        );
+        let error = result.expect_err("every out-of-bounds index must be rejected");
+        assert!(error.to_string().contains("out of bounds"));
+        assert_eq!(calls.get(), 0, "{indices:?}");
+    }
+    let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+    assert!(
+        empty
+            .reduceat(|_, _| panic!("invalid index"), &[0], 0.0)
+            .is_err()
+    );
+    for array in [&empty, &array] {
+        let result = array
+            .reduceat(|_, _| panic!("empty indices must not call op"), &[], 0.0)
+            .unwrap();
+        assert_eq!(result.shape(), &[0]);
+        assert!(result.values().is_empty());
+    }
+}
+
+#[test]
+fn generic_reduceat_copies_repeated_and_decreasing_singletons_bit_exactly() {
+    let payload = f64::from_bits(0x7ff8_1234_5678_9abc);
+    let array = UFuncArray::new(vec![3], vec![1.0, -0.0, payload], DType::F64).unwrap();
+    let result = array
+        .reduceat(
+            |_, _| panic!("singleton intervals must not call op"),
+            &[2, 1, 1, 2],
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(result.shape(), &[4]);
+    assert_eq!(
+        result
+            .values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        [
+            payload.to_bits(),
+            (-0.0_f64).to_bits(),
+            (-0.0_f64).to_bits(),
+            payload.to_bits()
+        ]
+    );
+}
+
+#[test]
+fn generic_accumulate_and_reduceat_match_live_numpy() {
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for (shape, values) in [
+        (vec![4], vec![3.0, 6.0, 2.0, 4.0]),
+        (vec![2, 2], vec![-0.0, 2.0, -4.0, 0.5]),
+        (vec![], vec![-0.0]),
+        (vec![1], vec![f64::INFINITY]),
+        (vec![0, 2], vec![]),
+    ] {
+        let array = UFuncArray::new(shape.clone(), values.clone(), DType::F64).unwrap();
+        for operation in ["add", "multiply", "subtract", "divide"] {
+            let identity = if matches!(operation, "multiply" | "divide") {
+                1.0
+            } else {
+                0.0
+            };
+            let op = |left, right| match operation {
+                "add" => left + right,
+                "multiply" => left * right,
+                "subtract" => left - right,
+                "divide" => left / right,
+                _ => unreachable!(),
+            };
+            let input: Vec<String> = values.iter().map(f64::to_string).collect();
+            cases.push(json!({"shape": shape, "values": input, "op": operation,
+                              "method": "accumulate", "indices": []}));
+            actual.push(Ok(array.accumulate(op, identity)));
+            for indices in [
+                vec![],
+                vec![0],
+                vec![1, 0],
+                vec![1, 1],
+                vec![0, 1, 2],
+                vec![2, 0, 2, 1],
+                vec![values.len()],
+                vec![0, values.len()],
+                vec![usize::MAX],
+            ] {
+                cases.push(json!({"shape": shape, "values": input, "op": operation,
+                                  "method": "reduceat", "indices": indices}));
+                actual.push(array.reduceat(op, &indices, identity));
+            }
+        }
+    }
+    let script = r#"
+import json, sys
+import numpy as np
+
+np.seterr(all='ignore')
+rows = []
+for case in json.load(sys.stdin):
+    array = np.array([float(value) for value in case['values']], dtype=np.float64)
+    array = array.reshape(case['shape']).ravel()
+    operation = getattr(np, case['op'])
+    try:
+        if case['method'] == 'accumulate':
+            result = operation.accumulate(array)
+        else:
+            result = operation.reduceat(array, case['indices'])
+        rows.append(dict(shape=list(result.shape), bits=result.view(np.uint64).tolist()))
+    except (ValueError, TypeError, IndexError, OverflowError) as error:
+        rows.append(dict(error=type(error).__name__))
+print(json.dumps(rows))
+"#;
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let mut child = Command::new(python)
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch NumPy generic reduction oracle");
+    let mut stdin = child.stdin.take().unwrap();
+    serde_json::to_writer(&mut stdin, &cases).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(expected.len(), actual.len());
+    for ((case, actual), expected) in cases.iter().zip(actual).zip(expected) {
+        if expected.get("error").is_some() {
+            assert!(
+                actual.is_err(),
+                "{case}: expected {expected}, got {actual:?}"
+            );
+            continue;
+        }
+        let actual = actual.unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(json!(actual.shape()), expected["shape"], "{case}");
+        assert_eq!(actual.dtype(), DType::F64, "{case}");
+        let bits = expected["bits"].as_array().unwrap();
+        assert_eq!(actual.values().len(), bits.len(), "{case}");
+        for (&actual, expected) in actual.values().iter().zip(bits) {
+            let expected = f64::from_bits(expected.as_u64().unwrap());
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "{case}: got {actual}, expected NaN");
+            } else {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "{case}");
+            }
+        }
+    }
+}
 
 fn complex_array(shape: &[usize], values: &[(f64, f64)], dtype: DType) -> UFuncArray {
     let mut physical_shape = shape.to_vec();

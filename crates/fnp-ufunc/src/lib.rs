@@ -11923,11 +11923,13 @@ impl UFuncArray {
         }
     }
 
-    /// General accumulate: applies a binary function cumulatively along axis=0 of the
-    /// flattened array (np.ufunc.accumulate).
-    /// `op` maps `(accumulator, element) -> new_accumulator`.
-    /// `identity` is the starting value (e.g. 0.0 for add, 1.0 for multiply).
-    pub fn accumulate<F: Fn(f64, f64) -> f64>(&self, op: F, identity: f64) -> Self {
+    /// Apply a binary function cumulatively to the flattened f64 value plane.
+    ///
+    /// Like `np.ufunc.accumulate`, the first output copies the first input;
+    /// `op` is called only for subsequent elements. The algebraic `identity`
+    /// argument is not combined with that seed, preserving singleton values
+    /// and the first element's signed zero even for operations without an identity.
+    pub fn accumulate<F: Fn(f64, f64) -> f64>(&self, op: F, _identity: f64) -> Self {
         if self.values.is_empty() {
             return Self {
                 shape: vec![0],
@@ -11936,15 +11938,13 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
-        let mut acc = identity;
-        let values: Vec<f64> = self
-            .values
-            .iter()
-            .map(|&v| {
-                acc = op(acc, v);
-                acc
-            })
-            .collect();
+        let mut acc = self.values[0];
+        let mut values = Vec::with_capacity(self.values.len());
+        values.push(acc);
+        for &value in &self.values[1..] {
+            acc = op(acc, value);
+            values.push(acc);
+        }
         Self {
             shape: vec![values.len()],
             values,
@@ -11953,16 +11953,18 @@ impl UFuncArray {
         }
     }
 
-    /// General reduceat: applies a binary reduction over sub-intervals of the flattened
-    /// array defined by `indices` (np.ufunc.reduceat).
-    /// For each pair `(indices[i], indices[i+1])`, reduces `values[indices[i]..indices[i+1]]`.
-    /// The last interval runs from `indices[last]` to the end.
-    /// `identity` is the identity element for empty intervals.
+    /// Reduce intervals of the flattened f64 value plane (`np.ufunc.reduceat`).
+    ///
+    /// Each increasing pair of indices defines a half-open interval; the last
+    /// interval runs to the end. Repeated or decreasing indices copy the value
+    /// at the starting index. Every interval is seeded from its first value,
+    /// so the algebraic `identity` argument is not applied. All indices must
+    /// be in bounds and are validated before calling `op`.
     pub fn reduceat<F: Fn(f64, f64) -> f64>(
         &self,
         op: F,
         indices: &[usize],
-        identity: f64,
+        _identity: f64,
     ) -> Result<Self, UFuncError> {
         if indices.is_empty() {
             return Ok(Self {
@@ -11973,6 +11975,11 @@ impl UFuncArray {
             });
         }
         let n = self.values.len();
+        if let Some(&index) = indices.iter().find(|&&index| index >= n) {
+            return Err(UFuncError::Msg(format!(
+                "reduceat: index {index} out of bounds for size {n}"
+            )));
+        }
         let mut results = Vec::with_capacity(indices.len());
         for (i, &start) in indices.iter().enumerate() {
             let end = if i + 1 < indices.len() {
@@ -11980,14 +11987,11 @@ impl UFuncArray {
             } else {
                 n
             };
-            if start >= n {
-                results.push(identity);
-            } else if start >= end {
-                // NumPy: when start >= end, result is values[start] with op(identity, values[start])
-                results.push(op(identity, self.values[start]));
+            if start >= end {
+                results.push(self.values[start]);
             } else {
                 let mut acc = self.values[start];
-                for &v in &self.values[start + 1..end.min(n)] {
+                for &v in &self.values[start + 1..end] {
                     acc = op(acc, v);
                 }
                 results.push(acc);
