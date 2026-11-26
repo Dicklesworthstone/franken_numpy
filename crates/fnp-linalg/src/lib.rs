@@ -7684,7 +7684,59 @@ fn hessenberg_francis_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize
     }
 }
 
-/// Compute eigenvalues of a symmetric NxN matrix via QR iteration.
+// The unscaled real Householder/QR kernels square their working entries, and
+// their null-reflector test has an absolute epsilon floor. Use the existing
+// locally scaled Hermitian solver when those operations can overflow or erase
+// a nonzero mode. A global normalization would discard independent tiny blocks.
+fn symmetric_eigen_needs_extended_range(a: &[f64], n: usize) -> bool {
+    let upper = f64::MAX.sqrt() / (4.0 * n as f64);
+    a.iter().any(|value| {
+        let magnitude = value.abs();
+        magnitude != 0.0 && (magnitude <= f64::EPSILON || magnitude > upper)
+    })
+}
+
+// QR exhausting its iteration budget is not a successful diagonalization.
+// Multiply before adding the two diagonal bounds so finite large diagonals
+// cannot turn every offdiagonal into an accepted deflation through overflow.
+fn symmetric_qr_converged(d: &[f64], e: &[f64]) -> bool {
+    d.len().checked_sub(1) == Some(e.len())
+        && d.iter().chain(e).all(|value| value.is_finite())
+        && e.iter().enumerate().all(|(i, value)| {
+            value.abs() <= f64::EPSILON * d[i].abs() + f64::EPSILON * d[i + 1].abs()
+        })
+}
+
+fn real_symmetric_jacobi(
+    a: &[f64],
+    n: usize,
+    compute_vectors: bool,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    let cells = a
+        .len()
+        .checked_mul(2)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "eigh: extended-range workspace size overflow",
+        ))?;
+    let mut complex = Vec::new();
+    complex.try_reserve_exact(cells).map_err(|_| {
+        LinAlgError::ShapeContractViolation("eigh: unable to allocate extended-range workspace")
+    })?;
+    for &value in a {
+        complex.extend_from_slice(&[value, 0.0]);
+    }
+    let (values, mut vectors) = complex_hermitian_jacobi(&complex, n, "L", compute_vectors, 64)?;
+    // Real inputs form an invariant subspace of the unitary Jacobi rotations.
+    // Compact the real components without another n-by-n allocation.
+    let real_len = vectors.len() / 2;
+    for i in 0..real_len {
+        vectors[i] = vectors[2 * i];
+    }
+    vectors.truncate(real_len);
+    Ok((values, vectors))
+}
+
+/// Compute eigenvalues of a symmetric NxN matrix.
 /// Returns eigenvalues in ascending order (NumPy convention).
 /// The matrix must be symmetric; behavior is undefined for non-symmetric input.
 pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
@@ -7697,20 +7749,26 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Err(LinAlgError::SpectralConvergenceFailed);
     }
 
-    Ok(eigvalsh_finite_nxn(a, n))
+    eigvalsh_finite_nxn(a, n)
 }
 
-fn eigvalsh_finite_nxn(a: &[f64], n: usize) -> Vec<f64> {
+fn eigvalsh_finite_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     debug_assert_eq!(Some(a.len()), n.checked_mul(n));
     debug_assert!(n > 0);
     debug_assert!(a.iter().all(|v| v.is_finite()));
 
+    if symmetric_eigen_needs_extended_range(a, n) {
+        return real_symmetric_jacobi(a, n, false).map(|(values, _)| values);
+    }
     let (mut d, mut e) =
         exact_symmetric_tridiagonal_values(a, n).unwrap_or_else(|| tridiag_reduce_values(a, n));
     tridiag_eigvals_qr(&mut d, &mut e, n);
+    if !symmetric_qr_converged(&d, &e) {
+        return real_symmetric_jacobi(a, n, false).map(|(values, _)| values);
+    }
 
     d.sort_by(|a, b| a.total_cmp(b));
-    d
+    Ok(d)
 }
 
 fn exact_symmetric_tridiagonal_values(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
@@ -7734,7 +7792,7 @@ fn exact_symmetric_tridiagonal_values(a: &[f64], n: usize) -> Option<(Vec<f64>, 
     Some((d, e))
 }
 
-/// Compute eigenvalues and eigenvectors of a symmetric NxN matrix via QR iteration.
+/// Compute eigenvalues and eigenvectors of a symmetric NxN matrix.
 /// Returns (eigenvalues, eigenvectors_flat) where eigenvectors are stored as columns
 /// in a row-major n*n array. Eigenvalues are in ascending order (NumPy convention).
 pub fn eigh_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
@@ -7747,8 +7805,14 @@ pub fn eigh_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError
         return Err(LinAlgError::SpectralConvergenceFailed);
     }
 
+    if symmetric_eigen_needs_extended_range(a, n) {
+        return real_symmetric_jacobi(a, n, true);
+    }
     let (mut d, mut e, mut q) = tridiag_reduce(a, n);
     tridiag_eig_qr(&mut d, &mut e, Some(&mut q), n);
+    if !symmetric_qr_converged(&d, &e) || q.iter().any(|value| !value.is_finite()) {
+        return real_symmetric_jacobi(a, n, true);
+    }
 
     // Sort eigenvalues ascending (NumPy convention) and permute eigenvectors accordingly
     let mut indices: Vec<usize> = (0..n).collect();
@@ -8439,8 +8503,8 @@ fn is_exact_symmetric_nxn(a: &[f64], n: usize) -> bool {
     true
 }
 
-fn symmetric_cond_from_eigvalsh(a: &[f64], n: usize, reciprocal: bool) -> f64 {
-    let eigvals = eigvalsh_finite_nxn(a, n);
+fn symmetric_cond_from_eigvalsh(a: &[f64], n: usize, reciprocal: bool) -> Result<f64, LinAlgError> {
+    let eigvals = eigvalsh_finite_nxn(a, n)?;
     let mut sigma_min = f64::INFINITY;
     let mut sigma_max = 0.0f64;
     for eig in eigvals {
@@ -8449,7 +8513,7 @@ fn symmetric_cond_from_eigvalsh(a: &[f64], n: usize, reciprocal: bool) -> f64 {
         sigma_max = sigma_max.max(sigma);
     }
 
-    if reciprocal {
+    Ok(if reciprocal {
         if sigma_max == 0.0 {
             f64::INFINITY
         } else {
@@ -8459,7 +8523,7 @@ fn symmetric_cond_from_eigvalsh(a: &[f64], n: usize, reciprocal: bool) -> f64 {
         f64::INFINITY
     } else {
         sigma_max / sigma_min
-    }
+    })
 }
 
 /// Condition number for rectangular MxN matrices (np.linalg.cond).
@@ -8554,7 +8618,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 return Ok(f64::INFINITY);
             }
             if !has_nan && is_exact_symmetric_nxn(a, n) {
-                return Ok(symmetric_cond_from_eigvalsh(a, n, false));
+                return symmetric_cond_from_eigvalsh(a, n, false);
             }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
@@ -8569,7 +8633,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 return Ok(f64::INFINITY);
             }
             if !has_nan && is_exact_symmetric_nxn(a, n) {
-                return Ok(symmetric_cond_from_eigvalsh(a, n, true));
+                return symmetric_cond_from_eigvalsh(a, n, true);
             }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
@@ -11356,6 +11420,19 @@ pub fn eigh_2x2(
         _ => return Err(LinAlgError::SpectralConvergenceFailed),
     };
 
+    let flat = [
+        symmetric[0][0],
+        symmetric[0][1],
+        symmetric[1][0],
+        symmetric[1][1],
+    ];
+    if symmetric_eigen_needs_extended_range(&flat, 2) {
+        let (values, vectors) = real_symmetric_jacobi(&flat, 2, true)?;
+        return Ok((
+            [values[0], values[1]],
+            [[vectors[0], vectors[1]], [vectors[2], vectors[3]]],
+        ));
+    }
     let mut eigenvalues = real_eigenvalues_2x2(symmetric)?;
     if eigenvalues[0] > eigenvalues[1] {
         eigenvalues.swap(0, 1);
@@ -19449,6 +19526,228 @@ for col in range(n):
                 "eigval {k}: got {val}, expected {expected}"
             );
         }
+    }
+
+    fn assert_symmetric_eigenpairs(a: &[f64], values: &[f64], vectors: &[f64], n: usize) {
+        assert_eq!(values.len(), n);
+        assert_eq!(vectors.len(), n * n);
+        assert!(values.iter().chain(vectors).all(|value| value.is_finite()));
+        for row in 0..n {
+            let scale = a[row * n..(row + 1) * n]
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let scale = if scale == 0.0 { 1.0 } else { scale };
+            for col in 0..n {
+                let av: f64 = (0..n)
+                    .map(|k| (a[row * n + k] / scale) * vectors[k * n + col])
+                    .sum();
+                let lv = (values[col] * vectors[row * n + col]) / scale;
+                assert!(
+                    (av - lv).abs() <= 2e-11 * n as f64,
+                    "eigenpair residual at ({row}, {col}): {av} vs {lv}"
+                );
+                let dot: f64 = (0..n)
+                    .map(|k| vectors[k * n + row] * vectors[k * n + col])
+                    .sum();
+                let expected = if row == col { 1.0 } else { 0.0 };
+                assert!((dot - expected).abs() <= 2e-12 * n as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn symmetric_eigen_extreme_scales_preserve_dense_spectra_and_vectors() {
+        // I + ones has eigenvalues 1, 1, 4. Previously the absolute
+        // Householder cutoff dropped the nontridiagonal entries at tiny scales,
+        // while squared reflector/shift arithmetic overflowed at large scales.
+        let base = [2.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 2.0];
+        for scale in [1e-300, 1e-200, 1e-20, 1.0, 1e100, 1e200, 1e300] {
+            let a: Vec<f64> = base.iter().map(|value| value * scale).collect();
+            let (values, vectors) = eigh_nxn(&a, 3).expect("finite symmetric eigenproblem");
+            let only_values = eigvalsh_nxn(&a, 3).expect("finite symmetric spectrum");
+            for (index, expected) in [1.0, 1.0, 4.0].into_iter().enumerate() {
+                assert!((values[index] / scale - expected).abs() < 2e-11);
+                assert!((only_values[index] / scale - expected).abs() < 2e-11);
+            }
+            assert_symmetric_eigenpairs(&a, &values, &vectors, 3);
+            assert!((cond_nxn(&a, 3).unwrap() - 4.0).abs() < 2e-11);
+            assert!((cond_p_nxn(&a, 3, Some("-2")).unwrap() - 0.25).abs() < 2e-11);
+
+            let inverse = pinv_hermitian_nxn(&a, 3, 1e-15).expect("Hermitian inverse");
+            for row in 0..3 {
+                for col in 0..3 {
+                    let expected = if row == col { 0.75 } else { -0.25 };
+                    assert!((inverse[row * 3 + col] * scale - expected).abs() < 2e-11);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn symmetric_eigen_mixed_scale_blocks_keep_independent_tiny_modes() {
+        let (small, large) = (1e-300, 1e300);
+        let mut a = vec![0.0; 25];
+        for row in 0..5 {
+            for col in 0..5 {
+                let scale = if row < 2 && col < 2 {
+                    large
+                } else if row >= 2 && col >= 2 {
+                    small
+                } else {
+                    continue;
+                };
+                a[row * 5 + col] = scale * if row == col { 2.0 } else { 1.0 };
+            }
+        }
+        let (values, vectors) = eigh_nxn(&a, 5).expect("independent finite blocks");
+        let only_values = eigvalsh_nxn(&a, 5).unwrap();
+        for (index, expected) in [small, small, 4.0 * small, large, 3.0 * large]
+            .into_iter()
+            .enumerate()
+        {
+            assert!((values[index] / expected - 1.0).abs() < 2e-12);
+            assert!((only_values[index] / expected - 1.0).abs() < 2e-12);
+        }
+        assert_symmetric_eigenpairs(&a, &values, &vectors, 5);
+    }
+
+    #[test]
+    fn symmetric_eigen_subnormal_pairs_and_batched_lanes() {
+        let scale = f64::from_bits(16);
+        let pair = [2.0 * scale, scale, scale, 2.0 * scale];
+        let (values, vectors) = eigh_nxn(&pair, 2).expect("subnormal pair");
+        assert_eq!(values, vec![scale, 3.0 * scale]);
+        assert_eq!(eigvalsh_nxn(&pair, 2).unwrap(), values);
+        // Residuals in subnormal output units round to individual subnormal
+        // steps, so verify this exact eigenbasis in unscaled units instead.
+        assert_symmetric_eigenpairs(&[2.0, 1.0, 1.0, 2.0], &[1.0, 3.0], &vectors, 2);
+        for uplo in ["L", "U"] {
+            let (fixed_values, fixed_vectors) =
+                eigh_2x2([[pair[0], pair[1]], [pair[2], pair[3]]], uplo, true).unwrap();
+            assert_eq!(fixed_values, [scale, 3.0 * scale]);
+            let fixed_vectors: Vec<f64> = fixed_vectors.into_iter().flatten().collect();
+            assert_symmetric_eigenpairs(
+                &[2.0, 1.0, 1.0, 2.0],
+                &[1.0, 3.0],
+                &fixed_vectors,
+                2,
+            );
+            let epsilon = f64::EPSILON;
+            let (boundary_values, boundary_vectors) =
+                eigh_2x2([[0.0, epsilon], [epsilon, 0.0]], uplo, true).unwrap();
+            assert_eq!(boundary_values, [-epsilon, epsilon]);
+            let boundary_vectors: Vec<f64> = boundary_vectors.into_iter().flatten().collect();
+            assert_symmetric_eigenpairs(
+                &[0.0, 1.0, 1.0, 0.0],
+                &[-1.0, 1.0],
+                &boundary_vectors,
+                2,
+            );
+        }
+
+        let mut batch = Vec::new();
+        for scale in [1e-200, 1.0, 1e200] {
+            batch.extend([2.0 * scale, scale, scale, 2.0 * scale]);
+        }
+        let (values, vectors) = super::batch_eigh(&batch, &[3, 2, 2]).unwrap();
+        let only_values = batch_eigvalsh(&batch, &[3, 2, 2]).unwrap();
+        for (lane, scale) in [1e-200, 1.0, 1e200].into_iter().enumerate() {
+            for (index, expected) in [1.0, 3.0].into_iter().enumerate() {
+                assert!((values[2 * lane + index] / scale - expected).abs() < 2e-12);
+                assert!((only_values[2 * lane + index] / scale - expected).abs() < 2e-12);
+            }
+            assert_symmetric_eigenpairs(
+                &batch[4 * lane..4 * (lane + 1)],
+                &values[2 * lane..2 * (lane + 1)],
+                &vectors[4 * lane..4 * (lane + 1)],
+                2,
+            );
+        }
+    }
+
+    #[test]
+    fn symmetric_eigen_completion_rejects_unfinished_or_unrepresentable_results() {
+        assert!(super::symmetric_qr_converged(&[1.0, 2.0], &[0.0]));
+        assert!(!super::symmetric_qr_converged(&[1.0, 2.0], &[0.5]));
+        assert!(!super::symmetric_qr_converged(&[1.0, f64::NAN], &[0.0]));
+        assert!(!super::symmetric_qr_converged(&[1.0, 2.0], &[f64::NAN]));
+        assert!(!super::symmetric_qr_converged(
+            &[f64::MAX, f64::MAX],
+            &[f64::MAX],
+        ));
+        // Every input entry is finite, but the largest eigenvalue is 2*MAX.
+        // No successful API result may contain an unfinished or NaN spectrum.
+        let overflowing = [f64::MAX; 4];
+        assert_eq!(
+            eigvalsh_nxn(&overflowing, 2),
+            Err(LinAlgError::SpectralConvergenceFailed)
+        );
+        assert_eq!(
+            eigh_nxn(&overflowing, 2),
+            Err(LinAlgError::SpectralConvergenceFailed)
+        );
+        assert_eq!(
+            cond_nxn(&overflowing, 2),
+            Err(LinAlgError::SpectralConvergenceFailed)
+        );
+    }
+
+    #[test]
+    fn symmetric_eigen_extreme_scales_match_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let matrices: &[(&[f64], usize)] = &[
+            (&[2.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 2.0], 3),
+            (&[4.0, 1.0, 2.0, 1.0, 3.0, -0.5, 2.0, -0.5, 5.0], 3),
+        ];
+        let mut cases = Vec::new();
+        for &(base, n) in matrices {
+            for scale in [
+                f64::MIN_POSITIVE / 16.0,
+                1e-300,
+                1e-200,
+                1e-20,
+                1.0,
+                1e200,
+                1e300,
+            ] {
+                let a: Vec<f64> = base.iter().map(|value| value * scale).collect();
+                let (values, vectors) = eigh_nxn(&a, n).expect("NumPy oracle matrix");
+                let only_values = eigvalsh_nxn(&a, n).unwrap();
+                cases.push(format!("[{n},{a:?},{values:?},{only_values:?},{vectors:?}]"));
+            }
+        }
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+for n, data, values, only_values, vectors in json.loads(sys.argv[1]):
+    a = np.array(data, dtype=np.float64).reshape(n, n)
+    scale = np.max(np.abs(a))
+    reference = np.linalg.eigvalsh(a)
+    w = np.array(values)
+    v = np.array(vectors).reshape(n, n)
+    np.testing.assert_allclose(w / scale, reference / scale, rtol=2e-11, atol=2e-12)
+    np.testing.assert_allclose(np.array(only_values) / scale, reference / scale,
+                               rtol=2e-11, atol=2e-12)
+    np.testing.assert_allclose((a / scale) @ v, v * (w / scale),
+                               rtol=2e-11, atol=2e-12)
+    np.testing.assert_allclose(v.T @ v, np.eye(n), rtol=2e-11, atol=2e-12)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(format!("[{}]", cases.join(",")))
+            .output()
+            .expect("NumPy symmetric eigenvalue oracle should run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
