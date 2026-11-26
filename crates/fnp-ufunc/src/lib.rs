@@ -41,7 +41,7 @@ use fnp_runtime::{
     DecisionEvent, EvidenceLedger, RuntimeMode,
 };
 use rayon::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -296,7 +296,45 @@ pub struct FloatErrorEvent {
 
 pub type FloatErrorCallback = Arc<dyn Fn(FloatErrorEvent) + Send + Sync + 'static>;
 
+/// Filter for NumPy's ComplexWarning category on checked numeric casts.
+/// Like Python warning filters, this is independent of floating-point seterr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComplexWarningMode {
+    /// Record each emitted warning for the caller to collect.
+    Warn,
+    Ignore,
+    /// Fail before converting values or writing the destination.
+    Raise,
+}
+
+/// Return the previous filter and set the current thread's complex-cast warning filter.
+#[must_use]
+pub fn set_complex_warning_mode(mode: ComplexWarningMode) -> ComplexWarningMode {
+    COMPLEX_WARNING_MODE.with(|filter| filter.replace(mode))
+}
+
+/// Drain this thread's count of complex-cast warnings. A counter preserves
+/// per-cast multiplicity without retaining an unbounded list of identical messages.
+pub fn take_complex_warning_count() -> usize {
+    COMPLEX_WARNINGS.with(|count| count.replace(0))
+}
+
+fn report_complex_cast(source: DType, target: DType) -> Result<(), UFuncError> {
+    if source.is_complex() && target.is_numeric() && !target.is_complex() {
+        match COMPLEX_WARNING_MODE.get() {
+            ComplexWarningMode::Warn => {
+                COMPLEX_WARNINGS.set(COMPLEX_WARNINGS.get().saturating_add(1));
+            }
+            ComplexWarningMode::Ignore => {}
+            ComplexWarningMode::Raise => return Err(UFuncError::ComplexWarning),
+        }
+    }
+    Ok(())
+}
+
 thread_local! {
+    static COMPLEX_WARNING_MODE: Cell<ComplexWarningMode> = const { Cell::new(ComplexWarningMode::Warn) };
+    static COMPLEX_WARNINGS: Cell<usize> = const { Cell::new(0) };
     static FLOAT_ERROR_STATE: RefCell<FloatErrorState> = const { RefCell::new(FloatErrorState {
         divide: FloatErrorMode::Warn,
         over: FloatErrorMode::Warn,
@@ -16006,6 +16044,7 @@ impl UFuncArray {
             return self.astype_with_casting(dtype, casting);
         }
         let (shape, source) = self.numeric_cast_source()?;
+        report_complex_cast(self.dtype, dtype)?;
         let report_invalid = geterr().invalid != FloatErrorMode::Ignore;
         let mut invalid = false;
         let mut output = Vec::with_capacity(logical_count);
@@ -24931,6 +24970,9 @@ impl UFuncArray {
     /// bridge adds/removes the physical component axis for complex dtypes.
     fn cast_numeric_storage(&self, dtype: DType, report_errors: bool) -> Result<Self, UFuncError> {
         let (shape, source) = self.numeric_cast_source()?;
+        if report_errors {
+            report_complex_cast(self.dtype, dtype)?;
+        }
         let converted = source
             .cast_to(dtype)
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
@@ -25095,6 +25137,8 @@ impl UFuncArray {
     /// Only the real component of a complex input participates in integer
     /// conversion. NaN, infinity, and overflow of the conversion intermediate
     /// report invalid; ordinary narrow integer wrapping does not.
+    /// Casting complex to a real numeric dtype first applies the thread's
+    /// [complex warning filter](set_complex_warning_mode), even for empty arrays.
     pub fn astype_with_casting(&self, dtype: DType, casting: &str) -> Result<Self, UFuncError> {
         if !fnp_dtype::can_cast(self.dtype, dtype, casting) {
             return Err(UFuncError::Msg(format!(
@@ -40592,6 +40636,7 @@ impl UFuncArray {
         let mut precast_scalar = None;
         if original_src_shape.is_empty() && count > 1 && src.dtype != self.dtype {
             let (_, source) = src.numeric_cast_source()?;
+            report_complex_cast(src.dtype, self.dtype)?;
             let converted = source
                 .cast_to(self.dtype)
                 .map_err(|err| UFuncError::Msg(format!("copyto: storage cast failed: {err}")))?;
@@ -40605,6 +40650,14 @@ impl UFuncArray {
                 "copyto: could not broadcast where mask from shape {:?} into shape {:?}",
                 mask.shape, dst_shape
             )));
+        }
+        // A scalar false mask skips transfer-loop selection. An array mask
+        // selects a masked cast loop even if every entry is false.
+        if mask.is_some_and(|mask| mask.shape.is_empty() && mask.values[0] == 0.0) {
+            return Ok(());
+        }
+        if precast_scalar.is_none() {
+            report_complex_cast(src.dtype, self.dtype)?;
         }
         if count == 0 || mask.is_some_and(|mask| mask.values.iter().all(|&value| value == 0.0)) {
             return Ok(());
@@ -43524,6 +43577,8 @@ pub enum UFuncError {
     EmptyReduction {
         op: &'static str,
     },
+    /// Complex-to-real cast rejected by the complex warning filter.
+    ComplexWarning,
     FloatingPoint {
         kind: FloatErrorKind,
         detail: String,
@@ -43574,6 +43629,9 @@ impl std::fmt::Display for UFuncError {
             }
             Self::EmptyReduction { op } => {
                 write!(f, "attempt to get {op} of an empty sequence")
+            }
+            Self::ComplexWarning => {
+                f.write_str("Casting complex values to real discards the imaginary part")
             }
             Self::FloatingPoint { detail, .. } => write!(f, "{detail}"),
             Self::SignatureConflict { sig, signature } => {

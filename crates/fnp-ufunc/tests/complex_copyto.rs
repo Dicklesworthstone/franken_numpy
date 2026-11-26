@@ -3,7 +3,7 @@
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
     FloatErrorCallback, FloatErrorMode, UFuncArray, UFuncError, errstate, seterrcall,
-    take_float_error_events,
+    take_complex_warning_count, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -193,6 +193,7 @@ struct CopyOutcome {
     array: UFuncArray,
     error: Option<String>,
     warnings: Vec<String>,
+    complex_warnings: usize,
     calls: Vec<String>,
 }
 
@@ -242,6 +243,7 @@ impl OracleBatch {
         });
         let previous_callback = seterrcall(Some(callback));
         take_float_error_events();
+        take_complex_warning_count();
         let mut actual = dst.clone();
         let failure = {
             let _errors = errstate(Some(mode), None, None, None, None);
@@ -261,6 +263,7 @@ impl OracleBatch {
         let calls = calls.lock().unwrap().clone();
         self.actual.push(CopyOutcome {
             array: actual,
+            complex_warnings: take_complex_warning_count(),
             error: failure,
             warnings,
             calls,
@@ -322,6 +325,7 @@ for case in json.load(sys.stdin):
         parts = dst.astype(np.float64).ravel()
     rows.append(dict(shape=list(dst.shape), dtype=str(dst.dtype), error=failure,
                      warnings=messages, calls=calls, bits=parts.view(np.uint64).tolist(),
+                     complex_warnings=sum(issubclass(w.category, np.exceptions.ComplexWarning) for w in caught),
                      integers=[str(int(value)) for value in dst.flat] if dst.dtype.kind in 'biu' else None))
 print(json.dumps(rows))
 "#;
@@ -354,8 +358,14 @@ print(json.dumps(rows))
                 array: actual,
                 error,
                 warnings,
+                complex_warnings,
                 calls,
             } = outcome;
+            assert_eq!(
+                json!(complex_warnings),
+                expected["complex_warnings"],
+                "{case}: ComplexWarning"
+            );
             assert_eq!(json!(error), expected["error"], "{case}: error precedence");
             assert_eq!(
                 json!(warnings),

@@ -4,7 +4,8 @@ use fnp_dtype::{ArrayStorage, DType};
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 use fnp_ufunc::{FloatErrorCallback, seterrcall};
 use fnp_ufunc::{
-    FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, errstate, take_float_error_events,
+    ComplexWarningMode, FloatErrorKind, FloatErrorMode, UFuncArray, UFuncError, errstate,
+    set_complex_warning_mode, take_complex_warning_count, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -55,6 +56,68 @@ fn logical_shape(array: &UFuncArray) -> Vec<usize> {
         assert_eq!(shape.pop(), Some(2), "complex components must stay paired");
     }
     shape
+}
+
+#[test]
+fn complex_cast_warnings_follow_dtype_and_precede_float_errors() {
+    let empty = complex(&[0], &[], DType::Complex64);
+    let values = complex(&[2, 2], &[(0.0, 0.0); 4], DType::Complex128);
+    let nan = complex(&[], &[(f64::NAN, 0.0)], DType::Complex128);
+    let _fp = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+    let previous = set_complex_warning_mode(ComplexWarningMode::Warn);
+    take_complex_warning_count();
+    for array in [&empty, &values] {
+        for target in [DType::U32, DType::F16, DType::F64] {
+            array.astype_with_casting(target, "unsafe").unwrap();
+            assert_eq!(take_complex_warning_count(), 1);
+        }
+        for target in [DType::Bool, DType::Complex64, DType::Complex128] {
+            array.astype_with_casting(target, "unsafe").unwrap();
+            assert_eq!(take_complex_warning_count(), 0);
+        }
+    }
+    assert!(matches!(
+        nan.astype_with_casting(DType::I32, "unsafe"),
+        Err(UFuncError::FloatingPoint { .. })
+    ));
+    assert_eq!(take_complex_warning_count(), 1);
+    let _ = set_complex_warning_mode(ComplexWarningMode::Raise);
+    assert!(matches!(
+        nan.astype_with_casting(DType::I32, "unsafe"),
+        Err(UFuncError::ComplexWarning)
+    ));
+    assert!(matches!(
+        nan.astype_with_casting(DType::I32, "safe"),
+        Err(UFuncError::Msg(_))
+    ));
+    assert_eq!(nan.astype(DType::I32).dtype(), DType::I32);
+    assert_eq!(take_complex_warning_count(), 0);
+    std::thread::spawn(move || {
+        empty.astype_with_casting(DType::F32, "unsafe").unwrap();
+        assert_eq!(take_complex_warning_count(), 1);
+    })
+    .join()
+    .unwrap();
+    let _ = set_complex_warning_mode(ComplexWarningMode::Ignore);
+    values.astype_with_casting(DType::F32, "unsafe").unwrap();
+    assert_eq!(take_complex_warning_count(), 0);
+    let _ = set_complex_warning_mode(previous);
+}
+
+#[test]
+fn dtype_joins_warn_once_per_complex_operand_for_contiguous_and_strided_casts() {
+    let real = real(&[2, 2], &[1.0; 4], DType::F64);
+    let array = complex(&[2, 2], &[(5.0, -3.0); 4], DType::Complex64);
+    let inputs = [&array, &real, &array];
+    take_complex_warning_count();
+    for axis in [0, 1] {
+        UFuncArray::concatenate_with_dtype(&inputs, axis, DType::U32, "unsafe").unwrap();
+        assert_eq!(take_complex_warning_count(), 2);
+        UFuncArray::stack_with_dtype(&inputs, axis, DType::U32, "unsafe").unwrap();
+        assert_eq!(take_complex_warning_count(), 2);
+    }
+    assert!(UFuncArray::stack_with_dtype(&inputs, 0, DType::U32, "safe").is_err());
+    assert_eq!(take_complex_warning_count(), 0);
 }
 
 fn values(array: &UFuncArray) -> Value {
