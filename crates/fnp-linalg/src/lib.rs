@@ -12853,35 +12853,84 @@ pub fn batch_matrix_norm(
 fn parse_batch_matrix_rank_input(
     data: &[f64],
     shape: &[usize],
-) -> Result<(usize, usize, usize), LinAlgError> {
-    let (batch, m, n) = parse_batched_shape(shape)?;
-    if m != n {
-        return Err(LinAlgError::ShapeContractViolation(
-            "batch_matrix_rank: currently requires square matrices",
-        ));
-    }
-    let mat_size = n * n;
+) -> Result<(usize, usize, usize, usize), LinAlgError> {
+    let matrix_axes = shape
+        .len()
+        .checked_sub(2)
+        .ok_or(LinAlgError::ShapeContractViolation(
+            "batched linalg: input must have at least 2 dimensions",
+        ))?;
+    let (m, n) = (shape[matrix_axes], shape[matrix_axes + 1]);
+    // No matrix is visited when any outer dimension is zero. Inspect that
+    // before multiplying either the batch dimensions or the unused core.
+    let batch = if shape[..matrix_axes].contains(&0) {
+        0
+    } else {
+        batch_count(shape)?
+    };
+    let mat_size = if batch == 0 {
+        0
+    } else {
+        m.checked_mul(n)
+            .ok_or(LinAlgError::ShapeContractViolation(
+                "batch_matrix_rank: matrix size overflow",
+            ))?
+    };
     if Some(data.len()) != batch.checked_mul(mat_size) {
         return Err(LinAlgError::ShapeContractViolation(
             "batch_matrix_rank: data length does not match shape",
         ));
     }
-    Ok((batch, n, mat_size))
+    Ok((batch, m, n, mat_size))
 }
 
 /// Batched matrix rank: rank on (..., m, n) → (...).
+///
+/// Tall, square, and wide matrices share the relative cutoff
+/// `rcond * sigma_max`. Results follow row-major batch order. Occupied matrix
+/// cores require nonzero dimensions and a finite, nonnegative cutoff, as in
+/// [`matrix_rank_mxn`]. Empty outer batches have no per-lane validation.
 pub fn batch_matrix_rank(
     data: &[f64],
     shape: &[usize],
     rcond: f64,
 ) -> Result<Vec<usize>, LinAlgError> {
-    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
+    let (batch, m, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
     batch_map_lanes(batch, mat_size, |b| {
         let lane = &data[b * mat_size..(b + 1) * mat_size];
-        if n > 0 && rcond.is_finite() && rcond >= 0.0 && lane.iter().all(|&value| value == 0.0) {
+        if m > 0
+            && n > 0
+            && rcond.is_finite()
+            && rcond >= 0.0
+            && lane.iter().all(|&value| value == 0.0)
+        {
             Ok(0)
         } else {
-            matrix_rank_nxn(lane, n, rcond)
+            matrix_rank_mxn(lane, m, n, rcond)
+        }
+    })
+}
+
+/// Batched matrix rank with a shared absolute tolerance or the default cutoff.
+///
+/// `None` uses `sigma_max * max(m, n) * f64::EPSILON` independently per matrix.
+/// `Some(tol)` supplies one finite, nonnegative absolute threshold for every
+/// matrix. Shape, nonfinite-input, and tolerance policies match
+/// [`matrix_rank_mxn_tol`], including rejection of occupied zero-size cores.
+/// Empty outer batches return no ranks without consulting per-lane tolerances.
+pub fn batch_matrix_rank_tol(
+    data: &[f64],
+    shape: &[usize],
+    tol: Option<f64>,
+) -> Result<Vec<usize>, LinAlgError> {
+    let (batch, m, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
+    let valid_tol = tol.is_none_or(|value| value.is_finite() && value >= 0.0);
+    batch_map_lanes(batch, mat_size, |b| {
+        let lane = &data[b * mat_size..(b + 1) * mat_size];
+        if m > 0 && n > 0 && valid_tol && lane.iter().all(|&value| value == 0.0) {
+            Ok(0)
+        } else {
+            matrix_rank_mxn_tol(lane, m, n, tol)
         }
     })
 }
@@ -12893,9 +12942,9 @@ pub fn batch_matrix_rank_general_control(
     shape: &[usize],
     rcond: f64,
 ) -> Result<Vec<usize>, LinAlgError> {
-    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
+    let (batch, m, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
     batch_map_lanes(batch, mat_size, |b| {
-        matrix_rank_nxn(&data[b * mat_size..(b + 1) * mat_size], n, rcond)
+        matrix_rank_mxn(&data[b * mat_size..(b + 1) * mat_size], m, n, rcond)
     })
 }
 
@@ -14723,6 +14772,276 @@ pub fn complex_conjugate_transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_matrix_rank_rectangular_preserves_lane_order_and_transpose() {
+        let data = [
+            0.0, -0.0, 0.0, 0.0, 0.0, 0.0, // zero
+            1.0, 2.0, 2.0, 4.0, 3.0, 6.0, // rank one
+            3.0, 0.0, 0.0, 2.0, 0.0, 0.0, // rank two
+            1.0, 0.0, 0.0, 1e-10, 0.0, 0.0, // cutoff-sensitive
+        ];
+        let mut transposed = vec![0.0; data.len()];
+        for lane in 0..4 {
+            for row in 0..3 {
+                for col in 0..2 {
+                    transposed[lane * 6 + col * 3 + row] = data[lane * 6 + row * 2 + col];
+                }
+            }
+        }
+        for (values, shape) in [
+            (data.as_slice(), [2, 2, 3, 2]),
+            (transposed.as_slice(), [2, 2, 2, 3]),
+        ] {
+            let expected = vec![0, 1, 2, 1];
+            assert_eq!(
+                super::batch_matrix_rank(values, &shape, 1e-8).unwrap(),
+                expected
+            );
+            assert_eq!(
+                super::batch_matrix_rank_general_control(values, &shape, 1e-8).unwrap(),
+                expected
+            );
+            assert_eq!(
+                super::batch_matrix_rank_tol(values, &shape, Some(1e-8)).unwrap(),
+                expected
+            );
+            assert_eq!(
+                super::batch_matrix_rank_tol(values, &shape, None).unwrap(),
+                vec![0, 1, 2, 2]
+            );
+        }
+        assert_eq!(
+            super::batch_matrix_rank(&data[12..18], &[3, 2], 1e-8).unwrap(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn batch_matrix_rank_rectangular_tolerances_and_defaults() {
+        for (m, n) in [(32, 2), (2, 32)] {
+            let mut data = vec![0.0; m * n];
+            data[0] = 1.0;
+            data[n + 1] = 1e-15;
+            // The smaller singular value lies above min(m,n)*eps but below
+            // max(m,n)*eps, so using the wrong dimension changes the rank.
+            assert_eq!(
+                super::batch_matrix_rank_tol(&data, &[m, n], None).unwrap(),
+                vec![1]
+            );
+            for (cutoff, expected) in [(1e-16, 2), (1e-14, 1)] {
+                assert_eq!(
+                    super::batch_matrix_rank(&data, &[m, n], cutoff).unwrap(),
+                    vec![expected]
+                );
+                assert_eq!(
+                    super::batch_matrix_rank_tol(&data, &[m, n], Some(cutoff)).unwrap(),
+                    vec![expected]
+                );
+            }
+        }
+
+        let diagonal = [4.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        assert_eq!(
+            super::batch_matrix_rank(&diagonal, &[3, 2], 0.5).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            super::batch_matrix_rank_tol(&diagonal, &[3, 2], Some(2.0)).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            super::batch_matrix_rank_tol(&diagonal, &[3, 2], Some(0.0)).unwrap(),
+            vec![2]
+        );
+
+        // The zero shortcut must retain the scalar helpers' cutoff policy.
+        for cutoff in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(super::batch_matrix_rank(&[0.0; 6], &[3, 2], cutoff).is_err());
+            assert!(
+                super::batch_matrix_rank_tol(&[0.0; 6], &[3, 2], Some(cutoff)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn batch_matrix_rank_rectangular_shape_and_nonfinite_contracts() {
+        for shape in [
+            vec![],
+            vec![2],
+            vec![3, 2],
+            vec![0, 2],
+            vec![2, 0],
+            vec![0, 0],
+            vec![1, 0, 2],
+            vec![1, 2, 0],
+            vec![usize::MAX, 2],
+            vec![usize::MAX, 2, 2],
+            vec![2, usize::MAX, usize::MAX],
+        ] {
+            assert!(
+                super::batch_matrix_rank(&[], &shape, 1e-8).is_err(),
+                "shape {shape:?}"
+            );
+            assert!(
+                super::batch_matrix_rank_tol(&[], &shape, None).is_err(),
+                "shape {shape:?}"
+            );
+        }
+        for shape in [
+            vec![0, 3, 2],
+            vec![2, 0, 3, 2],
+            vec![usize::MAX, usize::MAX, 0, 3, 2],
+            vec![0, usize::MAX, usize::MAX],
+        ] {
+            assert_eq!(
+                super::batch_matrix_rank(&[], &shape, f64::NAN).unwrap(),
+                Vec::<usize>::new()
+            );
+            for tol in [None, Some(f64::NAN)] {
+                assert_eq!(
+                    super::batch_matrix_rank_tol(&[], &shape, tol).unwrap(),
+                    Vec::<usize>::new()
+                );
+            }
+            assert!(super::batch_matrix_rank(&[0.0], &shape, 1e-8).is_err());
+            assert!(super::batch_matrix_rank_tol(&[0.0], &shape, None).is_err());
+        }
+
+        // These nonfinite policies are inherited from matrix_rank_mxn.
+        let infinite = [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert_eq!(
+            super::batch_matrix_rank(&infinite, &[3, 2], 1e-8).unwrap(),
+            vec![0]
+        );
+        assert_eq!(
+            super::batch_matrix_rank_tol(&infinite, &[3, 2], None).unwrap(),
+            vec![0]
+        );
+        let mut nonfinite_later_lane = [0.0; 12];
+        nonfinite_later_lane[7] = f64::NAN;
+        assert!(
+            super::batch_matrix_rank(&nonfinite_later_lane, &[2, 3, 2], 1e-8).is_err()
+        );
+        assert!(
+            super::batch_matrix_rank_tol(&nonfinite_later_lane, &[2, 3, 2], None).is_err()
+        );
+    }
+
+    #[test]
+    fn batch_matrix_rank_rectangular_parallel_matches_serial() {
+        let batch = super::BATCH_PARALLEL_MIN_TOTAL_ELEMS / 6 + 3;
+        let mut data = vec![0.0; batch * 6];
+        let mut expected_relative = vec![0usize; batch];
+        let mut expected_default = vec![0usize; batch];
+        for lane in 0..batch {
+            match lane % 1024 {
+                0 => {
+                    data[lane * 6] = 3.0;
+                    data[lane * 6 + 3] = 2.0;
+                    expected_relative[lane] = 2;
+                    expected_default[lane] = 2;
+                }
+                1 => {
+                    data[lane * 6] = 1.0;
+                    expected_relative[lane] = 1;
+                    expected_default[lane] = 1;
+                }
+                2 => {
+                    data[lane * 6] = 1.0;
+                    data[lane * 6 + 3] = 1e-10;
+                    expected_relative[lane] = 1;
+                    expected_default[lane] = 2;
+                }
+                _ => {}
+            }
+        }
+        for threads in [1, 2] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rank test thread pool");
+            pool.install(|| {
+                assert_eq!(super::batch_should_parallelize(batch, 6), threads == 2);
+                assert_eq!(
+                    super::batch_matrix_rank(&data, &[batch, 3, 2], 1e-8).unwrap(),
+                    expected_relative
+                );
+                assert_eq!(
+                    super::batch_matrix_rank_tol(&data, &[batch, 3, 2], None).unwrap(),
+                    expected_default
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn batch_matrix_rank_rectangular_matches_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut cases = Vec::new();
+        for (m, n) in [(3, 2), (2, 3), (8, 3), (3, 8), (2, 2), (1, 5), (5, 1)] {
+            let shape = [2, 2, m, n];
+            let size = m * n;
+            let mut data = vec![0.0; 4 * size];
+            for row in 0..m {
+                for col in 0..n {
+                    data[size + row * n + col] = if row == col {
+                        2.0 + row as f64
+                    } else {
+                        0.125 * ((row + 2 * col) % 3) as f64
+                    };
+                    data[2 * size + row * n + col] = ((row + 1) * (col + 1)) as f64;
+                }
+            }
+            for index in 0..m.min(n) {
+                data[3 * size + index * n + index] = if index == 0 { 1.0 } else { 1e-10 };
+            }
+            for rcond in [1e-8, 1e-12] {
+                let ranks = super::batch_matrix_rank(&data, &shape, rcond).unwrap();
+                cases.push(format!(
+                    "[\"relative\",{shape:?},{data:?},{rcond:?},{ranks:?}]"
+                ));
+            }
+            for tol in [None, Some(1e-8), Some(1e-12)] {
+                let ranks = super::batch_matrix_rank_tol(&data, &shape, tol).unwrap();
+                let cutoff = tol
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                cases.push(format!(
+                    "[\"absolute\",{shape:?},{data:?},{cutoff},{ranks:?}]"
+                ));
+            }
+        }
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+for mode, shape, data, cutoff, got in json.loads(sys.argv[1]):
+    matrix = np.asarray(data, dtype=np.float64).reshape(shape)
+    if mode == "relative":
+        expected = np.linalg.matrix_rank(matrix, rtol=cutoff)
+    else:
+        expected = np.linalg.matrix_rank(matrix, tol=cutoff)
+    actual = np.asarray(got, dtype=np.int64).reshape(shape[:-2])
+    np.testing.assert_array_equal(
+        actual, expected, err_msg=f"{mode} shape={shape} cutoff={cutoff}"
+    )
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(format!("[{}]", cases.join(",")))
+            .output()
+            .expect("NumPy rank oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy batched rank oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn batch_matrix_rank_zero_certificate_matches_general_control() {
         let n = 3usize;
