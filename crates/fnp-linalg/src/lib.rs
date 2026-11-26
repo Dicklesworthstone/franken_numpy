@@ -2474,6 +2474,72 @@ pub fn cholesky_solve_multi(
     Ok(x)
 }
 
+/// Validate a tensor equation's logical shapes and return its matrix order
+/// and solution shape.
+///
+/// NumPy flattens the RHS rather than matching its individual dimensions to
+/// the coefficient tensor. Its rank selects the trailing solution axes; the
+/// flattened sizes must then form a square system. Singleton/scalar equations
+/// also follow that trailing-axis rule when the RHS has the same or more axes.
+pub fn tensorsolve_output_shape(
+    a_shape: &[usize],
+    b_shape: &[usize],
+) -> Result<(usize, Vec<usize>), LinAlgError> {
+    let start = if b_shape.len() < a_shape.len() {
+        b_shape.len()
+    } else {
+        b_shape.len().saturating_sub(a_shape.len()).min(a_shape.len())
+    };
+    let solution_shape = &a_shape[start..];
+    let count = |shape: &[usize]| {
+        if shape.contains(&0) {
+            Ok(0)
+        } else {
+            fnp_ndarray::element_count(shape)
+                .map_err(|_| LinAlgError::ShapeContractViolation("tensor shape product overflow"))
+        }
+    };
+    let n = count(solution_shape)?;
+    if n.checked_mul(n) != Some(count(a_shape)?) || count(b_shape)? != n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorsolve: coefficient tensor must reshape to a square system matching the flattened RHS",
+        ));
+    }
+    Ok((n, solution_shape.to_vec()))
+}
+
+/// Validate a tensor inverse's logical shape and return its matrix order and
+/// permuted output shape. Positive split indices beyond the rank are legal
+/// for singleton tensors, just as for NumPy's axis slices.
+pub fn tensorinv_output_shape(
+    a_shape: &[usize],
+    ind: usize,
+) -> Result<(usize, Vec<usize>), LinAlgError> {
+    if ind == 0 || a_shape.is_empty() {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorinv: ind must be positive and the tensor must have at least one axis",
+        ));
+    }
+    let split = ind.min(a_shape.len());
+    let count = |shape: &[usize]| {
+        if shape.contains(&0) {
+            Ok(0)
+        } else {
+            fnp_ndarray::element_count(shape)
+                .map_err(|_| LinAlgError::ShapeContractViolation("tensor shape product overflow"))
+        }
+    };
+    let n = count(&a_shape[split..])?;
+    if n == 0 || count(&a_shape[..split])? != n || n.checked_mul(n).is_none() {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorinv: products on either side of ind must be equal and nonzero",
+        ));
+    }
+    let mut output_shape = a_shape[split..].to_vec();
+    output_shape.extend_from_slice(&a_shape[..split]);
+    Ok((n, output_shape))
+}
+
 /// Solve the tensor equation `a x = b` for x.
 ///
 /// Equivalent to `numpy.linalg.tensorsolve`. Reshapes `a` and `b` so that
@@ -2487,52 +2553,24 @@ pub fn tensorsolve(
     b_data: &[f64],
     b_shape: &[usize],
 ) -> Result<(Vec<f64>, Vec<usize>), LinAlgError> {
-    // The equation a x = b: a has shape (b_shape..., x_shape...) and
-    // x has shape x_shape such that contracting the last len(x_shape) dims of a
-    // with x produces b.
-    let b_ndim = b_shape.len();
-    if a_shape.len() <= b_ndim {
-        return Err(LinAlgError::ShapeContractViolation(
-            "tensorsolve: a must have more dimensions than b",
-        ));
-    }
-
-    // Verify leading dims of a match b_shape
-    for (i, (&a_dim, &b_dim)) in a_shape.iter().zip(b_shape.iter()).enumerate() {
-        if a_dim != b_dim {
-            return Err(LinAlgError::ShapeContractViolation(
-                "tensorsolve: leading dimensions of a must match shape of b",
-            ));
-        }
-        let _ = i; // suppress unused warning
-    }
-
-    // x_shape is the trailing dims of a after b_shape
-    let x_shape = &a_shape[b_ndim..];
-    let n: usize = fnp_ndarray::element_count(b_shape)
-        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
+    let (n, x_shape) = tensorsolve_output_shape(a_shape, b_shape)?;
     if b_data.len() != n {
         return Err(LinAlgError::ShapeContractViolation(
             "tensorsolve: b_data length must equal product of b_shape",
         ));
     }
-    let m: usize = fnp_ndarray::element_count(x_shape)
-        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?; // product of x_shape
-
-    if n != m {
-        return Err(LinAlgError::ShapeContractViolation(
-            "tensorsolve: reshaped system must be square (prod(b_shape) == prod(x_shape))",
-        ));
-    }
-
-    if Some(a_data.len()) != n.checked_mul(m) {
+    if Some(a_data.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
             "tensorsolve: a_data length must be prod(a_shape)",
         ));
     }
 
-    // Now solve the n×n system
-    Ok((solve_nxn(a_data, b_data, n)?, x_shape.to_vec()))
+    let solution = if n == 0 {
+        Vec::new()
+    } else {
+        solve_nxn(a_data, b_data, n)?
+    };
+    Ok((solution, x_shape))
 }
 
 /// Compute the inverse of an N-dimensional array.
@@ -2545,23 +2583,7 @@ pub fn tensorinv(
     a_shape: &[usize],
     ind: usize,
 ) -> Result<(Vec<f64>, Vec<usize>), LinAlgError> {
-    if ind == 0 || ind >= a_shape.len() {
-        return Err(LinAlgError::ShapeContractViolation(
-            "tensorinv: ind must be > 0 and < ndim(a)",
-        ));
-    }
-    let output_shape = &a_shape[..ind];
-    let input_shape = &a_shape[ind..];
-    let n: usize = fnp_ndarray::element_count(output_shape)
-        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
-    let m: usize = fnp_ndarray::element_count(input_shape)
-        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
-
-    if n != m {
-        return Err(LinAlgError::ShapeContractViolation(
-            "tensorinv: product of first ind dims must equal product of remaining dims",
-        ));
-    }
+    let (n, result_shape) = tensorinv_output_shape(a_shape, ind)?;
     if Some(a_data.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
             "tensorinv: data length does not match shape",
@@ -2569,10 +2591,6 @@ pub fn tensorinv(
     }
 
     let inv = inv_nxn(a_data, n)?;
-
-    // Output shape is (input_shape..., output_shape...)
-    let mut result_shape = input_shape.to_vec();
-    result_shape.extend_from_slice(output_shape);
 
     Ok((inv, result_shape))
 }
@@ -25309,6 +25327,44 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
     }
 
     #[test]
+    fn tensorsolve_matches_flattened_rhs_and_degenerate_shapes() {
+        let mut identity = vec![0.0; 36];
+        for diagonal in 0..6 {
+            identity[diagonal * 6 + diagonal] = 1.0;
+        }
+        let rhs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (solution, shape) = tensorsolve(&identity, &[2, 3, 6], &rhs, &[3, 2]).unwrap();
+        assert_eq!(shape, vec![6]);
+        assert_eq!(solution, rhs);
+
+        for (a_shape, b_shape, expected_shape) in [
+            (vec![], vec![], vec![]),
+            (vec![1], vec![1], vec![1]),
+            (vec![1, 1], vec![1, 1], vec![1, 1]),
+            (vec![1, 1], vec![1, 1, 1], vec![1]),
+            (vec![1, 1], vec![1, 1, 1, 1, 1], vec![]),
+        ] {
+            let (solution, shape) = tensorsolve(&[2.0], &a_shape, &[3.0], &b_shape).unwrap();
+            assert_eq!(shape, expected_shape);
+            assert_eq!(solution, vec![1.5]);
+        }
+        let (solution, shape) = tensorsolve(&[], &[0, 2, 0], &[], &[0, 2]).unwrap();
+        assert_eq!(shape, vec![0]);
+        assert!(solution.is_empty());
+    }
+
+    #[test]
+    fn tensor_shape_and_storage_validation_precedes_factorization() {
+        assert!(tensorsolve(&[1.0], &[2, 2], &[1.0, 2.0], &[2]).is_err());
+        assert!(tensorsolve(&[1.0, 0.0, 0.0, 1.0], &[2, 2], &[1.0], &[2]).is_err());
+        assert!(tensorsolve(&[1.0], &[usize::MAX, usize::MAX], &[1.0], &[usize::MAX]).is_err());
+        assert!(tensorinv(&[1.0], &[2, 2], 1).is_err());
+        assert!(tensorinv(&[1.0], &[usize::MAX, usize::MAX], 1).is_err());
+        assert!(tensorinv(&[], &[0, 0], 1).is_err());
+        assert!(tensorinv(&[1.0], &[], 1).is_err());
+    }
+
+    #[test]
     fn tensorsolve_non_finite_semantics_are_pinned() {
         let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
         let (solved, solved_shape) =
@@ -25477,9 +25533,20 @@ for m, n, complex_input, a, q, r in json.loads(sys.argv[1]):
         // ind=0 is invalid
         let err = tensorinv(&a, &[2, 2], 0).expect_err("ind=0 should fail");
         assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
-        // ind=2 is >= ndim
-        let err = tensorinv(&a, &[2, 2], 2).expect_err("ind=ndim should fail");
+        // Splitting after all axes is nonsquare for this four-element tensor.
+        let err = tensorinv(&a, &[2, 2], 2).expect_err("nonsquare split should fail");
         assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
+    }
+
+    #[test]
+    fn tensorinv_accepts_positive_splits_beyond_singleton_rank() {
+        for shape in [vec![1], vec![1, 1], vec![1, 1, 1]] {
+            for ind in [1, shape.len(), shape.len() + 1, usize::MAX] {
+                let (inverse, result_shape) = tensorinv(&[4.0], &shape, ind).unwrap();
+                assert_eq!(result_shape, shape);
+                assert_eq!(inverse, vec![0.25]);
+            }
+        }
     }
 
     #[test]

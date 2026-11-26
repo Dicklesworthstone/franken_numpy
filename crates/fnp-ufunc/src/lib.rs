@@ -19271,17 +19271,22 @@ impl UFuncArray {
         Ok(result)
     }
 
-    /// Solve a tensor equation (np.linalg.tensorsolve).
+    /// Solve a real or complex tensor equation (np.linalg.tensorsolve).
+    ///
+    /// The RHS is flattened in C order; its rank selects the trailing
+    /// solution axes of the coefficient tensor. Source storage precision,
+    /// exact integer values, and NumPy's linalg output dtype are preserved.
     pub fn tensorsolve(&self, b: &Self) -> Result<Self, UFuncError> {
-        let (values, out_shape) =
-            fnp_linalg::tensorsolve(&self.values, &self.shape, &b.values, &b.shape)
-                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: out_shape,
-            values,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        let shape = self.complex_logical_shape("tensorsolve")?;
+        let b_shape = b.complex_logical_shape("tensorsolve")?;
+        let (n, output_shape) = fnp_linalg::tensorsolve_output_shape(&shape, &b_shape)
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+        // Change logical metadata only. The solve bridge reads each operand's
+        // typed storage before widening, including exact wide-integer sidecars.
+        let coefficients = self.copy_with_logical_shape(vec![n, n]);
+        let rhs = b.copy_with_logical_shape(vec![n]);
+        let solution = coefficients.solve(&rhs)?;
+        Self::from_linalg_values(output_shape, solution.values, solution.dtype)
     }
 
     /// Solve a tensor equation after reordering selected axes to the right first.
@@ -19289,7 +19294,7 @@ impl UFuncArray {
     /// Mirrors `np.linalg.tensorsolve(a, b, axes=...)` for already-normalized axis
     /// indices. Duplicate entries follow NumPy's "remove then append" behavior.
     pub fn tensorsolve_with_axes(&self, b: &Self, axes: &[usize]) -> Result<Self, UFuncError> {
-        let ndim = self.shape.len();
+        let ndim = self.complex_logical_shape("tensorsolve")?.len();
         let mut permutation: Vec<usize> = (0..ndim).collect();
         for &axis in axes {
             let Some(position) = permutation.iter().position(|&current| current == axis) else {
@@ -19303,16 +19308,18 @@ impl UFuncArray {
         self.transpose(Some(&permutation))?.tensorsolve(b)
     }
 
-    /// Compute the tensor inverse (np.linalg.tensorinv).
+    /// Compute a real or complex tensor inverse (np.linalg.tensorinv).
+    ///
+    /// `ind` splits logical axes; the two products must form a nonempty
+    /// square matrix. The result has the axes after `ind` followed by those
+    /// before it and follows NumPy's linalg dtype promotion rules.
     pub fn tensorinv(&self, ind: usize) -> Result<Self, UFuncError> {
-        let (values, out_shape) = fnp_linalg::tensorinv(&self.values, &self.shape, ind)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        Ok(Self {
-            shape: out_shape,
-            values,
-            dtype: DType::F64,
-            integer_sidecar: None,
-        })
+        let shape = self.complex_logical_shape("tensorinv")?;
+        let (n, output_shape) = fnp_linalg::tensorinv_output_shape(&shape, ind)
+            .map_err(|error| UFuncError::Msg(format!("{error}")))?;
+        let coefficients = self.copy_with_logical_shape(vec![n, n]);
+        let inverse = coefficients.inv()?;
+        Self::from_linalg_values(output_shape, inverse.values, inverse.dtype)
     }
 
     #[must_use]

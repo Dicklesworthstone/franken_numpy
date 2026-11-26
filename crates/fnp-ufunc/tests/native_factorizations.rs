@@ -1,4 +1,4 @@
-//! Typed inverse and Cholesky matrix stacks, including selected-triangle rules.
+//! Typed matrix and tensor factorizations, including selected-triangle rules.
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{UFuncArray, UFuncError};
@@ -91,6 +91,24 @@ fn case(source: &UFuncArray, operation: &str, upper: bool) -> Value {
     })
 }
 
+fn tensor_solve_case(source: &UFuncArray, rhs: &UFuncArray, axes: Option<&[usize]>) -> Value {
+    let result = match axes {
+        Some(axes) => source.tensorsolve_with_axes(rhs, axes),
+        None => source.tensorsolve(rhs),
+    };
+    json!({
+        "source": record(source), "rhs": record(rhs), "operation": "tensorsolve",
+        "axes": axes, "actual": output_record(result)
+    })
+}
+
+fn tensor_inverse_case(source: &UFuncArray, ind: usize) -> Value {
+    json!({
+        "source": record(source), "operation": "tensorinv", "ind": ind,
+        "actual": output_record(source.tensorinv(ind))
+    })
+}
+
 fn oracle(cases: &[Value]) {
     let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".into());
     let script = r#"
@@ -114,8 +132,14 @@ for case in cases:
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         try:
-            expected = (np.linalg.inv(source) if case['operation'] == 'inv' else
-                        np.linalg.cholesky(source, upper=case['upper']))
+            if case['operation'] == 'tensorsolve':
+                expected = np.linalg.tensorsolve(source, array(case['rhs']), axes=case['axes'])
+            elif case['operation'] == 'tensorinv':
+                expected = np.linalg.tensorinv(source, ind=case['ind'])
+            elif case['operation'] == 'inv':
+                expected = np.linalg.inv(source)
+            else:
+                expected = np.linalg.cholesky(source, upper=case['upper'])
         except (ValueError, TypeError, np.linalg.LinAlgError) as error:
             assert 'error' in case['actual'], (case, type(error).__name__, str(error))
             continue
@@ -124,6 +148,30 @@ for case in cases:
     assert actual.shape == expected.shape, (case, expected.shape)
     assert actual.dtype == expected.dtype, (case, expected.dtype)
     if not actual.size:
+        continue
+    if case['operation'] in ('tensorsolve', 'tensorinv'):
+        precision = np.float32 if actual.dtype in (np.float32, np.complex64) else np.float64
+        tolerance = 128 * max(source.size, 1) * np.finfo(precision).eps
+        scale = max(float(np.max(np.abs(expected))), 1)
+        np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance * scale)
+        if case['operation'] == 'tensorsolve':
+            rhs = array(case['rhs']).ravel()
+            if case['axes'] is not None:
+                permutation = list(range(source.ndim))
+                for axis in case['axes']:
+                    permutation.remove(axis)
+                    permutation.append(axis)
+                source = source.transpose(permutation)
+            matrix = source.reshape(rhs.size, rhs.size)
+            residual = matrix @ actual.ravel() - rhs
+            bound = tolerance * max(np.linalg.norm(matrix) * np.linalg.norm(actual) +
+                                    np.linalg.norm(rhs), 1)
+        else:
+            n = int(np.sqrt(source.size))
+            matrix, inverse = source.reshape(n, n), actual.reshape(n, n)
+            residual = matrix @ inverse - np.eye(n)
+            bound = tolerance * max(np.linalg.norm(matrix) * np.linalg.norm(inverse), 1)
+        assert np.linalg.norm(residual) <= bound, case
         continue
     n = source.shape[-1]
     precision = np.float32 if actual.dtype in (np.float32, np.complex64) else np.float64
@@ -152,7 +200,7 @@ for case in cases:
         selected[..., diagonal, diagonal] = source[..., diagonal, diagonal].real
         bound = tolerance * np.linalg.norm(selected, axis=(-2, -1))
         assert np.all(np.linalg.norm(reconstructed - selected, axis=(-2, -1)) <= bound), case
-print(f'NumPy {np.__version__}: {len(cases)} inverse/Cholesky cases passed')
+print(f'NumPy {np.__version__}: {len(cases)} matrix/tensor factorization cases passed')
 "#;
     let mut child = Command::new(python)
         .args(["-c", script])
@@ -176,6 +224,178 @@ print(f'NumPy {np.__version__}: {len(cases)} inverse/Cholesky cases passed')
         String::from_utf8_lossy(&output.stderr)
     );
     eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn typed_tensor_solve_and_inverse_match_numpy() {
+    let mut cases = Vec::new();
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let mut values = Vec::new();
+        for row in 0..6 {
+            for column in 0..6 {
+                let real = if dtype == DType::Bool {
+                    if row == column { 1.0 } else { 0.0 }
+                } else if row == column {
+                    (12 + row) as f64
+                } else if dtype.is_integer() {
+                    if column > row { 1.0 } else { 0.0 }
+                } else {
+                    (row + column + 1) as f64 / 13.0
+                };
+                values.push(real);
+                if dtype.is_complex() {
+                    values.push((row as f64 - column as f64 + 1.0) / 11.0);
+                }
+            }
+        }
+        for shape in [vec![2, 3, 6], vec![2, 3, 3, 2]] {
+            let source = input(&shape, dtype, values.clone());
+            cases.push(tensor_inverse_case(&source, 2));
+            for rhs_dtype in [
+                DType::I64,
+                DType::F32,
+                DType::F64,
+                DType::Complex64,
+                DType::Complex128,
+            ] {
+                let rhs_values = (0..6)
+                    .flat_map(|i| {
+                        let real = (i + 1) as f64;
+                        if rhs_dtype.is_complex() {
+                            vec![real, (i as f64 - 2.0) / 7.0]
+                        } else {
+                            vec![real]
+                        }
+                    })
+                    .collect();
+                // Equal products with different leading shapes are legal:
+                // NumPy flattens this 3-by-2 RHS for the 2-by-3 tensor prefix.
+                let rhs = input(&[3, 2], rhs_dtype, rhs_values);
+                cases.push(tensor_solve_case(&source, &rhs, None));
+            }
+        }
+    }
+    assert_eq!(cases.len(), 156);
+    oracle(&cases);
+}
+
+#[test]
+fn tensor_solve_axes_move_logical_complex_axes_and_preserve_exact_sources() {
+    let mut cases = Vec::new();
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        let mut values = Vec::new();
+        for row in 0..6 {
+            for column in 0..6 {
+                values.push(if row == column { 3.0 + row as f64 } else { 0.0 });
+                if dtype.is_complex() {
+                    values.push(if row == column { 0.75 } else { 0.0 });
+                }
+            }
+        }
+        let source = input(&[2, 3, 2, 3], dtype, values);
+        let rhs = input(&[3, 2], DType::F64, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        for axes in [vec![], vec![0, 1], vec![0, 0, 1], vec![2, 3], vec![4]] {
+            cases.push(tensor_solve_case(&source, &rhs, Some(&axes)));
+        }
+    }
+
+    let source = UFuncArray::from_storage(
+        vec![2, 1, 2],
+        ArrayStorage::U64(vec![9_007_199_254_740_993, 1, 0, 18_446_744_073_709_550_591]),
+    )
+    .unwrap();
+    let rhs = UFuncArray::from_storage(
+        vec![1, 2],
+        ArrayStorage::I64(vec![9_007_199_254_740_995, -9_007_199_254_740_997]),
+    )
+    .unwrap();
+    cases.push(tensor_solve_case(&source, &rhs, None));
+    cases.push(tensor_inverse_case(&source, 1));
+
+    // These raw float64 working cells become exactly singular when read
+    // through their declared float32/complex64 storage. Widening the raw
+    // cells instead would silently solve a different, nonsingular matrix.
+    for dtype in [DType::F32, DType::Complex64] {
+        let near_one = 1.0 + 2.0_f64.powi(-26);
+        let mut values = Vec::new();
+        for real in [near_one, 1.0, 1.0, near_one] {
+            values.push(real);
+            if dtype.is_complex() {
+                values.push(0.0);
+            }
+        }
+        let source = input(&[2, 2], dtype, values);
+        let rhs = input(&[2], DType::F32, vec![1.0, 2.0]);
+        cases.push(tensor_solve_case(&source, &rhs, None));
+        cases.push(tensor_inverse_case(&source, 1));
+    }
+    oracle(&cases);
+}
+
+#[test]
+fn tensor_factorization_empty_scalar_singleton_and_error_contracts_match_numpy() {
+    let mut cases = Vec::new();
+    for dtype in [DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+        let value = if dtype.is_complex() {
+            vec![2.0, 1.0]
+        } else {
+            vec![2.0]
+        };
+        for shape in [vec![], vec![1], vec![1, 1]] {
+            let source = input(&shape, dtype, value.clone());
+            for rhs_shape in [vec![], vec![1], vec![1, 1], vec![1, 1, 1, 1, 1]] {
+                let rhs = input(&rhs_shape, DType::F32, vec![3.0]);
+                cases.push(tensor_solve_case(&source, &rhs, None));
+            }
+            for ind in [0, 1, 2, 8] {
+                cases.push(tensor_inverse_case(&source, ind));
+            }
+        }
+        for (shape, rhs_shape) in [(vec![0, 0], vec![0]), (vec![0, 2, 0], vec![0, 2])] {
+            let source = input(&shape, dtype, Vec::new());
+            let rhs = input(&rhs_shape, dtype, Vec::new());
+            cases.push(tensor_solve_case(&source, &rhs, None));
+            for ind in [1, 2, 4] {
+                cases.push(tensor_inverse_case(&source, ind));
+            }
+        }
+    }
+    for dtype in [DType::F16, DType::F32, DType::Complex128] {
+        let values = if dtype.is_complex() {
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        } else {
+            vec![1.0, 0.0, 0.0, 1.0]
+        };
+        let source = input(&[2, 2], dtype, values);
+        cases.push(tensor_inverse_case(&source, 1));
+        for rhs_dtype in [DType::F16, DType::F64] {
+            let rhs = input(&[2], rhs_dtype, vec![1.0, 2.0]);
+            cases.push(tensor_solve_case(&source, &rhs, None));
+        }
+        let wrong_rhs = input(&[3], DType::F64, vec![1.0, 2.0, 3.0]);
+        cases.push(tensor_solve_case(&source, &wrong_rhs, None));
+    }
+    oracle(&cases);
+
+    let malformed = UFuncArray::new(vec![2, 3], vec![0.0; 6], DType::Complex128).unwrap();
+    let rhs = input(&[2], DType::F64, vec![1.0, 2.0]);
+    assert!(malformed.tensorsolve(&rhs).is_err());
+    assert!(malformed.tensorsolve_with_axes(&rhs, &[0]).is_err());
+    assert!(malformed.tensorinv(1).is_err());
 }
 
 #[test]
