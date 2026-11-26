@@ -43694,7 +43694,7 @@ impl UFuncError {
             Self::ReductionContractViolation { .. } => "ufunc_reduction_contract_violation",
             Self::LoopRegistryInvalid { .. } => "ufunc_loop_registry_invalid",
             Self::PolicyUnknownMetadata { .. } => "ufunc_policy_unknown_metadata",
-            Self::Msg(_) => "ufunc_operation_error",
+            Self::ComplexWarning | Self::Msg(_) => "ufunc_operation_error",
         }
     }
 }

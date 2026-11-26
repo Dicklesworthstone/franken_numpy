@@ -2,8 +2,8 @@
 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
-    FloatErrorCallback, FloatErrorMode, UFuncArray, UFuncError, errstate, seterrcall,
-    take_complex_warning_count, take_float_error_events,
+    ComplexWarningMode, FloatErrorCallback, FloatErrorMode, UFuncArray, UFuncError, errstate,
+    set_complex_warning_mode, seterrcall, take_complex_warning_count, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -762,6 +762,40 @@ fn copyto_preserves_exact_wide_integers_and_source_precision() {
     }
     assert_eq!(batch.cases.len(), 48);
     batch.assert_matches_numpy();
+}
+
+#[test]
+fn copyto_promoted_complex_warning_leaves_destination_untouched() {
+    let mut dst = destination(&[3], DType::I32);
+    let before = dst.values().to_vec();
+    let scalar = complex(&[], &[(f64::NAN, 0.0)], DType::Complex128);
+    let vector = complex(&[3], &[(f64::NAN, 0.0); 3], DType::Complex128);
+    let wrong_shape = mask(&[4], &[true]);
+    let all_false = mask(&[3], &[false]);
+    let scalar_false = mask(&[], &[false]);
+    let previous = set_complex_warning_mode(ComplexWarningMode::Raise);
+    let _fp = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+
+    // Scalar pre-casting precedes mask shape validation and numeric errors.
+    assert!(matches!(
+        dst.copyto(&scalar, Some(&wrong_shape), Some("unsafe")),
+        Err(UFuncError::ComplexWarning)
+    ));
+    // Non-scalar transfers validate the mask before selecting a cast loop.
+    assert!(matches!(
+        dst.copyto(&vector, Some(&wrong_shape), Some("unsafe")),
+        Err(UFuncError::Msg(_))
+    ));
+    for where_mask in [None, Some(&all_false)] {
+        assert!(matches!(
+            dst.copyto(&vector, where_mask, Some("unsafe")),
+            Err(UFuncError::ComplexWarning)
+        ));
+    }
+    dst.copyto(&vector, Some(&scalar_false), Some("unsafe"))
+        .unwrap();
+    assert_eq!(dst.values(), before);
+    let _ = set_complex_warning_mode(previous);
 }
 
 #[test]
