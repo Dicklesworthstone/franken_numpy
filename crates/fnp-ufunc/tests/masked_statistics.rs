@@ -138,6 +138,8 @@ impl OracleBatch {
         self.actual.push(match op {
             "var" => array.reduce_var_with_correction(options, correction, mean),
             "std" => array.reduce_std_with_correction(options, correction, mean),
+            "nanvar" => array.nanvar_with_correction(options, correction, mean),
+            "nanstd" => array.nanstd_with_correction(options, correction, mean),
             _ => panic!("unknown corrected statistics operation: {op}"),
         });
     }
@@ -1045,6 +1047,89 @@ fn nan_statistics_combine_valid_counts_masks_and_accumulator_dtypes() {
                                     where_mask: Some(mask),
                                 },
                                 Some(mask_id),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
+}
+
+#[test]
+fn nan_variance_supplied_means_and_real_corrections_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let mask = boolean(&[3], &[true, true, false]);
+    let mask_id = batch.add_input(&mask);
+    let means = [
+        // Distinct from the measured lane means so silently recomputing a
+        // supplied mean would change the expected result.
+        UFuncArray::scalar(3.125, DType::F64),
+        UFuncArray::new(vec![2, 1], vec![2.00000003, -1.25], DType::F32).unwrap(),
+        complex(
+            &[3],
+            &[(0.0, 0.5), (2.0, 3.0), (-1.0, 0.0)],
+            DType::Complex64,
+        ),
+        UFuncArray::new(vec![4], vec![0.0; 4], DType::F32).unwrap(),
+    ];
+    let mean_refs: Vec<_> = means
+        .iter()
+        .map(|mean| Some((batch.add_input(mean), mean)))
+        .chain(std::iter::once(None))
+        .collect();
+    let parts = [
+        (f64::NAN, 7.0),
+        (6.0, f64::NAN),
+        (1.0, -3.0),
+        (1.25000003, 1.5),
+        (2.75, -0.5),
+        (f64::NAN, 0.0),
+    ];
+    for source in [
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
+        let array = if source.is_complex() {
+            complex(&[2, 3], &parts, source)
+        } else {
+            UFuncArray::new(
+                vec![2, 3],
+                parts.iter().map(|pair| pair.0).collect(),
+                source,
+            )
+            .unwrap()
+        };
+        let input = batch.add_input(&array);
+        for &mean in &mean_refs {
+            for axes in [None, Some(&[-1][..]), Some(&[1, 0][..]), Some(&[][..])] {
+                for correction in [
+                    -0.5,
+                    0.5,
+                    1.0,
+                    2.0,
+                    3.25,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    f64::NAN,
+                ] {
+                    for dtype in [None, Some(DType::F64), Some(DType::Complex64)] {
+                        for (op, keepdims) in [("nanvar", false), ("nanstd", true)] {
+                            batch.push_corrected(
+                                input,
+                                &array,
+                                (op, correction),
+                                StatisticalReductionOptions {
+                                    axes,
+                                    keepdims,
+                                    dtype,
+                                    where_mask: Some(&mask),
+                                },
+                                (Some(mask_id), mean),
                             );
                         }
                     }

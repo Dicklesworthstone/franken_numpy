@@ -36848,23 +36848,41 @@ impl UFuncArray {
         options: StatisticalReductionOptions<'_>,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        self.nanvar_with_correction(options, ddof as f64, None)
+    }
+
+    /// NaN-aware variance with a real-valued degrees-of-freedom correction
+    /// and an optional precomputed mean. A supplied mean is used directly
+    /// and must broadcast to the logical input shape. The divisor for each
+    /// result still counts only selected, non-NaN elements.
+    pub fn nanvar_with_correction(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        correction: f64,
+        mean: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
         if self.dtype.is_integer() || self.dtype == DType::Bool {
-            return self.reduce_var_with_options(options, ddof);
+            return self.reduce_var_with_correction(options, correction, mean);
         }
         let dtype = options.dtype.unwrap_or(self.dtype);
         self.validate_nan_statistical_dtype(dtype, "nanvar")?;
         let (axes, plan, counts) = self.nan_statistical_selection_plan(options, dtype, "nanvar")?;
-        let mean = self
-            .nansum_with_options(ReductionOptions {
-                axes: Some(&axes),
-                keepdims: true,
-                dtype: Some(dtype),
-                where_mask: options.where_mask,
-                initial: None,
-            })?
-            .divide_nan_reduction_by_counts(&counts, None);
+        let (mean, mean_plan) = if let Some(mean) = mean {
+            self.supplied_variance_mean(mean)?
+        } else {
+            let mean = self
+                .nansum_with_options(ReductionOptions {
+                    axes: Some(&axes),
+                    keepdims: true,
+                    dtype: Some(dtype),
+                    where_mask: options.where_mask,
+                    initial: None,
+                })?
+                .divide_nan_reduction_by_counts(&counts, None);
+            (mean, plan)
+        };
         let squared =
-            self.squared_nan_reduction_deviations(&mean, |index| plan.output_index(index))?;
+            self.squared_nan_reduction_deviations(&mean, |index| mean_plan.output_index(index))?;
         Ok(squared
             .reduce_sum_with_options(ReductionOptions {
                 axes: Some(&axes),
@@ -36873,7 +36891,7 @@ impl UFuncArray {
                 where_mask: options.where_mask,
                 initial: None,
             })?
-            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+            .divide_nan_reduction_by_counts(&counts, Some(correction)))
     }
 
     /// NaN-aware standard deviation with combined statistical controls.
@@ -36883,6 +36901,18 @@ impl UFuncArray {
         ddof: usize,
     ) -> Result<Self, UFuncError> {
         self.nanvar_with_options(options, ddof)?
+            .sqrt_statistical_reduction()
+    }
+
+    /// NaN-aware standard deviation with the same mean and divisor controls
+    /// as [`Self::nanvar_with_correction`].
+    pub fn nanstd_with_correction(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        correction: f64,
+        mean: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
+        self.nanvar_with_correction(options, correction, mean)?
             .sqrt_statistical_reduction()
     }
 
@@ -38310,17 +38340,18 @@ impl UFuncArray {
         counts
     }
 
-    fn divide_nan_reduction_by_counts(mut self, counts: &[usize], ddof: Option<usize>) -> Self {
+    fn divide_nan_reduction_by_counts(mut self, counts: &[usize], correction: Option<f64>) -> Self {
         if self.dtype.is_complex() {
             for (parts, &count) in self.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
-                if ddof.is_some_and(|ddof| count <= ddof) {
+                let denominator = count as f64 - correction.unwrap_or(0.0);
+                if correction.is_some() && denominator <= 0.0 {
                     // nanvar explicitly copies a real NaN into bad slices,
                     // which sets the imaginary component to positive zero.
                     *parts = [f64::NAN, 0.0];
                 } else {
-                    let value = Self::divide_complex_value_by_count(
+                    let value = Self::divide_complex_value_by_denominator(
                         (parts[0], parts[1]),
-                        count.saturating_sub(ddof.unwrap_or(0)),
+                        denominator,
                         self.dtype,
                     );
                     *parts = [value.0, value.1];
@@ -38328,10 +38359,11 @@ impl UFuncArray {
             }
         } else {
             for (value, &count) in self.values.iter_mut().zip(counts) {
-                let divided = if ddof.is_some_and(|ddof| count <= ddof) {
+                let denominator = count as f64 - correction.unwrap_or(0.0);
+                let divided = if correction.is_some() && denominator <= 0.0 {
                     f64::NAN
                 } else {
-                    *value / count.saturating_sub(ddof.unwrap_or(0)) as f64
+                    *value / denominator
                 };
                 *value = match self.dtype {
                     DType::F16 => fnp_dtype::f16_from_f64(divided).to_f64(),
@@ -38375,7 +38407,7 @@ impl UFuncArray {
         let dtype = dtype.unwrap_or(squared.dtype);
         Ok(squared
             .reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
-            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+            .divide_nan_reduction_by_counts(&counts, Some(ddof as f64)))
     }
 
     fn nanvar_inexact(
@@ -38415,7 +38447,7 @@ impl UFuncArray {
         let dtype = dtype.unwrap_or(squared.dtype);
         Ok(squared
             .reduce_sum_with_dtype(axis, keepdims, dtype)?
-            .divide_nan_reduction_by_counts(&counts, Some(ddof)))
+            .divide_nan_reduction_by_counts(&counts, Some(ddof as f64)))
     }
 
     /// Both single-axis and tuple-axis NaN variance use the same source-typed
