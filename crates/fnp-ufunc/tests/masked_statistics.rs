@@ -117,6 +117,31 @@ impl OracleBatch {
         self.actual.push(reduce(array, operation, options));
     }
 
+    fn push_corrected(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        operation: (&str, f64),
+        options: StatisticalReductionOptions<'_>,
+        auxiliary: (Option<usize>, Option<(usize, &UFuncArray)>),
+    ) {
+        let (mask, mean) = auxiliary;
+        let (op, correction) = operation;
+        self.cases.push(json!({
+            "input": input, "op": op, "correction": correction.to_string(),
+            "axes": options.axes, "keepdims": options.keepdims,
+            "dtype": options.dtype.map(dtype_name), "mask": mask,
+            "mean": mean.map(|(id, _)| id),
+        }));
+        let mean = mean.map(|(_, array)| array);
+        let _errors = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        self.actual.push(match op {
+            "var" => array.reduce_var_with_correction(options, correction, mean),
+            "std" => array.reduce_std_with_correction(options, correction, mean),
+            _ => panic!("unknown corrected statistics operation: {op}"),
+        });
+    }
+
     fn push_arithmetic(
         &mut self,
         input: usize,
@@ -171,7 +196,11 @@ for case in payload['cases']:
         kw['where'] = inputs[case['mask']]
     if case.get('initial') is not None:
         kw['initial'] = inputs[case['initial']]
-    if case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
+    if case.get('mean') is not None:
+        kw['mean'] = inputs[case['mean']]
+    if 'correction' in case:
+        kw['correction'] = float(case['correction'])
+    elif case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
         result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
@@ -279,6 +308,71 @@ print(json.dumps(rows))
             std::thread::current().name().unwrap_or("unnamed")
         );
     }
+}
+
+#[test]
+fn variance_supplied_means_and_real_corrections_match_numpy() {
+    let mut batch = OracleBatch::default();
+    let real = UFuncArray::new(
+        vec![2, 2, 3],
+        (0..12).map(|i| i as f64 - 4.0).collect(),
+        DType::F32,
+    )
+    .unwrap();
+    let complex_input = complex(
+        &[2, 2, 3],
+        &(0..12)
+            .map(|i| (i as f64 - 3.0, (i % 4) as f64 + 0.5))
+            .collect::<Vec<_>>(),
+        DType::Complex64,
+    );
+    let integer =
+        UFuncArray::from_storage(vec![2, 2, 3], ArrayStorage::I8(vec![110; 12])).unwrap();
+    let mask = boolean(&[1, 2, 3], &[true, false, true, false, false, false]);
+    let mask_id = batch.add_input(&mask);
+    let means = [
+        UFuncArray::scalar(4.0, DType::I8),
+        UFuncArray::new(vec![1, 2, 1], vec![1.25, 2.75], DType::F64).unwrap(),
+        complex(
+            &[3],
+            &[(1.0, -2.0), (0.5, 4.0), (3.0, 2.5)],
+            DType::Complex64,
+        ),
+        UFuncArray::new(vec![4], vec![0.0; 4], DType::F32).unwrap(),
+    ];
+    let ids: Vec<_> = means.iter().map(|mean| batch.add_input(mean)).collect();
+    for array in [&real, &complex_input, &integer] {
+        let input = batch.add_input(array);
+        for mean in std::iter::once(None).chain(ids.iter().copied().zip(&means).map(Some)) {
+            for correction in [
+                -1.5,
+                0.5,
+                4.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ] {
+                for op in ["var", "std"] {
+                    for keepdims in [false, true] {
+                        let options = StatisticalReductionOptions {
+                            axes: Some(&[0, -1]),
+                            where_mask: Some(&mask),
+                            keepdims,
+                            dtype: None,
+                        };
+                        batch.push_corrected(
+                            input,
+                            array,
+                            (op, correction),
+                            options,
+                            (Some(mask_id), mean),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]

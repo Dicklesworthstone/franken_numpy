@@ -10661,7 +10661,7 @@ impl UFuncArray {
                 where_mask: options.where_mask,
                 initial: None,
             })?
-            .divide_statistical_reduction_by_counts(&counts, 0)?;
+            .divide_statistical_reduction_by_counts(&counts, 0.0)?;
         if self.dtype == DType::F16 && options.dtype.is_none() {
             mean.cast_numeric_storage(DType::F16, false)
         } else {
@@ -10680,30 +10680,57 @@ impl UFuncArray {
         options: StatisticalReductionOptions<'_>,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
+        self.reduce_var_with_correction(options, ddof as f64, None)
+    }
+
+    /// Variance with NumPy's real-valued `correction` (also called `ddof`)
+    /// and optional precomputed `mean`. The mean returned by a matching
+    /// keepdims reduction broadcasts directly over the input. Supplying it
+    /// skips the mean reduction; each variance lane still counts its own
+    /// selected elements. A nonpositive corrected divisor is clamped to zero.
+    pub fn reduce_var_with_correction(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        correction: f64,
+        mean: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
         let dtype = options
             .dtype
             .unwrap_or_else(|| promote_for_mean_reduction(self.dtype));
         let (axes, plan, counts) = self.statistical_selection_plan(options, dtype, "var")?;
-        // Unlike mean(), variance does not widen a default float16 mean.
-        let mean = self
-            .reduce_sum_with_options(ReductionOptions {
-                axes: Some(&axes),
-                keepdims: true,
-                dtype: Some(dtype),
-                where_mask: options.where_mask,
-                initial: None,
-            })?
-            .divide_statistical_reduction_by_counts(&counts, 0)?;
-        let squared = self.squared_statistical_reduction_deviations(&mean, &plan)?;
+        let (mean, mean_plan) = match mean {
+            Some(mean) => self.supplied_variance_mean(mean)?,
+            None => {
+                // Unlike mean(), variance does not widen a default float16 mean.
+                let mean = self
+                    .reduce_sum_with_options(ReductionOptions {
+                        axes: Some(&axes),
+                        keepdims: true,
+                        dtype: Some(dtype),
+                        where_mask: options.where_mask,
+                        initial: None,
+                    })?
+                    .divide_statistical_reduction_by_counts(&counts, 0.0)?;
+                (mean, plan)
+            }
+        };
+        let squared = self.squared_statistical_reduction_deviations(&mean, &mean_plan)?;
+        // NumPy promotes the sum for integer inputs even when an integer
+        // supplied mean leaves subtraction and squaring in the input dtype.
+        let sum_dtype = if self.dtype.is_integer() || self.dtype == DType::Bool {
+            dtype
+        } else {
+            options.dtype.unwrap_or(squared.dtype)
+        };
         squared
             .reduce_sum_with_options(ReductionOptions {
                 axes: Some(&axes),
                 keepdims: options.keepdims,
-                dtype: Some(options.dtype.unwrap_or(squared.dtype)),
+                dtype: Some(sum_dtype),
                 where_mask: options.where_mask,
                 initial: None,
             })?
-            .divide_statistical_reduction_by_counts(&counts, ddof)
+            .divide_statistical_reduction_by_counts(&counts, correction)
     }
 
     /// Standard deviation with combined statistical reduction controls.
@@ -10714,6 +10741,45 @@ impl UFuncArray {
     ) -> Result<Self, UFuncError> {
         self.reduce_var_with_options(options, ddof)?
             .sqrt_statistical_reduction()
+    }
+
+    /// Standard deviation using the same correction and precomputed-mean
+    /// semantics as [`Self::reduce_var_with_correction`].
+    pub fn reduce_std_with_correction(
+        &self,
+        options: StatisticalReductionOptions<'_>,
+        correction: f64,
+        mean: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
+        self.reduce_var_with_correction(options, correction, mean)?
+            .sqrt_statistical_reduction()
+    }
+
+    fn supplied_variance_mean(&self, mean: &Self) -> Result<(Self, AxesReductionPlan), UFuncError> {
+        if !(mean.dtype.is_numeric() || mean.dtype == DType::Bool) {
+            return Err(UFuncError::Msg(format!(
+                "var: unsupported mean dtype {:?}",
+                mean.dtype
+            )));
+        }
+        let shape = self.complex_logical_shape("var")?;
+        let mean_shape = mean.complex_logical_shape("var mean")?;
+        if broadcast_shape(&shape, &mean_shape).map_err(UFuncError::Shape)? != shape {
+            return Err(UFuncError::ReductionContractViolation {
+                detail: format!(
+                    "mean shape {mean_shape:?} must broadcast to input shape {shape:?}"
+                ),
+            });
+        }
+        // A broadcast mean repeats along missing and singleton axes. Its
+        // logical element index is the index after reducing those axes.
+        let offset = shape.len() - mean_shape.len();
+        let repeated: Vec<isize> = (0..shape.len())
+            .filter(|&axis| axis < offset || mean_shape[axis - offset] == 1)
+            .map(|axis| axis as isize)
+            .collect();
+        let mean_plan = AxesReductionPlan::new(&shape, &repeated, false)?;
+        Ok((mean.cast_numeric_storage(mean.dtype, false)?, mean_plan))
     }
 
     fn statistical_selection_plan(
@@ -10771,13 +10837,18 @@ impl UFuncArray {
     fn divide_statistical_reduction_by_counts(
         mut self,
         counts: &[usize],
-        ddof: usize,
+        correction: f64,
     ) -> Result<Self, UFuncError> {
+        // An explicit comparison retains NaN, as in numpy.maximum(count - ddof, 0).
+        let divisor = |count: usize| {
+            let value = count as f64 - correction;
+            if value < 0.0 { 0.0 } else { value }
+        };
         if self.dtype.is_complex() {
             for (parts, &count) in self.values.as_chunks_mut::<2>().0.iter_mut().zip(counts) {
-                let value = Self::divide_complex_value_by_count(
+                let value = Self::divide_complex_value_by_denominator(
                     (parts[0], parts[1]),
-                    count.saturating_sub(ddof),
+                    divisor(count),
                     self.dtype,
                 );
                 *parts = [value.0, value.1];
@@ -10788,7 +10859,7 @@ impl UFuncArray {
                 .values
                 .into_iter()
                 .zip(counts)
-                .map(|(value, &count)| value / count.saturating_sub(ddof) as f64)
+                .map(|(value, &count)| value / divisor(count))
                 .collect();
             Self::from_values_with_dtype(self.shape, values, self.dtype)
         }
@@ -20185,11 +20256,18 @@ impl UFuncArray {
         count: usize,
         dtype: DType,
     ) -> (f64, f64) {
+        Self::divide_complex_value_by_denominator((re, im), count as f64, dtype)
+    }
+
+    fn divide_complex_value_by_denominator(
+        (re, im): (f64, f64),
+        denominator: f64,
+        dtype: DType,
+    ) -> (f64, f64) {
         // An integer count promotes NumPy's division loop to complex128.
         // Even with a real denominator, complex division couples the
         // components through zero products, affecting NaNs and signed zero.
-        let denominator = count as f64;
-        let (re, im) = if count == 0 {
+        let (re, im) = if denominator == 0.0 {
             (re / denominator, im / denominator)
         } else {
             let reciprocal = 1.0 / denominator;
@@ -20295,22 +20373,14 @@ impl UFuncArray {
     fn sqrt_statistical_reduction(self) -> Result<Self, UFuncError> {
         let mut variance = self;
         if variance.dtype.is_complex() {
-            // Squared deviations produce a nonnegative real part and a zero
-            // imaginary part; invalid arithmetic may instead produce NaNs.
+            // A complex mean supplied for a real input can produce genuinely
+            // complex squared deviations, including negative real variances.
             for value in variance.values.as_chunks_mut::<2>().0 {
-                if value[0].is_nan() {
-                    value[1] = f64::NAN;
-                } else if value[1].is_nan() {
-                    if value[0] != f64::INFINITY {
-                        value[0] = f64::NAN;
-                    }
-                } else {
-                    value[0] = if variance.dtype == DType::Complex64 {
-                        f64::from((value[0] as f32).sqrt())
-                    } else {
-                        value[0].sqrt()
-                    };
-                }
+                let (re, im) = Self::complex_unary_sqrt(value[0], value[1], variance.dtype);
+                *value = [
+                    Self::complex_unary_round(re, variance.dtype),
+                    Self::complex_unary_round(im, variance.dtype),
+                ];
             }
             return Ok(variance);
         }
