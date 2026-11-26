@@ -36102,7 +36102,15 @@ impl UFuncArray {
     ///
     /// Mimics `np.isin(ar1, ar2)` (formerly `np.in1d` before numpy 2.0;
     /// `np.in1d` was deprecated in numpy 1.25 and removed in numpy 2.0).
+    /// Valid complex inputs produce one Boolean per logical element. This
+    /// legacy API retains its component-based fallback for malformed layouts;
+    /// use [`Self::isin_checked`] to receive the validation error.
     pub fn in1d(&self, test_elements: &Self) -> Self {
+        if (self.dtype.is_complex() || test_elements.dtype.is_complex())
+            && let Ok(result) = self.isin_checked(test_elements, false)
+        {
+            return result;
+        }
         if self.dtype == DType::I64
             && test_elements.dtype == DType::I64
             && let (Ok(Some(IntegerSidecar::I64(values))), Ok(Some(IntegerSidecar::I64(set)))) = (
@@ -36150,6 +36158,7 @@ impl UFuncArray {
     /// Test whether each element of `self` is in `test_elements`. Returns a boolean array.
     ///
     /// When `invert` is true, returns True where element is NOT in `test_elements`.
+    /// Use [`Self::isin_checked`] to reject malformed complex layouts.
     pub fn isin(&self, test_elements: &Self, invert: bool) -> Self {
         let mut result = self.in1d(test_elements);
         if invert {
@@ -36158,6 +36167,70 @@ impl UFuncArray {
             }
         }
         result
+    }
+
+    /// Test membership of complete logical elements, rejecting malformed
+    /// complex layouts instead of treating real and imaginary parts separately.
+    /// The result has the logical shape of `self`; `test_elements` is flattened.
+    ///
+    /// Numeric mixed operands compare at their common complex dtype after
+    /// respecting each source's storage precision. A NaN in either component
+    /// never matches, while signed zeros compare equal. Real-only operands
+    /// retain the existing exact-integer and floating membership paths.
+    pub fn isin_checked(
+        &self,
+        test_elements: &Self,
+        invert: bool,
+    ) -> Result<Self, UFuncError> {
+        let mut result = if self.dtype.is_complex() || test_elements.dtype.is_complex() {
+            let shape = self.complex_logical_shape("isin")?;
+            test_elements.complex_logical_shape("isin")?;
+            if !(self.dtype.is_numeric() || self.dtype == DType::Bool)
+                || !(test_elements.dtype.is_numeric() || test_elements.dtype == DType::Bool)
+            {
+                return Err(UFuncError::Msg(
+                    "isin: complex membership requires numeric operands".into(),
+                ));
+            }
+            let dtype = promote(self.dtype, test_elements.dtype);
+            let source = self.cast_numeric_storage(dtype, false)?;
+            let candidates = test_elements.cast_numeric_storage(dtype, false)?;
+            let mut set: Vec<(f64, f64)> = candidates
+                .values
+                .chunks_exact(2)
+                .map(|parts| (parts[0], parts[1]))
+                .filter(|&(re, im)| !re.is_nan() && !im.is_nan())
+                .collect();
+            set.sort_by(|&lhs, &rhs| Self::complex_order_cmp(lhs, rhs));
+            set.dedup_by(|lhs, rhs| *lhs == *rhs);
+            let values = source
+                .values
+                .chunks_exact(2)
+                .map(|parts| {
+                    let value = (parts[0], parts[1]);
+                    let present = !value.0.is_nan()
+                        && !value.1.is_nan()
+                        && set
+                            .binary_search_by(|&candidate| Self::complex_order_cmp(candidate, value))
+                            .is_ok();
+                    if present { 1.0 } else { 0.0 }
+                })
+                .collect();
+            Self {
+                shape,
+                values,
+                dtype: DType::Bool,
+                integer_sidecar: None,
+            }
+        } else {
+            self.in1d(test_elements)
+        };
+        if invert {
+            for v in &mut result.values {
+                *v = 1.0 - *v;
+            }
+        }
+        Ok(result)
     }
 
     /// Return the sorted union of two 1-D arrays.

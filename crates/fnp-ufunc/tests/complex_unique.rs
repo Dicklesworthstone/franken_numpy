@@ -1,4 +1,4 @@
-//! Logical complex unique values, axis slices, and reconstruction metadata.
+//! Logical complex unique values, membership, axis slices, and reconstruction metadata.
 //! The differential oracle targets NumPy 2.4 or later.
 
 use fnp_dtype::{ArrayStorage, DType};
@@ -11,8 +11,17 @@ use std::process::{Command, Stdio};
 
 fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
+        DType::Bool => "bool",
+        DType::I8 => "int8",
+        DType::I16 => "int16",
+        DType::I32 => "int32",
         DType::I64 => "int64",
+        DType::U8 => "uint8",
+        DType::U16 => "uint16",
+        DType::U32 => "uint32",
         DType::U64 => "uint64",
+        DType::F16 => "float16",
+        DType::F32 => "float32",
         DType::F64 => "float64",
         DType::Complex64 => "complex64",
         DType::Complex128 => "complex128",
@@ -71,6 +80,23 @@ struct OracleBatch {
 }
 
 impl OracleBatch {
+    fn membership(&mut self, array: &UFuncArray, candidates: &UFuncArray, invert: bool) {
+        let mut entries = vec![
+            ("isin", Ok(array.isin(candidates, invert))),
+            ("isin_checked", array.isin_checked(candidates, invert)),
+        ];
+        if !invert {
+            entries.push(("in1d", Ok(array.in1d(candidates))));
+        }
+        for (entry, result) in entries {
+            self.cases.push(json!({
+                "op": "isin", "entry": entry, "array": input_spec(array),
+                "candidates": input_spec(candidates), "invert": invert,
+            }));
+            self.actual.push(result.map(|array| vec![array]));
+        }
+    }
+
     fn options(&mut self, array: &UFuncArray, axis: Option<isize>, flags: u8, equal_nan: bool) {
         self.cases.push(json!({
             "op": "unique", "array": input_spec(array), "axis": axis,
@@ -161,7 +187,9 @@ with warnings.catch_warnings():
     for case in json.load(sys.stdin):
         try:
             source = array(case['array'])
-            if case['op'] == 'unique':
+            if case['op'] == 'isin':
+                arrays = (np.isin(source, array(case['candidates']), invert=case['invert']),)
+            elif case['op'] == 'unique':
                 flags = case['flags']
                 result = np.unique(
                     source, axis=case['axis'], return_index=bool(flags & 1),
@@ -674,4 +702,164 @@ fn complex_unique_generated_axis_and_metadata_cases_match_numpy() {
         }
     }
     batch.check();
+}
+
+#[test]
+fn complex_membership_matches_complete_pairs_and_logical_shapes() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let candidates = complex_array(
+            &[1, 5],
+            &[
+                (1.0, 4.0),
+                (3.0, 4.0),
+                (-0.0, 0.0),
+                (f64::NAN, 0.0),
+                (f64::INFINITY, f64::NEG_INFINITY),
+            ],
+            dtype,
+        );
+        for shape in [vec![7], vec![1, 7], vec![1, 7, 1]] {
+            let array = complex_array(
+                &shape,
+                &[
+                    (1.0, 2.0),
+                    (3.0, 4.0),
+                    (3.0, 4.0),
+                    (0.0, -0.0),
+                    (f64::NAN, 0.0),
+                    (0.0, f64::NAN),
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                ],
+                dtype,
+            );
+            for invert in [false, true] {
+                batch.membership(&array, &candidates, invert);
+                batch.membership(&candidates, &array, invert);
+            }
+        }
+    }
+    batch.check();
+}
+
+#[test]
+fn complex_membership_observes_source_precision_and_mixed_numeric_dtypes() {
+    let mut batch = OracleBatch::default();
+    let values = [
+        (1.0 + 2.0_f64.powi(-25), 0.0),
+        (16_777_217.0, 0.0),
+        (1e-100, -1e-100),
+        (0.0, -0.0),
+        (1e100, 1.0),
+        (3.0, 4.0),
+    ];
+    let narrow = complex_array(&[2, 3], &values, DType::Complex64);
+    let wide = complex_array(&[2, 3], &values, DType::Complex128);
+    let real_values = vec![1.0, 1.0 + 2.0_f64.powi(-25), 16_777_217.0, 0.0, 3.0, 4.0];
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        let real = UFuncArray::new(vec![3, 2], real_values.clone(), dtype).unwrap();
+        for complex in [&narrow, &wide] {
+            for invert in [false, true] {
+                batch.membership(complex, &real, invert);
+                batch.membership(&real, complex, invert);
+            }
+        }
+    }
+    for invert in [false, true] {
+        batch.membership(&narrow, &wide, invert);
+        batch.membership(&wide, &narrow, invert);
+    }
+    for dtype in [
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+    ] {
+        let real =
+            UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], dtype).unwrap();
+        for complex in [&narrow, &wide] {
+            batch.membership(&real, complex, false);
+            batch.membership(complex, &real, true);
+        }
+    }
+    for storage in [
+        ArrayStorage::I64(vec![9_007_199_254_740_993, 9_007_199_254_740_992, -1]),
+        ArrayStorage::U64(vec![9_007_199_254_740_993, 9_007_199_254_740_992, u64::MAX]),
+    ] {
+        let real = UFuncArray::from_storage(vec![3], storage).unwrap();
+        let complex = complex_array(
+            &[2],
+            &[(9_007_199_254_740_992.0, 0.0), (-1.0, 0.0)],
+            DType::Complex128,
+        );
+        for invert in [false, true] {
+            batch.membership(&real, &complex, invert);
+            batch.membership(&complex, &real, invert);
+            // The established exact integer route must not be replaced by
+            // comparisons of the rounded f64 working representation.
+            let exact_candidate = real.take(&[1], None).unwrap();
+            batch.membership(&real, &exact_candidate, invert);
+        }
+    }
+    batch.check();
+}
+
+#[test]
+fn complex_membership_scalar_and_empty_inputs_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let candidates = complex_array(&[2], &[(0.0, 0.0), (2.0, -3.0)], dtype);
+        for shape in [vec![], vec![0], vec![0, 3], vec![2, 0, 3]] {
+            let values = if shape.is_empty() {
+                vec![(2.0, -3.0)]
+            } else {
+                vec![]
+            };
+            let array = complex_array(&shape, &values, dtype);
+            for invert in [false, true] {
+                batch.membership(&array, &candidates, invert);
+                batch.membership(&candidates, &array, invert);
+                let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+                batch.membership(&array, &empty, invert);
+                batch.membership(&empty, &array, invert);
+            }
+        }
+        let huge = complex_array(&[0, usize::MAX, usize::MAX], &[], dtype);
+        let empty = huge.isin_checked(&candidates, false).unwrap();
+        assert_eq!(empty.shape(), &[0, usize::MAX, usize::MAX]);
+        assert_eq!(empty.dtype(), DType::Bool);
+        assert!(empty.values().is_empty());
+    }
+    batch.check();
+}
+
+#[test]
+fn complex_membership_checked_rejects_malformed_layouts() {
+    let real = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let valid = complex_array(&[1], &[(1.0, 2.0)], dtype);
+        for (shape, values) in [
+            (vec![], vec![1.0]),
+            (vec![3], vec![1.0, 2.0, 3.0]),
+            (vec![1, 4], vec![1.0, 2.0, 3.0, 4.0]),
+            (vec![0], vec![]),
+        ] {
+            let malformed = UFuncArray::new(shape, values, dtype).unwrap();
+            for other in [&real, &valid] {
+                for invert in [false, true] {
+                    assert!(malformed.isin_checked(other, invert).is_err());
+                    assert!(other.isin_checked(&malformed, invert).is_err());
+                    // Existing infallible methods keep their Boolean return
+                    // type and historical fallback; checked callers get errors.
+                    let legacy = malformed.isin(other, invert);
+                    assert_eq!(legacy.dtype(), DType::Bool);
+                    assert_eq!(legacy.shape(), malformed.shape());
+                    assert_eq!(legacy.values().len(), malformed.values().len());
+                }
+            }
+        }
+    }
 }
