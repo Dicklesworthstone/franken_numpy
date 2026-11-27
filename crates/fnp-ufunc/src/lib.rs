@@ -11607,9 +11607,13 @@ impl UFuncArray {
                 "cumulative arithmetic requires numeric input and accumulator dtypes".to_owned(),
             ));
         }
-        // Cast before scanning: this rounds narrow floats and reads wide
-        // integers from exact storage.
-        let input = self.cast_numeric_storage(dtype, false)?;
+        if let Some(axis) = axis {
+            let shape = self.complex_logical_shape("cumulative arithmetic")?;
+            normalize_axis(axis, shape.len().max(1))?;
+        }
+        // NumPy copies into the accumulator dtype before scanning. This cast
+        // can emit ComplexWarning or raise a floating-point conversion error.
+        let input = self.cast_numeric_storage(dtype, self.dtype != dtype)?;
         let result = scan(&input, axis)?;
         if result.dtype == dtype {
             return Ok(result);
