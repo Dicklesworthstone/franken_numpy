@@ -168,6 +168,31 @@ impl OracleBatch {
         });
     }
 
+    fn push_average(
+        &mut self,
+        input: usize,
+        array: &UFuncArray,
+        weights: Option<(usize, &UFuncArray)>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) {
+        for returned in [false, true] {
+            self.cases.push(json!({
+                "op": "average", "input": input, "weights": weights.map(|(index, _)| index),
+                "axes": axes, "keepdims": keepdims, "dtype": null, "mask": null,
+                "returned": returned,
+            }));
+            let weights = weights.map(|(_, values)| values);
+            self.actual.push(if returned {
+                array
+                    .average_with_weight_sum(weights, axes, keepdims)
+                    .map(|(_, total)| total)
+            } else {
+                array.average_axes(weights, axes, keepdims)
+            });
+        }
+    }
+
     fn assert_matches_numpy(self) {
         let script = r#"
 import json, sys, warnings
@@ -205,7 +230,14 @@ for case in payload['cases']:
     elif case['op'] in ('var', 'std', 'nanvar', 'nanstd'):
         kw['ddof'] = case['ddof']
     try:
-        result = np.asarray(getattr(np, case['op'])(inputs[case['input']], **kw))
+        if case['op'] == 'average':
+            weights = None if case['weights'] is None else inputs[case['weights']]
+            result = np.average(inputs[case['input']], weights=weights, returned=case['returned'], **kw)
+            if case['returned']:
+                result = result[1]
+        else:
+            result = getattr(np, case['op'])(inputs[case['input']], **kw)
+        result = np.asarray(result)
         if result.dtype.kind == 'c':
             parts = np.empty(result.size * 2, dtype=np.float64)
             parts[0::2] = result.real.ravel()
@@ -215,7 +247,7 @@ for case in payload['cases']:
         integers = [str(int(value)) for value in result.flat] if result.dtype.kind in 'biu' else None
         rows.append(dict(shape=list(result.shape), dtype=str(result.dtype),
                          bits=parts.view(np.uint64).tolist(), integers=integers))
-    except (TypeError, ValueError, IndexError) as error:
+    except (TypeError, ValueError, IndexError, ZeroDivisionError) as error:
         rows.append(dict(error=type(error).__name__, axis=getattr(error, 'axis', None),
                          ndim=getattr(error, 'ndim', None)))
 print(json.dumps(rows))
@@ -310,6 +342,88 @@ print(json.dumps(rows))
             std::thread::current().name().unwrap_or("unnamed")
         );
     }
+}
+
+#[test]
+fn weighted_average_preserves_axis_order_kept_dimensions_and_weight_sums() {
+    let mut batch = OracleBatch::default();
+    let shapes: &[&[usize]] = &[&[2, 3, 4], &[0, 3, 4], &[2, 0, 4], &[]];
+    for &shape in shapes {
+        let len = shape.iter().product::<usize>();
+        let real = UFuncArray::from_storage(
+            shape.to_vec(),
+            ArrayStorage::I64((0..len).map(|i| i as i64 * 3 - 4).collect()),
+        )
+        .unwrap();
+        let input = complex(
+            shape,
+            &(0..len)
+                .map(|i| (i as f64 * 2.0, -(i as f64)))
+                .collect::<Vec<_>>(),
+            DType::Complex64,
+        );
+        for array in [&real, &input] {
+            let input_id = batch.add_input(array);
+            for axes in [
+                None,
+                Some(&[][..]),
+                Some(&[0, 2]),
+                Some(&[-1, 0]),
+                Some(&[1, 0, 2]),
+                Some(&[1]),
+                Some(&[1, -2]),
+                Some(&[3]),
+            ] {
+                // Nonsymmetric weight tables distinguish the caller's axis order.
+                let mut weight_shapes = vec![
+                    shape.to_vec(),
+                    vec![],
+                    vec![4, 2],
+                    vec![2, 4],
+                    vec![3, 2, 4],
+                    vec![3],
+                    vec![4, 0],
+                    vec![0, 4],
+                ];
+                weight_shapes.sort();
+                weight_shapes.dedup();
+                for keepdims in [false, true] {
+                    batch.push_average(input_id, array, None, axes, keepdims);
+                    for ws in &weight_shapes {
+                        let nw = ws.iter().product::<usize>();
+                        let weights = UFuncArray::new(
+                            ws.clone(),
+                            (0..nw).map(|i| (i % 7 + 1) as f64).collect(),
+                            DType::F32,
+                        )
+                        .unwrap();
+                        let id = batch.add_input(&weights);
+                        batch.push_average(input_id, array, Some((id, &weights)), axes, keepdims);
+                    }
+                }
+            }
+        }
+    }
+    // A zero complex weight total in one retained lane rejects the whole result.
+    let input = UFuncArray::new(vec![2, 2, 2], vec![1.0; 8], DType::F32).unwrap();
+    let weights = complex(
+        &[2, 2, 2],
+        &[
+            (1., 1.),
+            (-1., -1.),
+            (2., 1.),
+            (2., -1.),
+            (2., 2.),
+            (-2., -2.),
+            (1., 1.),
+            (1., -1.),
+        ],
+        DType::Complex64,
+    );
+    let id = batch.add_input(&input);
+    let wid = batch.add_input(&weights);
+    batch.push_average(id, &input, Some((wid, &weights)), Some(&[0, 2]), true);
+    batch.assert_matches_numpy();
 }
 
 #[test]

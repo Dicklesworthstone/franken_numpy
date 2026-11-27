@@ -29491,39 +29491,98 @@ impl UFuncArray {
     /// multiply complete elements without conjugation. A zero weight total in
     /// any output lane is an error, even when its weighted numerator is zero.
     pub fn average(&self, weights: Option<&Self>, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.average_axes(weights, axis.as_ref().map(std::slice::from_ref), false)
+    }
+
+    /// Average over a tuple of logical axes. Compact weights have one
+    /// dimension per entry of the tuple, in the order given by the caller.
+    pub fn average_axes(
+        &self,
+        weights: Option<&Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        Ok(self.average_and_normalizer(weights, axes, keepdims)?.0)
+    }
+
+    /// Return the average and the sum of its weights, both with the result
+    /// shape and dtype, as in `np.average(..., returned=True)`. Without
+    /// weights, each normalizer is the number of elements in the reduction.
+    pub fn average_with_weight_sum(
+        &self,
+        weights: Option<&Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<(Self, Self), UFuncError> {
+        let (average, totals) = self.average_and_normalizer(weights, axes, keepdims)?;
+        let totals = if totals.shape == average.shape {
+            totals
+        } else {
+            totals.broadcast_to(&average.complex_logical_shape("average")?)?
+        };
+        Ok((average, totals))
+    }
+
+    fn average_and_normalizer(
+        &self,
+        weights: Option<&Self>,
+        axes: Option<&[isize]>,
+        keepdims: bool,
+    ) -> Result<(Self, Self), UFuncError> {
         let shape = self.complex_logical_shape("average")?;
-        // Unlike mean's scalar ufunc shortcut, average normalizes its axis
-        // before doing either the weighted or unweighted calculation.
-        let normalized_axis = axis
-            .map(|axis| normalize_axis(axis, shape.len()))
-            .transpose()?;
-        let axes: Vec<isize> = normalized_axis.map_or_else(
-            || (0..shape.len()).map(|axis| axis as isize).collect(),
-            |axis| vec![axis as isize],
-        );
+        let axes_specified = axes.is_some();
+        let all_axes;
+        let axes = match axes {
+            Some(axes) => axes,
+            None => {
+                all_axes = (0..shape.len())
+                    .map(|axis| axis as isize)
+                    .collect::<Vec<_>>();
+                &all_axes
+            }
+        };
+        let plan = AxesReductionPlan::new(&shape, axes, keepdims)?;
         let Some(weights) = weights else {
-            let mean = self.reduce_mean(axis, false)?;
+            let mean = self.reduce_mean_axes(axes, keepdims)?;
             // NumPy also constructs the (possibly unreturned) weight count.
             // Its input-size/output-size division fails for an empty output.
             if mean.values.is_empty() {
                 return Err(UFuncError::Msg("average: division by zero".to_string()));
             }
-            return Ok(mean);
+            let count = Self::scalar(plan.reduction_count as f64, DType::F64).astype(mean.dtype);
+            return Ok((mean, count));
         };
         let weight_shape = weights.complex_logical_shape("average")?;
         let same_shape = weight_shape == shape;
+        // Normally weights match the whole input. Compact weights instead
+        // index just the selected coordinates, possibly in a permuted order.
+        let mut weight_coordinates = Vec::new();
         if !same_shape {
-            let Some(axis) = normalized_axis else {
+            if !axes_specified {
                 return Err(UFuncError::Msg(
                     "average: axis must be specified when shapes of input and weights differ"
                         .to_string(),
                 ));
-            };
-            if weight_shape != [shape[axis]] {
+            }
+            let weight_axes = axes
+                .iter()
+                .map(|&axis| normalize_axis(axis, shape.len()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !weight_shape
+                .iter()
+                .copied()
+                .eq(weight_axes.iter().map(|&axis| shape[axis]))
+            {
                 return Err(UFuncError::Msg(
-                    "average: shape of weights must match the selected axis".to_string(),
+                    "average: shape of weights must match the selected axes".to_string(),
                 ));
             }
+            let input_strides = c_strides_elems(&shape);
+            weight_coordinates = weight_axes
+                .into_iter()
+                .zip(c_strides_elems(&weight_shape))
+                .map(|(axis, stride)| (input_strides[axis], shape[axis], stride))
+                .collect();
         }
         for operand in [self, weights] {
             if !(operand.dtype.is_numeric() || operand.dtype == DType::Bool) {
@@ -29539,7 +29598,6 @@ impl UFuncArray {
         }
         // Check the reduction's output capacity before constructing any
         // intermediates, including enormous shapes containing an empty axis.
-        let plan = AxesReductionPlan::new(&shape, &axes, false)?;
         plan.output_count
             .checked_mul(if dtype.is_complex() { 2 } else { 1 })
             .filter(|&count| count <= isize::MAX as usize / std::mem::size_of::<f64>())
@@ -29549,7 +29607,7 @@ impl UFuncArray {
         // sidecar or a source-rounded complex64 must not pass through raw f64
         // working cells before multiplication or weight accumulation.
         let totals = if same_shape {
-            weights.reduce_sum_axes_with_dtype(&axes, false, dtype)?
+            weights.reduce_sum_axes_with_dtype(axes, keepdims, dtype)?
         } else {
             weights.reduce_sum_with_dtype(None, false, dtype)?
         };
@@ -29566,18 +29624,17 @@ impl UFuncArray {
 
         let data = self.cast_numeric_storage(dtype, false)?;
         let weights = weights.cast_numeric_storage(dtype, false)?;
-        let inner = if same_shape || data.values.is_empty() {
-            1
-        } else {
-            element_count(&shape[normalized_axis.expect("vector weights have an axis") + 1..])
-                .map_err(UFuncError::Shape)?
-        };
         let mut products = try_zeroed_f64(data.values.len(), "average")?;
         for (index, output) in products.chunks_exact_mut(components).enumerate() {
             let weight_index = if same_shape {
                 index
             } else {
-                (index / inner) % weight_shape[0]
+                weight_coordinates
+                    .iter()
+                    .map(|&(input_stride, extent, weight_stride)| {
+                        ((index / input_stride) % extent) * weight_stride
+                    })
+                    .sum()
             };
             if dtype.is_complex() {
                 let value = Self::complex_reduction_multiply(
@@ -29596,7 +29653,7 @@ impl UFuncArray {
             }
         }
         let products = Self::new(data.shape, products, dtype)?;
-        let mut numerator = products.reduce_sum_axes_with_dtype(&axes, false, dtype)?;
+        let mut numerator = products.reduce_sum_axes_with_dtype(axes, keepdims, dtype)?;
         for (index, value) in numerator.values.chunks_exact_mut(components).enumerate() {
             let total_index = if same_shape { index } else { 0 };
             if dtype.is_complex() {
@@ -29615,7 +29672,7 @@ impl UFuncArray {
                 };
             }
         }
-        Ok(numerator)
+        Ok((numerator, totals))
     }
 
     /// Ratio scaling avoids squaring the complex denominator, which would
