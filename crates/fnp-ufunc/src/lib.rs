@@ -11580,6 +11580,46 @@ impl UFuncArray {
         Self::from_storage(plan.output_shape, storage)
     }
 
+    /// Cumulative sum with an explicit accumulator and result dtype.
+    pub fn cumsum_with_dtype(&self, axis: Option<isize>, dtype: DType) -> Result<Self, UFuncError> {
+        self.cumulate_with_dtype(axis, dtype, Self::cumsum)
+    }
+
+    /// Cumulative product with an explicit accumulator and result dtype.
+    pub fn cumprod_with_dtype(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.cumulate_with_dtype(axis, dtype, Self::cumprod)
+    }
+
+    fn cumulate_with_dtype(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+        scan: fn(&Self, Option<isize>) -> Result<Self, UFuncError>,
+    ) -> Result<Self, UFuncError> {
+        if !(dtype.is_numeric() || dtype == DType::Bool)
+            || !(self.dtype.is_numeric() || self.dtype == DType::Bool)
+        {
+            return Err(UFuncError::Msg(
+                "cumulative arithmetic requires numeric input and accumulator dtypes".to_owned(),
+            ));
+        }
+        // Cast before scanning: this rounds narrow floats and reads wide
+        // integers from exact storage.
+        let input = self.cast_numeric_storage(dtype, false)?;
+        let result = scan(&input, axis)?;
+        if result.dtype == dtype {
+            return Ok(result);
+        }
+        // The integer kernels accumulate with wrapping 64-bit arithmetic.
+        // Narrowing each prefix gives the same residue as narrowing each step.
+        // For Boolean inputs, nonzero prefix sums/products implement OR/AND.
+        result.cast_numeric_storage(dtype, false)
+    }
+
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         if self.dtype.is_complex() {
             return self.cumulate_complex(axis, false);
@@ -38297,6 +38337,42 @@ impl UFuncArray {
         filled.cumprod(axis)
     }
 
+    /// Cumulative sum with NaNs replaced by zero before the accumulator cast.
+    pub fn nancumsum_with_dtype(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.nan_cumulate_with_dtype(axis, dtype, 0.0, Self::cumsum)
+    }
+
+    /// Cumulative product with NaNs replaced by one before the accumulator cast.
+    pub fn nancumprod_with_dtype(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        self.nan_cumulate_with_dtype(axis, dtype, 1.0, Self::cumprod)
+    }
+
+    fn nan_cumulate_with_dtype(
+        &self,
+        axis: Option<isize>,
+        dtype: DType,
+        fill: f64,
+        scan: fn(&Self, Option<isize>) -> Result<Self, UFuncError>,
+    ) -> Result<Self, UFuncError> {
+        if self.dtype.is_complex() {
+            self.complex_nan_filtered_fill(fill)?
+                .cumulate_with_dtype(axis, dtype, scan)
+        } else if self.dtype.is_float() {
+            self.nan_filtered_fill(fill)
+                .cumulate_with_dtype(axis, dtype, scan)
+        } else {
+            self.cumulate_with_dtype(axis, dtype, scan)
+        }
+    }
+
     /// Replace a whole complex element when either component is NaN. The
     /// replacement is a real scalar (`fill + 0j`), not two independent fills.
     fn complex_nan_filtered_fill(&self, fill: f64) -> Result<Self, UFuncError> {
@@ -64790,6 +64866,77 @@ print(json.dumps(np.asarray(result).reshape(-1).view(np.uint64).tolist()))
     #[test]
     fn isdtype_unknown_kind() {
         assert!(!UFuncArray::isdtype(DType::F64, "unknown_kind"));
+    }
+
+    #[test]
+    fn cumulative_dtype_casts_inputs_and_preserves_each_prefix() {
+        let a = UFuncArray::new(vec![2, 2], vec![127.9, 255.0, 2.9, 3.0], DType::F64).unwrap();
+        let sums = a.cumsum_with_dtype(Some(-2), DType::I8).unwrap();
+        assert_eq!(sums.shape(), &[2, 2]);
+        assert_eq!(
+            sums.to_storage().unwrap(),
+            ArrayStorage::I8(vec![127, -1, -127, 2])
+        );
+        let products = a.cumprod_with_dtype(Some(1), DType::U8).unwrap();
+        assert_eq!(
+            products.to_storage().unwrap(),
+            ArrayStorage::U8(vec![127, 129, 2, 6])
+        );
+
+        let a = UFuncArray::new(vec![3], vec![2048.0, 1.0, -2048.0], DType::F64).unwrap();
+        let sums = a.cumsum_with_dtype(None, DType::F16).unwrap();
+        assert_eq!(sums.dtype(), DType::F16);
+        assert_eq!(sums.values(), &[2048.0, 2048.0, 0.0]);
+
+        let a = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![(1u64 << 53) + 1, u64::MAX]),
+        )
+        .unwrap();
+        assert_eq!(
+            a.cumsum_with_dtype(None, DType::U64)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::U64(vec![(1u64 << 53) + 1, 1u64 << 53])
+        );
+    }
+
+    #[test]
+    fn nan_cumulative_dtype_filters_before_conversion() {
+        let a = UFuncArray::new(
+            vec![3, 2],
+            vec![0.0, 2.0, 3.0, f64::NAN, 1.0, -2.0],
+            DType::Complex128,
+        )
+        .unwrap();
+        let sums = a.nancumsum_with_dtype(None, DType::I16).unwrap();
+        assert_eq!(sums.shape(), &[3]);
+        assert_eq!(
+            sums.to_storage().unwrap(),
+            ArrayStorage::I16(vec![0, 0, 1])
+        );
+        let products = a.nancumprod_with_dtype(Some(-1), DType::Complex64).unwrap();
+        assert_eq!(products.dtype(), DType::Complex64);
+        assert_eq!(products.values(), &[0.0, 2.0, 0.0, 2.0, 4.0, 2.0]);
+
+        let a = UFuncArray::new(vec![4], vec![0.0, f64::NAN, 1.0, 0.0], DType::F64).unwrap();
+        assert_eq!(
+            a.nancumsum_with_dtype(None, DType::Bool)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::Bool(vec![false, false, true, true])
+        );
+        assert_eq!(
+            a.nancumprod_with_dtype(None, DType::Bool)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::Bool(vec![false; 4])
+        );
+        assert!(a.cumsum_with_dtype(Some(1), DType::F32).is_err());
+        assert!(a.cumprod_with_dtype(None, DType::Str).is_err());
     }
 
     #[test]
