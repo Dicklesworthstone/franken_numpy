@@ -24149,6 +24149,7 @@ impl UFuncArray {
         // A true scalar is converted even for an empty indexed result, and
         // its floating-point error takes precedence over invalid indices.
         let precast_scalar = if numeric && original_value_shape.is_empty() {
+            report_complex_cast(values.dtype, self.dtype)?;
             let (converted, flags) = values.cast_numeric_with_flags(self.dtype)?;
             dispatch_float_error_flags(flags, "cast")?;
             Some(converted)
@@ -24170,6 +24171,11 @@ impl UFuncArray {
                 "put_along_axis: cannot broadcast values shape {:?} into indexed shape {:?}",
                 original_value_shape, indexed_shape
             )));
+        }
+        // A non-scalar cast loop is selected after value broadcasting but
+        // before bounds checks, even when the indexed result has no elements.
+        if !original_value_shape.is_empty() && numeric {
+            report_complex_cast(values.dtype, self.dtype)?;
         }
         let total = element_count(&indexed_shape).map_err(UFuncError::Shape)?;
         if total > isize::MAX as usize / std::mem::size_of::<(usize, usize)>() {
@@ -24682,6 +24688,7 @@ impl UFuncArray {
         }
         let converted;
         let vals = if numeric && !(self.dtype == DType::F64 && vals.dtype == DType::F64) {
+            report_complex_cast(vals.dtype, self.dtype)?;
             let (values, flags) = vals.cast_numeric_with_flags(self.dtype)?;
             // This conversion precedes bounds checks even with no indices.
             // Raising therefore leaves the destination entirely unchanged.
@@ -24759,83 +24766,90 @@ impl UFuncArray {
         Ok(())
     }
 
-    /// Fill the main diagonal in-place using NumPy's flat-stride semantics.
-    ///
-    /// For 2-D arrays this supports both rectangular matrices and `wrap=True`
-    /// behavior for tall matrices. For N-D arrays, all dimensions must have
-    /// equal length.
-    pub fn fill_diagonal_values(&mut self, vals: &Self, wrap: bool) -> Result<(), UFuncError> {
-        if self.shape.len() < 2 {
-            return Err(UFuncError::Msg("array must be at least 2-d".to_string()));
-        }
-
-        let total_len = self.values.len();
-        let (step, end) = if self.shape.len() == 2 {
-            let cols = self.shape[1];
-            let end = if wrap {
-                total_len
-            } else {
-                cols.saturating_mul(cols).min(total_len)
-            };
-            (cols + 1, end)
-        } else {
-            let first_dim = self.shape[0];
-            if self.shape[1..].iter().any(|&dim| dim != first_dim) {
-                return Err(UFuncError::Msg(
-                    "All dimensions of input must be of equal length".to_string(),
-                ));
+    /// Flat C-order positions of diagonal elements, independent of storage width.
+    fn diagonal_positions(
+        &self,
+        wrap: bool,
+    ) -> Result<std::iter::StepBy<std::ops::Range<usize>>, UFuncError> {
+        let shape = self.complex_logical_shape("fill_diagonal")?;
+        let size = self.values.len() / if self.dtype.is_complex() { 2 } else { 1 };
+        let (step, end) = match shape.as_slice() {
+            [] | [_] => return Err(UFuncError::Msg("array must be at least 2-d".into())),
+            [_, cols] => {
+                let end = if wrap {
+                    size
+                } else {
+                    size.min(cols.saturating_mul(*cols))
+                };
+                (cols.saturating_add(1), end)
             }
-
-            let mut prefix_product = 1usize;
-            let mut step = 1usize;
-            for &dim in &self.shape[..self.shape.len() - 1] {
-                prefix_product = prefix_product
-                    .checked_mul(dim)
-                    .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))?;
-                step = step
-                    .checked_add(prefix_product)
-                    .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))?;
+            [first, rest @ ..] => {
+                if rest.iter().any(|dim| dim != first) {
+                    return Err(UFuncError::Msg(
+                        "All dimensions of input must be of equal length".into(),
+                    ));
+                }
+                let step = rest.iter().try_fold(1usize, |step, dim| {
+                    step.checked_mul(*dim)
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or(UFuncError::Shape(ShapeError::Overflow))
+                })?;
+                (step, size)
             }
-            (step, total_len)
         };
+        Ok((0..end).step_by(step))
+    }
 
-        if vals.values.is_empty() {
-            if end == 0 || total_len == 0 {
-                return Ok(());
-            }
-            return Err(UFuncError::Msg(
-                "fill_diagonal: values array cannot be empty".to_string(),
-            ));
-        }
-
-        let mut flat = 0usize;
-        let mut write_index = 0usize;
-        while flat < end && flat < total_len {
-            let source_index = write_index % vals.values.len();
-            let value = vals.values[source_index];
-            self.values[flat] = value;
-            self.write_integer_mutation(
-                flat,
-                value,
-                vals.integer_sidecar.as_ref(),
-                source_index,
-                "fill_diagonal",
-            )?;
-
-            write_index += 1;
-            flat = match flat.checked_add(step) {
-                Some(next) => next,
-                None => break,
+    /// Fill the main diagonal with flattened, cycling array values. Numeric
+    /// values are converted before writes, even when the diagonal is empty.
+    /// Two-dimensional tall matrices support wrapped diagonals. Higher-rank
+    /// arrays require equal logical dimensions.
+    pub fn fill_diagonal_values(&mut self, vals: &Self, wrap: bool) -> Result<(), UFuncError> {
+        let positions = self.diagonal_positions(wrap)?;
+        let numeric = (self.dtype.is_numeric() || self.dtype == DType::Bool)
+            && (vals.dtype.is_numeric() || vals.dtype == DType::Bool);
+        if numeric {
+            let converted;
+            let vals = if self.dtype == DType::F64 && vals.dtype == DType::F64 {
+                vals
+            } else {
+                converted = vals.cast_numeric_storage(self.dtype, true)?;
+                &converted
             };
+            let count = vals.values.len() / if self.dtype.is_complex() { 2 } else { 1 };
+            if count != 0 {
+                for (i, flat) in positions.enumerate() {
+                    self.write_numeric_assignment(flat, vals, i % count, "fill_diagonal")?;
+                }
+            }
+        } else if !vals.values.is_empty() {
+            for (i, flat) in positions.enumerate() {
+                let index = i % vals.values.len();
+                let value = vals.values[index];
+                self.write_integer_mutation(
+                    flat,
+                    value,
+                    vals.integer_sidecar.as_ref(),
+                    index,
+                    "fill_diagonal",
+                )?;
+                self.values[flat] = value;
+            }
         }
-
         Ok(())
     }
 
-    /// Fill the main diagonal of an array in-place with a scalar.
+    /// Fill the main diagonal with a Python-style floating-point scalar.
     pub fn fill_diagonal(&mut self, val: f64) -> Result<(), UFuncError> {
-        let vals = Self::new(vec![], vec![val], DType::F64)?;
-        self.fill_diagonal_values(&vals, false)
+        if !(self.dtype.is_numeric() || self.dtype == DType::Bool) {
+            return self.fill_diagonal_values(&Self::new(vec![], vec![val], DType::F64)?, false);
+        }
+        let positions = self.diagonal_positions(false)?;
+        let vals = Self::pack_python_float_values(&[val], self.dtype, "fill_diagonal")?;
+        for flat in positions {
+            self.write_numeric_assignment(flat, &vals, 0, "fill_diagonal")?;
+        }
+        Ok(())
     }
 
     /// Return the indices of the diagonal elements of a 2-D array (np.diag_indices).
@@ -81308,14 +81322,21 @@ print(json.dumps(results))
     }
 
     #[test]
-    fn fill_diagonal_rejects_inexact_integer_bridge_values() {
+    fn fill_diagonal_packs_python_float_before_integer_writes() {
         let mut arr =
             UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
+        arr.fill_diagonal(-1.5).unwrap();
+        assert_eq!(
+            arr.to_storage().unwrap(),
+            ArrayStorage::I64(vec![-1, 2, 3, -1])
+        );
 
-        let err = arr
-            .fill_diagonal(1.5)
-            .expect_err("fractional diagonal write must fail");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("fill_diagonal")));
+        let err = arr.fill_diagonal(f64::NAN).unwrap_err();
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("NaN")));
+        assert_eq!(
+            arr.to_storage().unwrap(),
+            ArrayStorage::I64(vec![-1, 2, 3, -1])
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{
     FloatErrorCallback, FloatErrorMode, UFuncArray, UFuncError, errstate, seterrcall,
-    take_float_error_events,
+    take_complex_warning_count, take_float_error_events,
 };
 use serde_json::{Value, json};
 use std::process::{Command, Stdio};
@@ -178,11 +178,14 @@ fn input(array: &UFuncArray) -> Value {
 fn error_category(error: UFuncError) -> String {
     match error {
         UFuncError::FloatingPoint { kind, .. } => return format!("float:{}", kind.as_str()),
+        UFuncError::ComplexWarning => return "complex".into(),
         UFuncError::AxisOutOfBounds { .. } => return "axis".into(),
         _ => {}
     }
     let message = error.to_string();
-    if message.contains("indices must be an integer") {
+    if message.contains("at least 2-d") || message.contains("equal length") {
+        "diagonal-shape"
+    } else if message.contains("indices must be an integer") {
         "index-dtype"
     } else if message.contains("indices ndim") {
         "index-rank"
@@ -203,6 +206,7 @@ struct Outcome {
     error: Option<String>,
     warnings: Vec<String>,
     calls: Vec<String>,
+    complex_warnings: usize,
 }
 
 #[derive(Default)]
@@ -233,6 +237,7 @@ impl OracleBatch {
         });
         let previous = seterrcall(Some(callback));
         take_float_error_events();
+        take_complex_warning_count();
         let mut array = dst.clone();
         let error = {
             let _state = errstate(Some(mode), None, None, None, None);
@@ -252,6 +257,7 @@ impl OracleBatch {
             error,
             warnings,
             calls,
+            complex_warnings: take_complex_warning_count(),
         });
     }
 
@@ -280,6 +286,15 @@ impl OracleBatch {
         );
     }
 
+    fn diagonal(&mut self, dst: &UFuncArray, src: &UFuncArray, wrap: bool, mode: FloatErrorMode) {
+        self.record(
+            dst,
+            json!({"op":"diagonal","wrap":wrap,"src":input(src)}),
+            mode,
+            |array| array.fill_diagonal_values(src, wrap),
+        );
+    }
+
     fn assert_matches_numpy(self) {
         assert!(!self.cases.is_empty());
         let script = r#"
@@ -305,6 +320,7 @@ def kind(message):
 def category(error):
     text = str(error)
     if isinstance(error, FloatingPointError): return 'float:' + kind(text)
+    if 'at least 2-d' in text or 'equal length' in text: return 'diagonal-shape'
     if isinstance(error, np.exceptions.AxisError): return 'axis'
     if 'must be an integer array' in text: return 'index-dtype'
     if 'same number of dimensions' in text: return 'index-rank'
@@ -316,15 +332,15 @@ def category(error):
 rows = []
 for case in json.load(sys.stdin):
     dst, src = load(case['dst']), load(case['src'])
-    idx = case['indices'] if case['op'] == 'put' else load(case['indices'])
     calls = []
     previous = np.seterrcall(lambda message, flags: calls.append(kind(message)))
     failure = None
     with warnings.catch_warnings(record=True) as caught, np.errstate(all=case['mode']):
         warnings.simplefilter('always')
         try:
-            if case['op'] == 'put': np.put(dst, idx, src)
-            else: np.put_along_axis(dst, idx, src, axis=case['axis'])
+            if case['op'] == 'put': np.put(dst, case['indices'], src)
+            elif case['op'] == 'along': np.put_along_axis(dst, load(case['indices']), src, axis=case['axis'])
+            else: np.fill_diagonal(dst, src, wrap=case['wrap'])
         except (TypeError, ValueError, IndexError, FloatingPointError) as error:
             failure = category(error)
     np.seterrcall(previous)
@@ -337,6 +353,7 @@ for case in json.load(sys.stdin):
     else:
         parts = dst.astype(np.float64).ravel()
     rows.append(dict(shape=list(dst.shape), dtype=str(dst.dtype), error=failure,
+                     complex_warnings=sum(issubclass(w.category, np.exceptions.ComplexWarning) for w in caught),
                      warnings=messages, calls=calls, bits=parts.view(np.uint64).tolist(),
                      integers=[str(int(value)) for value in dst.flat] if dst.dtype.kind in 'biu' else None))
 print(json.dumps(rows))
@@ -370,7 +387,13 @@ print(json.dumps(rows))
                 error,
                 warnings,
                 calls,
+                complex_warnings,
             } = outcome;
+            assert_eq!(
+                json!(complex_warnings),
+                expected["complex_warnings"],
+                "{case}: ComplexWarning"
+            );
             assert_eq!(json!(error), expected["error"], "{case}: error precedence");
             assert_eq!(
                 json!(warnings),
@@ -423,6 +446,35 @@ print(json.dumps(rows))
             }
         }
     }
+}
+
+#[test]
+fn fill_diagonal_numeric_cast_layout_and_warning_timing_match_numpy() {
+    let mut batch = OracleBatch::default();
+    for dst_dtype in NUMERIC {
+        for src_dtype in NUMERIC {
+            let src = sample(&[2, 4], src_dtype);
+            for shape in [&[10, 3][..], &[3, 5], &[3, 3, 3], &[0, 3]] {
+                let dst = destination(shape, dst_dtype);
+                for wrap in [true, false] {
+                    for mode in [FloatErrorMode::Warn, FloatErrorMode::Raise] {
+                        batch.diagonal(&dst, &src, wrap, mode);
+                    }
+                }
+            }
+        }
+    }
+    for shape in [&[][..], &[3], &[2, 3, 2], &[2, 2], &[0, 0, 0]] {
+        for src_shape in [&[][..], &[0], &[2]] {
+            batch.diagonal(
+                &destination(shape, DType::I64),
+                &sample(src_shape, DType::Complex128),
+                false,
+                FloatErrorMode::Call,
+            );
+        }
+    }
+    batch.assert_matches_numpy();
 }
 
 #[test]
