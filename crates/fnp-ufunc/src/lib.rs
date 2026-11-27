@@ -11990,25 +11990,73 @@ impl UFuncArray {
     /// Array API cumulative sum (`np.cumulative_sum`). An axis is required for
     /// multidimensional inputs; `cumsum` separately supports flattening them.
     pub fn cumulative_sum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        if axis.is_none() && self.complex_logical_shape("cumulative_sum")?.len() > 1 {
-            return Err(UFuncError::Msg(
-                "cumulative_sum: an axis is required for an array with more than one dimension"
-                    .to_owned(),
-            ));
-        }
-        self.cumsum(axis)
+        self.cumulative_sum_with_options(axis, None, false)
+    }
+
+    /// Array API cumulative sum with optional dtype and leading zero.
+    pub fn cumulative_sum_with_options(
+        &self,
+        axis: Option<isize>,
+        dtype: Option<DType>,
+        include_initial: bool,
+    ) -> Result<Self, UFuncError> {
+        self.array_api_cumulative(axis, dtype, include_initial, false)
     }
 
     /// Array API cumulative product (`np.cumulative_prod`). An axis is required
     /// for multidimensional inputs.
     pub fn cumulative_prod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        if axis.is_none() && self.complex_logical_shape("cumulative_prod")?.len() > 1 {
-            return Err(UFuncError::Msg(
-                "cumulative_prod: an axis is required for an array with more than one dimension"
-                    .to_owned(),
-            ));
+        self.cumulative_prod_with_options(axis, None, false)
+    }
+
+    /// Array API cumulative product with optional dtype and leading one.
+    pub fn cumulative_prod_with_options(
+        &self,
+        axis: Option<isize>,
+        dtype: Option<DType>,
+        include_initial: bool,
+    ) -> Result<Self, UFuncError> {
+        self.array_api_cumulative(axis, dtype, include_initial, true)
+    }
+
+    fn array_api_cumulative(
+        &self,
+        axis: Option<isize>,
+        dtype: Option<DType>,
+        include_initial: bool,
+        product: bool,
+    ) -> Result<Self, UFuncError> {
+        let operation = if product {
+            "cumulative_prod"
+        } else {
+            "cumulative_sum"
+        };
+        let shape = self.complex_logical_shape(operation)?;
+        if axis.is_none() && shape.len() > 1 {
+            return Err(UFuncError::Msg(format!(
+                "{operation}: an axis is required for an array with more than one dimension"
+            )));
         }
-        self.cumprod(axis)
+        // NumPy applies atleast_1d first, including to complex scalars.
+        let selected = normalize_axis(axis.unwrap_or(0), shape.len().max(1))?;
+        let scan = if product { Self::cumprod } else { Self::cumsum };
+        let result = match dtype {
+            Some(dtype) => self.cumulate_with_dtype(axis, dtype, scan)?,
+            None => scan(self, axis)?,
+        };
+        if !include_initial {
+            return Ok(result);
+        }
+
+        // Prepend after scanning so the initial identity never participates in
+        // an arithmetic step (important for signed zeros and complex infinities).
+        let mut initial_shape = result.complex_logical_shape(operation)?;
+        initial_shape[selected] = 1;
+        let identity = if product { 1.0 } else { 0.0 };
+        let initial = Self::scalar(identity, DType::F64)
+            .cast_numeric_storage(result.dtype, false)?
+            .broadcast_to(&initial_shape)?;
+        Self::concatenate(&[&initial, &result], selected as isize)
     }
 
     fn cumulate_complex(&self, axis: Option<isize>, product: bool) -> Result<Self, UFuncError> {
@@ -64937,6 +64985,55 @@ print(json.dumps(np.asarray(result).reshape(-1).view(np.uint64).tolist()))
         );
         assert!(a.cumsum_with_dtype(Some(1), DType::F32).is_err());
         assert!(a.cumprod_with_dtype(None, DType::Str).is_err());
+    }
+
+    #[test]
+    fn array_api_cumulative_initial_is_one_identity_per_lane() {
+        let a = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::U64(vec![(1u64 << 53) + 1, 2, 3, 4]),
+        )
+        .unwrap();
+        let sum = a.cumulative_sum_with_options(Some(-2), None, true).unwrap();
+        assert_eq!(sum.shape(), &[3, 2]);
+        assert_eq!(
+            sum.to_storage().unwrap(),
+            ArrayStorage::U64(vec![0, 0, (1u64 << 53) + 1, 2, (1u64 << 53) + 4, 6])
+        );
+        let prod = a
+            .cumulative_prod_with_options(Some(-1), Some(DType::U8), true)
+            .unwrap();
+        assert_eq!(prod.shape(), &[2, 3]);
+        assert_eq!(
+            prod.to_storage().unwrap(),
+            ArrayStorage::U8(vec![1, 1, 2, 1, 3, 12])
+        );
+        assert!(a.cumulative_sum_with_options(None, None, true).is_err());
+        assert!(
+            a.cumulative_prod_with_options(Some(2), None, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn array_api_cumulative_initial_handles_complex_scalar_and_empty_axes() {
+        let scalar =
+            UFuncArray::new(vec![2], vec![f64::INFINITY, -0.0], DType::Complex128).unwrap();
+        let prod = scalar
+            .cumulative_prod_with_options(Some(-1), None, true)
+            .unwrap();
+        assert_eq!(prod.shape(), &[2, 2]);
+        assert_eq!(prod.values(), &[1.0, 0.0, f64::INFINITY, -0.0]);
+        assert!(prod.values()[3].is_sign_negative());
+
+        let a = UFuncArray::new(vec![2, 0], Vec::new(), DType::F32).unwrap();
+        let sum = a.cumulative_sum_with_options(Some(1), None, true).unwrap();
+        assert_eq!(sum.shape(), &[2, 1]);
+        assert_eq!(sum.dtype(), DType::F32);
+        assert_eq!(sum.values(), &[0.0; 2]);
+        let prod = a.cumulative_prod_with_options(Some(0), None, true).unwrap();
+        assert_eq!(prod.shape(), &[3, 0]);
+        assert!(prod.values().is_empty());
     }
 
     #[test]
