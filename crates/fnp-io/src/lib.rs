@@ -622,9 +622,7 @@ fn read_header_span(payload: &[u8], version: (u8, u8)) -> Result<(usize, usize),
     Ok((header_offset, header_len))
 }
 
-fn read_npy_header_from_file(path: &std::path::Path) -> Result<(NpyHeader, usize), IOError> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|_| IOError::MemmapContractViolation("failed to open NPY file for header"))?;
+fn read_npy_header_from_file(file: &mut std::fs::File) -> Result<(NpyHeader, usize), IOError> {
     let mut magic_and_version = [0u8; 8];
     file.read_exact(&mut magic_and_version).map_err(|_| {
         IOError::HeaderSchemaInvalid("payload truncated before magic/version bytes")
@@ -5837,15 +5835,10 @@ pub fn savez_compressed(
 
 /// A memory-mapped array backed by a file on disk.
 ///
-/// Provides NumPy-compatible `np.memmap` semantics: the array data lives in a
-/// file and is accessed through OS-level memory mapping. Changes to writable
-/// mappings are flushed to disk via `flush()`.
-///
-/// File-backed array that provides the same API surface as `numpy.memmap`.
-///
-/// Instead of OS-level memory-mapping (which requires `unsafe`), this uses
-/// safe standard I/O: the data region is read into an in-memory buffer,
-/// and `flush()` writes modifications back to the backing file.
+/// The data region is read into a private buffer using standard file I/O.
+/// A writable mapping remembers its original file handle. After mutable access,
+/// `flush()` writes the elements changed locally since the previous flush.
+/// Independently opened mappings see external updates when reopened.
 #[derive(Debug)]
 pub struct MemmapArray {
     /// Array shape.
@@ -5858,10 +5851,66 @@ pub struct MemmapArray {
     pub fortran_order: bool,
     /// In-memory buffer holding the array data.
     buffer: Vec<u8>,
-    /// Backing file path (for flush support).
-    backing_path: Option<std::path::PathBuf>,
+    /// Persistent mappings remember their opened file and original physical layout.
+    backing: Option<MappingWriteback>,
     /// Whether this mapping is writable.
     writable: bool,
+}
+
+#[derive(Debug)]
+struct MappingWriteback {
+    file: std::fs::File,
+    offset: usize,
+    item_size: usize,
+    // Allocated on first mutable access and released after a successful flush.
+    before: Option<Vec<u8>>,
+}
+
+impl MappingWriteback {
+    fn new(file: std::fs::File, offset: usize, item_size: usize) -> Self {
+        Self {
+            file,
+            offset,
+            item_size,
+            before: None,
+        }
+    }
+
+    fn flush(&mut self, current: &[u8]) -> Result<(), IOError> {
+        let Some(before) = &self.before else {
+            return Ok(());
+        };
+        let mut start = None;
+        let mut write = |start: usize, end: usize| -> Result<(), IOError> {
+            // The constructor checked that offset + the entire buffer length fits.
+            self.file
+                .seek(SeekFrom::Start((self.offset + start) as u64))
+                .map_err(|_| IOError::MemmapContractViolation("flush: failed to seek"))?;
+            self.file
+                .write_all(&current[start..end])
+                .map_err(|_| IOError::MemmapContractViolation("flush: failed to write"))
+        };
+        for (i, (old, new)) in before
+            .chunks_exact(self.item_size)
+            .zip(current.chunks_exact(self.item_size))
+            .enumerate()
+        {
+            let pos = i * self.item_size;
+            if old != new {
+                start.get_or_insert(pos);
+            } else if let Some(first) = start.take() {
+                write(first, pos)?;
+            }
+        }
+        if let Some(first) = start {
+            write(first, current.len())?;
+        }
+        self.file
+            .flush()
+            .map_err(|_| IOError::MemmapContractViolation("flush: failed to flush file"))?;
+        self.before = None;
+        Ok(())
+    }
 }
 
 impl MemmapArray {
@@ -5873,13 +5922,18 @@ impl MemmapArray {
 
     /// Get a mutable byte slice of the array data.
     ///
-    /// Returns `None` if the mapping is read-only.
+    /// Returns `None` if the mapping is read-only. A persistent writable mapping
+    /// snapshots its local buffer on the first mutable borrow after each flush.
     pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
-        if self.writable {
-            Some(&mut self.buffer)
-        } else {
-            None
+        if !self.writable {
+            return None;
         }
+        if !self.buffer.is_empty()
+            && let Some(backing) = &mut self.backing
+        {
+            backing.before.get_or_insert_with(|| self.buffer.clone());
+        }
+        Some(&mut self.buffer)
     }
 
     /// Whether this memmap is writable.
@@ -5909,27 +5963,13 @@ impl MemmapArray {
             ))
     }
 
-    /// Flush changes to disk for writable mappings.
-    ///
-    /// No-op for read-only or copy-on-write mappings (no backing path).
+    /// Flush locally changed elements to the original file. Adjacent changes
+    /// are written together. An error leaves changes pending for a retry.
+    /// Read-only and copy-on-write buffers have no writeback state.
     pub fn flush(&mut self) -> Result<(), IOError> {
-        let path = match &self.backing_path {
-            Some(p) => p.clone(),
-            None => return Ok(()),
-        };
-        if !self.writable {
-            return Ok(());
+        if let Some(backing) = &mut self.backing {
+            backing.flush(&self.buffer)?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(|_| IOError::MemmapContractViolation("flush: failed to open backing file"))?;
-        file.seek(SeekFrom::Start(self.offset as u64))
-            .map_err(|_| IOError::MemmapContractViolation("flush: failed to seek"))?;
-        file.write_all(&self.buffer)
-            .map_err(|_| IOError::MemmapContractViolation("flush: failed to write"))?;
-        file.flush()
-            .map_err(|_| IOError::MemmapContractViolation("flush: failed to sync"))?;
         Ok(())
     }
 
@@ -5967,21 +6007,7 @@ pub fn memmap(
     offset: usize,
     shape: &[usize],
 ) -> Result<MemmapArray, IOError> {
-    if dtype == IOSupportedDType::Object {
-        return Err(IOError::MemmapContractViolation(
-            "object dtype is invalid for memmap path",
-        ));
-    }
-    let item_size = dtype.item_size().ok_or(IOError::MemmapContractViolation(
-        "unsupported dtype for memmap",
-    ))?;
-    let count = element_count(shape)?;
-    let expected_bytes = count
-        .checked_mul(item_size)
-        .ok_or(IOError::MemmapContractViolation(
-            "array byte size overflowed",
-        ))?;
-
+    let (item_size, expected_bytes) = memmap_extent(dtype, shape)?;
     match mode {
         MemmapMode::Write => {
             if expected_bytes == 0 {
@@ -6012,80 +6038,90 @@ pub fn memmap(
                 offset,
                 fortran_order: false,
                 buffer,
-                backing_path: Some(path.to_path_buf()),
+                backing: Some(MappingWriteback::new(file, offset, item_size)),
                 writable: true,
             })
         }
-        MemmapMode::ReadWrite => {
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .map_err(|_| IOError::MemmapContractViolation("failed to open file for rw"))?;
-            let file_len = usize::try_from(
-                file.metadata()
-                    .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
-                    .len(),
-            )
-            .unwrap_or(usize::MAX);
-            let end = offset
-                .checked_add(expected_bytes)
-                .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
-            if file_len < end {
-                return Err(IOError::MemmapContractViolation(
-                    "backing file is too small for requested mapping",
-                ));
-            }
-            file.seek(SeekFrom::Start(offset as u64))
-                .map_err(|_| IOError::MemmapContractViolation("failed to seek in file"))?;
-            let mut buffer = vec![0u8; expected_bytes];
-            file.read_exact(&mut buffer)
-                .map_err(|_| IOError::MemmapContractViolation("failed to read file data"))?;
-            Ok(MemmapArray {
-                shape: shape.to_vec(),
-                dtype,
-                offset,
-                fortran_order: false,
-                buffer,
-                backing_path: Some(path.to_path_buf()),
-                writable: true,
-            })
-        }
-        MemmapMode::ReadOnly | MemmapMode::CopyOnWrite => {
-            let mut file = std::fs::File::open(path)
-                .map_err(|_| IOError::MemmapContractViolation("failed to open file"))?;
-            let file_len = usize::try_from(
-                file.metadata()
-                    .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
-                    .len(),
-            )
-            .unwrap_or(usize::MAX);
-            let end = offset
-                .checked_add(expected_bytes)
-                .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
-            if file_len < end {
-                return Err(IOError::MemmapContractViolation(
-                    "backing file is too small for requested mapping",
-                ));
-            }
-            file.seek(SeekFrom::Start(offset as u64))
-                .map_err(|_| IOError::MemmapContractViolation("failed to seek in file"))?;
-            let mut buffer = vec![0u8; expected_bytes];
-            file.read_exact(&mut buffer)
-                .map_err(|_| IOError::MemmapContractViolation("failed to read file data"))?;
-            let writable = mode == MemmapMode::CopyOnWrite;
-            Ok(MemmapArray {
-                shape: shape.to_vec(),
-                dtype,
-                offset,
-                fortran_order: false,
-                buffer,
-                // ReadOnly and CopyOnWrite: no flush-back to the file.
-                backing_path: None,
-                writable,
-            })
+        MemmapMode::ReadOnly | MemmapMode::CopyOnWrite | MemmapMode::ReadWrite => {
+            let file = open_existing_memmap(path, mode)?;
+            read_existing_memmap(file, dtype, mode, offset, shape, expected_bytes)
         }
     }
+}
+
+fn memmap_extent(dtype: IOSupportedDType, shape: &[usize]) -> Result<(usize, usize), IOError> {
+    if dtype == IOSupportedDType::Object {
+        return Err(IOError::MemmapContractViolation(
+            "object dtype is invalid for memmap path",
+        ));
+    }
+    let item_size = dtype.item_size().ok_or(IOError::MemmapContractViolation(
+        "unsupported dtype for memmap",
+    ))?;
+    let count = element_count(shape)?;
+    let expected_bytes = count
+        .checked_mul(item_size)
+        .ok_or(IOError::MemmapContractViolation(
+            "array byte size overflowed",
+        ))?;
+
+    Ok((item_size, expected_bytes))
+}
+
+fn open_existing_memmap(
+    path: &std::path::Path,
+    mode: MemmapMode,
+) -> Result<std::fs::File, IOError> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(mode == MemmapMode::ReadWrite)
+        .open(path)
+        .map_err(|_| IOError::MemmapContractViolation("failed to open backing file"))
+}
+
+fn read_existing_memmap(
+    mut file: std::fs::File,
+    dtype: IOSupportedDType,
+    mode: MemmapMode,
+    offset: usize,
+    shape: &[usize],
+    expected_bytes: usize,
+) -> Result<MemmapArray, IOError> {
+    let end = offset
+        .checked_add(expected_bytes)
+        .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
+    let file_len = file
+        .metadata()
+        .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
+        .len();
+    if file_len < end as u64 {
+        return Err(IOError::MemmapContractViolation(
+            "backing file is too small for requested mapping",
+        ));
+    }
+    file.seek(SeekFrom::Start(offset as u64))
+        .map_err(|_| IOError::MemmapContractViolation("failed to seek in file"))?;
+    let mut buffer = vec![0u8; expected_bytes];
+    file.read_exact(&mut buffer)
+        .map_err(|_| IOError::MemmapContractViolation("failed to read file data"))?;
+    let backing = if mode == MemmapMode::ReadWrite {
+        Some(MappingWriteback::new(
+            file,
+            offset,
+            dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?,
+        ))
+    } else {
+        None
+    };
+    Ok(MemmapArray {
+        shape: shape.to_vec(),
+        dtype,
+        offset,
+        fortran_order: false,
+        buffer,
+        backing,
+        writable: mode != MemmapMode::ReadOnly,
+    })
 }
 
 /// Open a memory-mapped array from an existing NPY file.
@@ -6099,8 +6135,17 @@ pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArra
         ));
     }
     // Read only the header to determine shape/dtype/offset.
-    let (header, header_end) = read_npy_header_from_file(path)?;
-    let mut mapped = memmap(path, header.descr, mode, header_end, &header.shape)?;
+    let mut file = open_existing_memmap(path, mode)?;
+    let (header, header_end) = read_npy_header_from_file(&mut file)?;
+    let (_, expected_bytes) = memmap_extent(header.descr, &header.shape)?;
+    let mut mapped = read_existing_memmap(
+        file,
+        header.descr,
+        mode,
+        header_end,
+        &header.shape,
+        expected_bytes,
+    )?;
     mapped.fortran_order = header.fortran_order;
     Ok(mapped)
 }
@@ -6183,9 +6228,14 @@ pub fn open_memmap(
         .map_err(|_| IOError::MemmapContractViolation("failed to write file header"))?;
     file.set_len(total_len as u64)
         .map_err(|_| IOError::MemmapContractViolation("failed to set file length"))?;
-    memmap(path, dtype, MemmapMode::ReadWrite, offset, shape).map(|mut mapped| {
-        mapped.fortran_order = fortran_order;
-        mapped
+    Ok(MemmapArray {
+        shape: shape.to_vec(),
+        dtype,
+        offset,
+        fortran_order,
+        buffer: vec![0; payload_bytes],
+        backing: Some(MappingWriteback::new(file, offset, item_size)),
+        writable: true,
     })
 }
 
@@ -13143,6 +13193,50 @@ mm.flush()
             .is_err()
         );
         assert!(!absent.exists(), "invalid mapping must not create a file");
+    }
+
+    #[test]
+    fn buffered_memmap_flush_merges_disjoint_elements_and_retains_its_file() {
+        let dir = std::env::temp_dir().join(format!("fnp_memmap_merge_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("original.npy");
+        let mut first = open_memmap(
+            &path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::U32),
+            Some(&[4]),
+            false,
+            None,
+        )
+        .unwrap();
+        let mut second = memmap_npy(&path, MemmapMode::ReadWrite).unwrap();
+        first.as_bytes_mut().unwrap()[4..8].copy_from_slice(&0x1111_1111_u32.to_le_bytes());
+        second.as_bytes_mut().unwrap()[12..16].copy_from_slice(&42_u32.to_le_bytes());
+        first.flush().unwrap();
+        second.flush().unwrap();
+        // A mutable borrow that makes no change must also preserve external writes.
+        let _ = second.as_bytes_mut().unwrap();
+        second.flush().unwrap();
+        let (_, values, _) = load(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(values, [0.0, 0x1111_1111_u32 as f64, 0.0, 42.0]);
+
+        // Two stale buffers change the same u32. Write a complete logical element,
+        // even when just one byte differs from this mapping's local snapshot.
+        second.as_bytes_mut().unwrap()[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        second.flush().unwrap();
+        let (_, values, _) = load(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(values, [0.0, 1.0, 0.0, 42.0]);
+
+        let moved = dir.join("moved.npy");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"replacement file").unwrap();
+        first.as_bytes_mut().unwrap()[..4].copy_from_slice(&7_u32.to_le_bytes());
+        first.flush().unwrap();
+        let (_, values, _) = load(&std::fs::read(&moved).unwrap()).unwrap();
+        assert_eq!(values, [7.0, 1.0, 0.0, 42.0]);
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), b"replacement file");
+        drop((first, second));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
