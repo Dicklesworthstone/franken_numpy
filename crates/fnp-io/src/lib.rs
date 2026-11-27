@@ -22,6 +22,9 @@
 
 #![forbid(unsafe_code)]
 
+mod numeric_storage;
+pub use numeric_storage::{load_storage, save_storage};
+
 use core::fmt;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -70,6 +73,7 @@ pub const IO_PACKET_REASON_CODES: [&str; 10] = [
     "io_npz_archive_contract_violation",
     "io_policy_unknown_metadata",
 ];
+const MAX_NPY_NDIM: usize = 32;
 const NPY_HEADER_REQUIRED_KEYS: [&str; 3] = ["descr", "fortran_order", "shape"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1134,7 +1138,7 @@ pub fn read_npy_header_framing(payload: &[u8]) -> Result<NpyHeaderFraming, IOErr
     };
     let fortran_order = parse_fortran_order_value(field("fortran_order")?)?;
     let shape = parse_shape_field(field("shape")?)?;
-    if shape.len() > 32 {
+    if shape.len() > MAX_NPY_NDIM {
         return Err(IOError::HeaderSchemaInvalid(
             "shape rank exceeds packet validation budget",
         ));
@@ -1235,7 +1239,7 @@ pub fn validate_header_schema(
             "header bytes must be within bounded budget",
         ));
     }
-    if shape.len() > 32 {
+    if shape.len() > MAX_NPY_NDIM {
         return Err(IOError::HeaderSchemaInvalid(
             "shape rank exceeds packet validation budget",
         ));
