@@ -2834,16 +2834,24 @@ fn qr_exact_upper_triangular(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)
     Some((q, r))
 }
 
+// The fast Householder kernels square column entries and form 2/(v^T v).
+// Leave headroom for the column norm, the pivot update and the projection.
+// Values outside this range use the normalized, extended-exponent kernel.
+fn qr_requires_scaling(a: &[f64], rows: usize) -> bool {
+    let lower = f64::MIN_POSITIVE.sqrt();
+    let upper = f64::MAX.sqrt() / (4.0 * rows as f64);
+    a.iter()
+        .any(|&x| x != 0.0 && !(lower..=upper).contains(&x.abs()))
+}
+
 pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "qr_nxn: input must be n*n with n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for QR",
-        ));
+    if qr_requires_scaling(a, n) {
+        return real_qr_scaled(a, n, n, n);
     }
 
     if n < QR_BLOCK_MIN
@@ -3009,10 +3017,8 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
             "qr_mxn: input must be m*n with m,n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for QR",
-        ));
+    if qr_requires_scaling(a, m) {
+        return real_qr_scaled(a, m, n, m);
     }
 
     if let Some(result) = qr_mxn_exact_upper_trapezoidal(a, m, n) {
@@ -3111,6 +3117,15 @@ fn qr_complex_cell_count(rows: usize, columns: usize) -> Result<usize, LinAlgErr
 /// introducing a second thin-factor algorithm. This is a bounded-memory API,
 /// not a throughput claim against the existing full-factor implementation.
 pub fn qr_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    real_qr_scaled(a, m, n, m.min(n))
+}
+
+fn real_qr_scaled(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    q_columns: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if Some(a.len()) != m.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
             "qr_mxn_reduced: input must contain m*n entries",
@@ -3128,7 +3143,7 @@ pub fn qr_mxn_reduced(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
     for (pair, &value) in interleaved.as_chunks_mut::<2>().0.iter_mut().zip(a) {
         pair[0] = value;
     }
-    let (q, r) = complex_qr_mxn_reduced(&interleaved, m, n)?;
+    let (q, r) = complex_qr_scaled(&interleaved, m, n, q_columns)?;
     drop(interleaved);
     let real_factor = |interleaved: Vec<f64>| -> Result<Vec<f64>, LinAlgError> {
         let mut real = qr_buffer(interleaved.len() / 2)?;
@@ -13801,12 +13816,8 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
             "complex_qr: input must be 2*m*n with m,n > 0",
         ));
     }
-    for v in a {
-        if !v.is_finite() {
-            return Err(LinAlgError::NormDetRankPolicyViolation(
-                "complex matrix entries must be finite for QR",
-            ));
-        }
+    if qr_requires_scaling(a, m) {
+        return complex_qr_scaled(a, m, n, m);
     }
 
     let mut r = a.to_vec();
@@ -14018,6 +14029,17 @@ pub fn complex_qr_mxn_reduced(
     m: usize,
     n: usize,
 ) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    complex_qr_scaled(a, m, n, m.min(n))
+}
+
+// Full and thin QR use the same reflectors. Only the width of the identity
+// they act on and the number of returned rows of R differ.
+fn complex_qr_scaled(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    q_columns: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     let input_length = qr_complex_cell_count(m, n)?;
     if a.len() != input_length {
         return Err(LinAlgError::ShapeContractViolation(
@@ -14034,7 +14056,8 @@ pub fn complex_qr_mxn_reduced(
         return Ok((Vec::new(), Vec::new()));
     }
     let factor_length = qr_complex_cell_count(m, k)?;
-    let result_length = qr_complex_cell_count(k, n)?;
+    let q_length = qr_complex_cell_count(m, q_columns)?;
+    let result_length = qr_complex_cell_count(q_columns, n)?;
     let mut r = qr_buffer(input_length)?;
     r.copy_from_slice(a);
     // Reflectors are column-major here so each saved direction is contiguous.
@@ -14085,18 +14108,18 @@ pub fn complex_qr_mxn_reduced(
         }
     }
 
-    let mut q = qr_buffer(factor_length)?;
-    for index in 0..k {
-        q[2 * (index * k + index)] = 1.0;
+    let mut q = qr_buffer(q_length)?;
+    for index in 0..q_columns {
+        q[2 * (index * q_columns + index)] = 1.0;
     }
     for column in (0..k).rev() {
         let v = &reflectors[2 * column * m..2 * (column + 1) * m];
         if v[2 * column] != 0.0 || v[2 * column + 1] != 0.0 {
-            reduced_qr_apply_reflector(&mut q, m, k, column, v);
+            reduced_qr_apply_reflector(&mut q, m, q_columns, column, v);
         }
     }
     drop(reflectors);
-    if m > k {
+    if m > q_columns {
         // Do not retain the discarded m-by-n workspace in the returned small
         // R factor's capacity. Allocate only its k-by-n occupied rows.
         let mut reduced = qr_buffer(result_length)?;
@@ -27347,6 +27370,17 @@ np.testing.assert_allclose((u[:, :k] * (actual_s / scale)) @ vh[:k, :],
 
     fn assert_complex_qr_contract(a: &[f64], m: usize, n: usize, tol: f64) {
         let (q, r) = complex_qr_mxn(a, m, n).expect("complex QR");
+        assert_complete_qr_factors(a, m, n, tol, q, r);
+    }
+
+    fn assert_complete_qr_factors(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        tol: f64,
+        q: Vec<f64>,
+        r: Vec<f64>,
+    ) {
         assert_eq!(q.len(), 2 * m * m);
         assert_eq!(r.len(), 2 * m * n);
         assert!(q.iter().chain(&r).all(|x| x.is_finite()));
@@ -27391,6 +27425,50 @@ np.testing.assert_allclose((u[:, :k] * (actual_s / scale)) @ vh[:k, :],
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!((gram[2 * (i * m + j)] - expected).abs() < 1e-12);
                 assert!(gram[2 * (i * m + j) + 1].abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_real_qr_preserves_independent_column_scales() {
+        let interleave = |data: &[f64]| -> Vec<f64> { data.iter().flat_map(|&x| [x, 0.0]).collect() };
+        for (m, n) in [(2, 2), (4, 2), (2, 4)] {
+            for scales in [[1e300, 1e-300], [1e-310, 1e200], [1e-300, 1e-300]] {
+                let a: Vec<f64> = (0..m * n)
+                    .map(|i| ((i * 7 % 11) as f64 - 4.0) * scales[i % n % 2])
+                    .collect();
+                let (q, r) = qr_mxn(&a, m, n).unwrap();
+                assert_complete_qr_factors(
+                    &interleave(&a),
+                    m,
+                    n,
+                    2e-12,
+                    interleave(&q),
+                    interleave(&r),
+                );
+                if m == n {
+                    assert_eq!(qr_nxn(&a, n).unwrap(), (q, r));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_qr_handles_overflowing_intermediate_projection() {
+        // Doubling the reflector projection overflows f64, even though the
+        // column norm and both complete factors fit.
+        assert_complex_qr_contract(&[8e307, 0.0, 8e307, 0.0], 2, 1, 2e-12);
+        let stack = [8e307, 8e307, 3e-300, 4e-300];
+        let (qs, rs) = super::batch_qr(&stack, &[2, 2, 1]).unwrap();
+        for lane in 0..2 {
+            let a = &stack[2 * lane..2 * lane + 2];
+            let (q, r) = qr_mxn(a, 2, 1).unwrap();
+            assert_eq!(q, qs[4 * lane..4 * lane + 4]);
+            assert_eq!(r, rs[2 * lane..2 * lane + 2]);
+            assert!(q.iter().chain(&r).all(|value| value.is_finite()));
+            assert_eq!(r[1], 0.0);
+            for row in 0..2 {
+                assert!((q[row * 2] * (r[0] / a[row]) - 1.0).abs() < 1e-12);
             }
         }
     }
