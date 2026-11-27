@@ -564,26 +564,71 @@ impl NdLayout {
         true
     }
 
+    /// Create a readonly sliding window across every axis in axis order.
     pub fn sliding_window_view(&self, window_shape: &[usize]) -> Result<Self, ShapeError> {
-        if window_shape.len() != self.shape.len() {
+        self.window_layout(window_shape, 0..self.ndim())
+    }
+
+    /// Create a readonly sliding window along the specified axes.
+    ///
+    /// Negative axes count from the end. Axes may repeat and each window is
+    /// taken on the extent left by earlier windows on that axis. Window
+    /// dimensions are appended in the order supplied.
+    pub fn sliding_window_view_on_axes(
+        &self,
+        window_shape: &[usize],
+        axes: &[isize],
+    ) -> Result<Self, ShapeError> {
+        let ndim = self.ndim();
+        let mut normalized = Vec::with_capacity(axes.len());
+        for &axis in axes {
+            let index = if axis < 0 {
+                ndim.checked_add_signed(axis)
+            } else {
+                Some(axis as usize)
+            };
+            normalized.push(
+                index
+                    .filter(|&index| index < ndim)
+                    .ok_or(ShapeError::InvalidDimension(axis))?,
+            );
+        }
+        self.window_layout(window_shape, normalized.into_iter())
+    }
+
+    fn window_layout(
+        &self,
+        window_shape: &[usize],
+        axes: impl ExactSizeIterator<Item = usize>,
+    ) -> Result<Self, ShapeError> {
+        if window_shape.len() != axes.len() {
             return Err(ShapeError::RankMismatch {
-                expected: self.shape.len(),
+                expected: axes.len(),
                 actual: window_shape.len(),
             });
         }
+        if self.strides.len() != self.ndim() {
+            return Err(ShapeError::RankMismatch {
+                expected: self.ndim(),
+                actual: self.strides.len(),
+            });
+        }
 
-        let mut shape = Vec::with_capacity(self.shape.len() * 2);
-        for (axis, (&dim, &window)) in self.shape.iter().zip(window_shape).enumerate() {
+        let rank = self.ndim() + window_shape.len();
+        let mut shape = Vec::with_capacity(rank);
+        shape.extend_from_slice(&self.shape);
+        let mut strides = Vec::with_capacity(rank);
+        strides.extend_from_slice(&self.strides);
+        for (axis, &window) in axes.zip(window_shape) {
+            let dim = shape[axis];
             if window > dim {
                 return Err(ShapeError::InvalidWindowDimension { axis, window, dim });
             }
-            shape.push(dim - window + 1);
+            shape[axis] = (dim - window).checked_add(1).ok_or(ShapeError::Overflow)?;
+            strides.push(self.strides[axis]);
         }
-        shape.extend(window_shape.iter().copied());
+        shape.extend_from_slice(window_shape);
 
-        let mut strides = Vec::with_capacity(self.strides.len() * 2);
-        strides.extend(self.strides.iter().copied());
-        strides.extend(self.strides.iter().copied());
         let unit_window_contiguous = window_shape.iter().all(|&window| window == 1)
             && (self.is_contiguous() || self.is_fortran_contiguous());
         let has_internal_overlap = if unit_window_contiguous {
@@ -1434,6 +1479,69 @@ print("\n".join(out))
         assert_eq!(view.strides, vec![40, 8, 40, 8]);
         assert!(!view.is_writeable());
         assert!(view.has_internal_overlap());
+    }
+
+    #[test]
+    fn sliding_windows_on_selected_axes_keep_order_and_original_strides() {
+        let base = NdLayout::contiguous(vec![3, 4, 5], 2, MemoryOrder::F).expect("layout");
+        let view = base
+            .sliding_window_view_on_axes(&[3, 2], &[-1, 0])
+            .expect("selected axes");
+        assert_eq!(view.shape, [2, 4, 3, 3, 2]);
+        assert_eq!(view.strides, [2, 6, 24, 24, 2]);
+        assert!(view.has_internal_overlap());
+        assert!(!view.is_writeable());
+
+        let unchanged = base
+            .sliding_window_view_on_axes(&[], &[])
+            .expect("no axes");
+        assert_eq!(unchanged, base.as_read_only());
+    }
+
+    #[test]
+    fn sliding_windows_on_repeated_axes_trim_sequentially() {
+        let base = NdLayout::contiguous(vec![5], 4, MemoryOrder::C).expect("layout");
+        let reversed = base.as_strided(vec![5], vec![-4]).expect("reversed");
+        let view = reversed
+            .sliding_window_view_on_axes(&[2, 3], &[0, -1])
+            .expect("repeated axis");
+        assert_eq!(view.shape, [2, 2, 3]);
+        assert_eq!(view.strides, [-4, -4, -4]);
+        assert!(view.has_internal_overlap());
+        assert!(!view.is_writeable());
+
+        let empty = base
+            .sliding_window_view_on_axes(&[0, 6], &[0, 0])
+            .expect("zero window increases the position extent");
+        assert_eq!(empty.shape, [1, 0, 6]);
+        assert!(!empty.has_internal_overlap());
+
+        assert_eq!(
+            base.sliding_window_view_on_axes(&[4, 3], &[0, 0]),
+            Err(ShapeError::InvalidWindowDimension {
+                axis: 0,
+                window: 3,
+                dim: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn sliding_windows_validate_axes_and_window_lengths() {
+        let base = NdLayout::contiguous(vec![3, 4], 1, MemoryOrder::C).expect("layout");
+        for axis in [2, -3, isize::MIN] {
+            assert_eq!(
+                base.sliding_window_view_on_axes(&[], &[axis]),
+                Err(ShapeError::InvalidDimension(axis))
+            );
+        }
+        assert_eq!(
+            base.sliding_window_view_on_axes(&[1], &[0, 1]),
+            Err(ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
     }
 
     #[test]
