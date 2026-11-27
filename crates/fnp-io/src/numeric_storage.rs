@@ -3,8 +3,10 @@
 use fnp_dtype::{ArrayStorage, f16};
 
 use super::{
-    IOError, IOSupportedDType, MAX_NPY_NDIM, NpyArrayBytes, NpyHeader, element_count,
-    parse_npy_bytes_borrowed, row_major_values, validate_read_payload, write_npy_bytes,
+    IOError, IOSupportedDType, MAX_NPY_NDIM, NpyArrayBytes, NpyHeader, NpzCompression,
+    NpzRangePolicy, element_count, npy_v1_encoded_len_for_capacity, parse_npy_bytes_borrowed,
+    row_major_values, validate_npz_archive_budget, validate_public_npz_entry_names,
+    validate_read_payload, walk_npz_members, write_npy_bytes, write_npz_bytes_with_compression,
 };
 
 /// Load a numeric NPY array into native typed storage in logical C order.
@@ -155,4 +157,54 @@ fn encode_numeric(shape: &[usize], storage: &ArrayStorage) -> Result<(NpyHeader,
         descr,
     };
     Ok((header, payload))
+}
+
+/// A numeric NPZ member with its public name, logical shape and typed values.
+pub type NpzStorageEntry = (String, Vec<usize>, ArrayStorage);
+
+/// Load all numeric members of a stored or deflated archive. Each member
+/// retains its own dtype and is decoded directly from its validated NPY bytes.
+pub fn load_npz_storage(data: &[u8]) -> Result<Vec<NpzStorageEntry>, IOError> {
+    let mut entries = Vec::new();
+    walk_npz_members(data, NpzRangePolicy::Adaptive, |name, bytes| {
+        let (shape, storage) = load_storage(bytes)?;
+        let name = name.strip_suffix(".npy").unwrap_or(&name).to_owned();
+        entries.push((name, shape, storage));
+        Ok(())
+    })?;
+    Ok(entries)
+}
+
+/// Save heterogeneous numeric arrays to one NPZ archive. Each storage variant
+/// chooses its own NPY dtype, with the same representation as `save_storage`.
+pub fn savez_storage(
+    entries: &[(&str, &[usize], &ArrayStorage)],
+    compression: NpzCompression,
+) -> Result<Vec<u8>, IOError> {
+    validate_public_npz_entry_names(entries.iter().map(|entry| entry.0))?;
+    let mut members = Vec::with_capacity(entries.len());
+    let mut total = 0usize;
+    for &(name, shape, storage) in entries {
+        let overflow = || IOError::NpzArchiveContractViolation("archive byte count overflowed");
+        let payload_len = storage
+            .len()
+            .checked_mul(storage.dtype().item_size())
+            .ok_or_else(overflow)?;
+        validate_npz_archive_budget(
+            entries.len(),
+            total.checked_add(payload_len).ok_or_else(overflow)?,
+            0,
+        )?;
+        let (header, payload) = encode_numeric(shape, storage)?;
+        total = npy_v1_encoded_len_for_capacity(&header, payload.len())
+            .and_then(|size| total.checked_add(size))
+            .ok_or_else(overflow)?;
+        validate_npz_archive_budget(entries.len(), total, 0)?;
+        members.push((name, header, payload));
+    }
+    let raw: Vec<_> = members
+        .iter()
+        .map(|(name, header, payload)| (*name, header, payload.as_slice()))
+        .collect();
+    write_npz_bytes_with_compression(&raw, compression)
 }

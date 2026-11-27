@@ -23,7 +23,9 @@
 #![forbid(unsafe_code)]
 
 mod numeric_storage;
-pub use numeric_storage::{load_storage, save_storage};
+pub use numeric_storage::{
+    NpzStorageEntry, load_npz_storage, load_storage, save_storage, savez_storage,
+};
 
 use core::fmt;
 use std::borrow::Cow;
@@ -1653,11 +1655,6 @@ pub fn write_npz_bytes_with_compression(
     entries: &[(&str, &NpyHeader, &[u8])],
     compression: NpzCompression,
 ) -> Result<Vec<u8>, IOError> {
-    if entries.is_empty() {
-        return Err(IOError::NpzArchiveContractViolation(
-            "npz: cannot write archive with zero entries",
-        ));
-    }
     if entries.len() > MAX_ARCHIVE_MEMBERS {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: member count exceeds bounded limit",
@@ -2154,12 +2151,7 @@ where
             ));
         }
         let file_name = String::from_utf8_lossy(&data[fname_start..fname_end]).into_owned();
-        // Prevent directory traversal
-        if file_name.contains("..") || file_name.starts_with('/') {
-            return Err(IOError::NpzArchiveContractViolation(
-                "npz: malicious filename detected (directory traversal)",
-            ));
-        }
+        validate_npz_file_name(&file_name)?;
 
         // Parse local file header to find data start
         if local_offset
@@ -5744,6 +5736,15 @@ pub fn load_npz(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzLoadedEntry>, 
     Ok(results)
 }
 
+fn validate_npz_file_name(file_name: &str) -> Result<(), IOError> {
+    if file_name.contains("..") || file_name.starts_with('/') {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: malicious filename detected (directory traversal)",
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_npz_file_name(name: &str) -> String {
     if name.ends_with(".npy") {
         name.to_string()
@@ -5752,12 +5753,18 @@ fn normalized_npz_file_name(name: &str) -> String {
     }
 }
 
-fn validate_public_npz_entry_names(
-    entries: &[(&str, &[usize], &[f64], IOSupportedDType)],
+fn validate_public_npz_entry_names<'a>(
+    names: impl ExactSizeIterator<Item = &'a str>,
 ) -> Result<(), IOError> {
-    let mut seen = HashSet::with_capacity(entries.len());
-    for &(name, _, _, _) in entries {
+    if names.len() > MAX_ARCHIVE_MEMBERS {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: member count exceeds bounded limit",
+        ));
+    }
+    let mut seen = HashSet::with_capacity(names.len());
+    for name in names {
         let file_name = normalized_npz_file_name(name);
+        validate_npz_file_name(&file_name)?;
         if !seen.insert(file_name) {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: archive member names must be unique",
@@ -5771,7 +5778,7 @@ fn validate_public_npz_entry_names(
 ///
 /// Each entry is (name, shape, values, dtype).
 pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<Vec<u8>, IOError> {
-    validate_public_npz_entry_names(entries)?;
+    validate_public_npz_entry_names(entries.iter().map(|entry| entry.0))?;
 
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());
@@ -5801,7 +5808,7 @@ pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<V
 pub fn savez_compressed(
     entries: &[(&str, &[usize], &[f64], IOSupportedDType)],
 ) -> Result<Vec<u8>, IOError> {
-    validate_public_npz_entry_names(entries)?;
+    validate_public_npz_entry_names(entries.iter().map(|entry| entry.0))?;
 
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());
@@ -10873,9 +10880,12 @@ mm.flush()
     }
 
     #[test]
-    fn npz_empty_archive_rejected() {
-        let result = write_npz_bytes(&[]);
-        assert!(result.is_err());
+    fn npz_empty_archive_matches_numpy_end_record() {
+        let expected = write_empty_npz_eocd();
+        assert_eq!(write_npz_bytes(&[]).unwrap(), expected);
+        assert_eq!(savez(&[]).unwrap(), expected);
+        assert_eq!(savez_compressed(&[]).unwrap(), expected);
+        assert!(load_npz(&expected, false).unwrap().is_empty());
     }
 
     #[test]

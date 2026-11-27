@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use fnp_dtype::ArrayStorage;
 use fnp_io::{
-    IOError, IOSupportedDType, NpyArrayBytes, NpyHeader, load_storage, read_npy_bytes, save_storage,
-    write_npy_bytes,
+    IOError, IOSupportedDType, NpyArrayBytes, NpyHeader, NpzCompression, load_npz_storage,
+    load_storage, read_npy_bytes, read_npz_bytes, save_storage, savez_storage, write_npy_bytes,
 };
 
 #[test]
@@ -140,4 +140,36 @@ for code in ('?', 'i1', 'u1', 'i2', 'i4', 'i8', 'u2', 'u4', 'u8',
         assert_eq!(actual.payload.as_ref(), expected);
     }
     assert!(bytes.is_empty());
+}
+
+#[test]
+fn numeric_archives_preserve_member_dtypes_names_and_order() {
+    let ids = ArrayStorage::U64(vec![u64::MAX, (1_u64 << 53) + 1]);
+    let signal = ArrayStorage::Complex128(vec![(1.0, -2.5)]);
+    let flags = ArrayStorage::Bool(Vec::new());
+    let members: &[(&str, &[usize], &ArrayStorage)] = &[
+        ("ids", &[2], &ids),
+        ("signal.npy", &[], &signal),
+        ("flags", &[0, 4], &flags),
+    ];
+    for compression in [NpzCompression::Store, NpzCompression::Deflate] {
+        let bytes = savez_storage(members, compression).unwrap();
+        assert_eq!(
+            load_npz_storage(&bytes).unwrap(),
+            [
+                ("ids".to_owned(), vec![2], ids.clone()),
+                ("signal".to_owned(), vec![], signal.clone()),
+                ("flags".to_owned(), vec![0, 4], flags.clone()),
+            ]
+        );
+        let raw = read_npz_bytes(&bytes, false).unwrap();
+        assert_eq!(raw[0].array.header.descr, IOSupportedDType::U64);
+        assert_eq!(raw[1].array.header.descr, IOSupportedDType::Complex128);
+        assert_eq!(raw[2].array.to_storage().unwrap(), flags);
+        let empty = savez_storage(&[], compression).unwrap();
+        assert!(load_npz_storage(&empty).unwrap().is_empty());
+        assert!(savez_storage(&[("x", &[2], &ids), ("x.npy", &[2], &ids)], compression).is_err());
+        assert!(savez_storage(&[("../x", &[2], &ids)], compression).is_err());
+        assert!(savez_storage(&[("ids", &[1], &ids)], compression).is_err());
+    }
 }
