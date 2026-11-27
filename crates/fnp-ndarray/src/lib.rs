@@ -337,6 +337,10 @@ pub fn broadcast_strides(
     Ok(out)
 }
 
+fn scaled_stride(stride: isize, dim: usize) -> Option<isize> {
+    isize::try_from((stride as i128) * (dim as i128)).ok()
+}
+
 fn required_view_nbytes(
     shape: &[usize],
     strides: &[isize],
@@ -413,6 +417,129 @@ impl NdLayout {
         element_count(&self.shape)?
             .checked_mul(self.item_size)
             .ok_or(ShapeError::Overflow)
+    }
+
+    /// Resolve a reshape using the same storage and starting byte.
+    ///
+    /// Returns `Ok(None)` when the dimensions are valid but preserving the
+    /// requested traversal order would require copying elements. One dimension
+    /// may be inferred with `-1`. A successful view retains the source's
+    /// writeability and overlap flags.
+    pub fn reshape_view(
+        &self,
+        new_shape: &[isize],
+        order: MemoryOrder,
+    ) -> Result<Option<Self>, ShapeError> {
+        if self.shape.len() != self.strides.len() {
+            return Err(ShapeError::RankMismatch {
+                expected: self.ndim(),
+                actual: self.strides.len(),
+            });
+        }
+        if self.item_size == 0 {
+            return Err(ShapeError::InvalidItemSize);
+        }
+        isize::try_from(self.item_size).map_err(|_| ShapeError::Overflow)?;
+        let shape = fix_unknown_dimension(new_shape, element_count(&self.shape)?)?;
+        if !new_shape.contains(&-1) && self.shape == shape {
+            return Ok(Some(self.clone()));
+        }
+
+        let contiguous = match order {
+            MemoryOrder::C => self.is_contiguous(),
+            MemoryOrder::F => self.is_fortran_contiguous(),
+        };
+        let strides = if shape.contains(&0) {
+            // Empty reshaped views retain nominal strides across empty axes.
+            // Newly allocated empty arrays use a separate all-zero convention.
+            let nominal: Vec<_> = shape.iter().map(|&dim| dim.max(1)).collect();
+            contiguous_strides(&nominal, self.item_size, order)?
+        } else if contiguous {
+            contiguous_strides(&shape, self.item_size, order)?
+        } else {
+            let Some(strides) = self.reshaped_strides(&shape, order)? else {
+                return Ok(None);
+            };
+            strides
+        };
+        Ok(Some(Self {
+            shape,
+            strides,
+            item_size: self.item_size,
+            writeable: self.writeable,
+            has_internal_overlap: self.has_internal_overlap,
+        }))
+    }
+
+    fn reshaped_strides(
+        &self,
+        shape: &[usize],
+        order: MemoryOrder,
+    ) -> Result<Option<Vec<isize>>, ShapeError> {
+        // Within a run, adjacent logical elements have a constant byte step.
+        // A new axis may split such a run, but cannot straddle a change of step.
+        let mut runs: Vec<(usize, isize)> = Vec::new();
+        for (&dim, &stride) in self.shape.iter().zip(&self.strides) {
+            if dim == 1 {
+                continue;
+            }
+            if let Some((count, step)) = runs.last_mut() {
+                let adjacent = match order {
+                    MemoryOrder::C => scaled_stride(stride, dim) == Some(*step),
+                    MemoryOrder::F => scaled_stride(*step, *count) == Some(stride),
+                };
+                if adjacent {
+                    *count *= dim;
+                    if order == MemoryOrder::C {
+                        *step = stride;
+                    }
+                    continue;
+                }
+            }
+            runs.push((dim, stride));
+        }
+
+        let mut strides = vec![0; shape.len()];
+        let mut end = 0;
+        for (count, step) in runs {
+            let start = end;
+            let mut product = 1;
+            while product < count {
+                // Both shapes have the same checked, nonzero element count.
+                product *= shape[end];
+                end += 1;
+            }
+            if product != count {
+                return Ok(None);
+            }
+            match order {
+                MemoryOrder::C => {
+                    strides[end - 1] = step;
+                    for axis in (start..end - 1).rev() {
+                        strides[axis] = scaled_stride(strides[axis + 1], shape[axis + 1])
+                            .ok_or(ShapeError::Overflow)?;
+                    }
+                }
+                MemoryOrder::F => {
+                    strides[start] = step;
+                    for axis in start + 1..end {
+                        strides[axis] = scaled_stride(strides[axis - 1], shape[axis - 1])
+                            .ok_or(ShapeError::Overflow)?;
+                    }
+                }
+            }
+        }
+
+        if end < shape.len() {
+            // All remaining axes are singletons. Non-contiguous inputs have
+            // at least one non-singleton axis, so a previous step exists.
+            let mut step = strides[end - 1];
+            if order == MemoryOrder::F {
+                step = scaled_stride(step, shape[end - 1]).ok_or(ShapeError::Overflow)?;
+            }
+            strides[end..].fill(step);
+        }
+        Ok(Some(strides))
     }
 
     pub fn as_strided(&self, shape: Vec<usize>, strides: Vec<isize>) -> Result<Self, ShapeError> {
@@ -1467,6 +1594,133 @@ print("\n".join(out))
                 actual: 1
             }
         ));
+    }
+
+    #[test]
+    fn reshape_view_matches_numpy_strides_across_gaps_and_singletons() {
+        let storage = NdLayout::contiguous(vec![64], 8, MemoryOrder::C).expect("storage");
+        let row_major = storage
+            .as_strided(vec![2, 3, 4], vec![120, 32, 8])
+            .expect("padded rows");
+        let view = row_major
+            .reshape_view(&[2, 2, 1, -1], MemoryOrder::C)
+            .expect("shape")
+            .expect("view");
+        assert_eq!(view.shape, [2, 2, 1, 6]);
+        assert_eq!(view.strides, [120, 48, 48, 8]);
+        assert_eq!(row_major.reshape_view(&[4, 6], MemoryOrder::C), Ok(None));
+
+        let column_major = storage
+            .as_strided(vec![3, 2, 4], vec![8, 24, 64])
+            .expect("padded columns");
+        let view = column_major
+            .reshape_view(&[2, 3, 1, 4, 1], MemoryOrder::F)
+            .expect("shape")
+            .expect("view");
+        assert_eq!(view.strides, [8, 16, 64, 64, 256]);
+
+        let reversed = storage
+            .as_strided(vec![6], vec![-16])
+            .expect("negative step");
+        assert_eq!(
+            reversed
+                .reshape_view(&[2, 3], MemoryOrder::C)
+                .expect("shape")
+                .expect("view")
+                .strides,
+            [-48, -16]
+        );
+    }
+
+    #[test]
+    fn reshape_view_preserves_readonly_aliases_and_empty_view_conventions() {
+        let scalar = NdLayout::contiguous(vec![], 4, MemoryOrder::C).expect("scalar");
+        let broadcast = scalar.broadcast_to(vec![2, 3]).expect("broadcast");
+        let reshaped = broadcast
+            .reshape_view(&[-1], MemoryOrder::C)
+            .expect("shape")
+            .expect("view");
+        assert_eq!(reshaped.shape, [6]);
+        assert_eq!(reshaped.strides, [0]);
+        assert!(!reshaped.is_writeable());
+        assert!(reshaped.has_internal_overlap());
+        assert_eq!(
+            broadcast.reshape_view(&[7], MemoryOrder::F),
+            Err(ShapeError::IncompatibleElementCount { old: 6, new: 7 })
+        );
+
+        let empty = NdLayout::contiguous(vec![0], 4, MemoryOrder::C).expect("empty");
+        for (order, expected) in [(MemoryOrder::C, [12, 12, 4]), (MemoryOrder::F, [4, 8, 8])] {
+            let view = empty
+                .reshape_view(&[2, 0, 3], order)
+                .expect("empty shape")
+                .expect("view");
+            assert_eq!(view.strides, expected);
+        }
+        assert_eq!(
+            empty.reshape_view(&[0], MemoryOrder::F),
+            Ok(Some(empty.clone()))
+        );
+        assert_eq!(
+            scalar.reshape_view(&[1, 1], MemoryOrder::C)
+                .expect("shape")
+                .expect("view")
+                .strides,
+            [4, 4]
+        );
+    }
+
+    #[test]
+    fn reshape_view_eligibility_matches_exhaustive_element_addresses() {
+        fn addresses(shape: &[usize], strides: &[isize], order: MemoryOrder) -> Vec<isize> {
+            let axes: Vec<_> = match order {
+                MemoryOrder::C => (0..shape.len()).rev().collect(),
+                MemoryOrder::F => (0..shape.len()).collect(),
+            };
+            (0..shape.iter().product::<usize>())
+                .map(|mut flat| {
+                    let mut address = 0;
+                    for &axis in &axes {
+                        address += (flat % shape[axis]) as isize * strides[axis];
+                        flat /= shape[axis];
+                    }
+                    address
+                })
+                .collect()
+        }
+
+        let storage = NdLayout::contiguous(vec![64], 4, MemoryOrder::C).expect("storage");
+        for row in [-24, -12, -4, 0, 4, 12, 24] {
+            for col in [-8, -4, 0, 4, 8] {
+                let base = storage.as_strided(vec![2, 3], vec![row, col]).expect("base");
+                for order in [MemoryOrder::C, MemoryOrder::F] {
+                    let source = addresses(&base.shape, &base.strides, order);
+                    for shape in [&[6][..], &[3, 2], &[1, 2, 3], &[2, 1, 3, 1]] {
+                        // Obtain each non-singleton output stride directly by
+                        // looking up the address of its unit coordinate.
+                        let steps: Vec<_> = (0..shape.len())
+                            .map(|axis| {
+                                if shape[axis] == 1 {
+                                    return 0;
+                                }
+                                let unit_index = match order {
+                                    MemoryOrder::C => shape[axis + 1..].iter().product::<usize>(),
+                                    MemoryOrder::F => shape[..axis].iter().product::<usize>(),
+                                };
+                                source[unit_index] - source[0]
+                            })
+                            .collect();
+                        let possible = addresses(shape, &steps, order) == source;
+                        let requested: Vec<_> = shape.iter().map(|&dim| dim as isize).collect();
+                        let view = base.reshape_view(&requested, order).expect("valid shape");
+                        assert_eq!(view.is_some(), possible, "{base:?} -> {shape:?} {order:?}");
+                        if let Some(view) = view {
+                            assert_eq!(addresses(shape, &view.strides, order), source);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

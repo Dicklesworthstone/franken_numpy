@@ -14,6 +14,7 @@ Subsystem: `Shape/reshape legality`
 | `P2C001-C05` | C/F contiguous stride derivation is deterministic for valid shape + item size | computed byte strides are deterministic and order-consistent | same deterministic strides; reject invalid item size/overflow | `shape.c:271`, `_attempt_nocopy_reshape` stride handling + Rust SCE |
 | `P2C001-C06` | Legacy `reshape` API delegates to canonical reshape path | `PyArray_Reshape` behavioral surface matches `PyArray_Newshape` contract | same API behavior under hardened validation | `shape.c:325`, `shape.c:333` |
 | `P2C001-C07` | Large broadcasted shapes remain shape-correct (subject to platform limits) | preserve broadcasted shape outcomes in high-cardinality cases | preserve outcome; fail-closed when resource/security gates trigger | `test_shape_base.py:450` |
+| `P2C001-C08` | No-copy reshape preserves the source traversal's byte addresses in requested C or F order | `NdLayout::reshape_view` returns a layout sharing the same starting byte and access flags, or `Ok(None)` when copying is necessary | same alias rules, with checked stride arithmetic and shape errors reported separately | `shape.c:_reshape_with_copy_arg`, `shape.c:_attempt_nocopy_reshape` |
 
 ## 2. Compatibility Invariants
 
@@ -27,7 +28,7 @@ Subsystem: `Shape/reshape legality`
 
 | Unknown ID | Description | Risk | Owner bead | Closure criteria |
 |---|---|---|---|---|
-| `P2C001-U01` | Full no-copy reshape alias-preservation parity (`_attempt_nocopy_reshape`) is not yet modeled end-to-end in Rust. | high | `bd-23m.12.4` | Implement alias-sensitive reshape/view boundary and land matching contract table entries with explicit invariants. |
+| `P2C001-U01` | Rust layout support now models no-copy reshape eligibility in C and F order (`NdLayout::reshape_view` and `P2C001-C08`). The address-enumeration regression test checks the alias boundary. | high | `bd-23m.12.4` | Implement alias-sensitive reshape/view boundary and land matching contract table entries with explicit invariants. |
 | `P2C001-U02` | closed: differential/metamorphic/adversarial packet-F lanes now verify reshape/broadcast mismatch class behavior and reason-code stability. | closed | `bd-23m.12.6` | closed by `run_shape_stride_{differential,metamorphic,adversarial}_suite` wiring plus `artifacts/phase2c/FNP-P2C-001/differential_metamorphic_adversarial_evidence.json`. |
 | `P2C001-U03` | Hardened-mode budget policy for extreme broadcast/reshape requests (size/resource thresholds) is not yet codified for this packet. | high | `bd-23m.12.3` | Threat model + policy table define explicit bounded-mode behavior and reason-code logging. |
 | `P2C001-U04` | closed: replay-forensics linkage from packet-specific shape failures to workflow scenarios is implemented for packet-G. | closed | `bd-23m.12.7` | closed by `shape_reshape_packet_replay` + `shape_reshape_packet_hostile_guardrails` scenarios, `scripts/e2e/run_shape_contract_journey.sh`, and packet-G evidence artifacts. |
