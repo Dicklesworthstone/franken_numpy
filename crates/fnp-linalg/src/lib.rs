@@ -8704,10 +8704,15 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
 /// Matrix exponentiation: compute A^p for integer p (np.linalg.matrix_power).
 /// Uses repeated squaring. p can be negative (requires invertible matrix).
 pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgError> {
-    if Some(a.len()) != n.checked_mul(n) || n == 0 {
+    if Some(a.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
-            "matrix_power_nxn: input must be n*n with n > 0",
+            "matrix_power_nxn: input must contain n*n entries",
         ));
+    }
+    // The unique 0-by-0 matrix is also its own inverse and identity. No
+    // multiplication or scalar inverse is needed, for any integer exponent.
+    if n == 0 {
+        return Ok(Vec::new());
     }
 
     if p == 0 {
@@ -8720,64 +8725,34 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
     }
 
     let base = if p < 0 { inv_nxn(a, n)? } else { a.to_vec() };
-    if p.unsigned_abs() == 1 {
-        // NumPy returns A (or its inverse) directly for these exponents.
-        // Multiplication by an identity can spread nonfinite entries and
-        // erase signed zeros even though no matrix product is required.
-        return Ok(base);
-    }
-
-    // The square-and-multiply ladder seeds `result = I` and folds in `result @ cur`
-    // at each set bit. The FIRST such fold is `I @ cur`, which equals `cur` exactly
-    // when `cur` is finite (1.0*x + Σ 0.0*y = x, bit-for-bit) — so we can skip that
-    // GEMM and clone `cur` instead. The old code only elided it for ODD powers (the
-    // lowest bit set), leaving a wasted `I @ cur` GEMM on every EVEN power — e.g.
-    // A² ran two GEMMs (A@A then I@A²) when one suffices. Tracking whether `result`
-    // is still the identity elides that first GEMM for ANY power. Gated on
-    // finite-nonzero entries: `0.0*∞`/`0.0*NaN` make `I @ cur` differ from `cur`, so
-    // a base with a zero or non-finite entry keeps the explicit identity seed to
-    // preserve numpy's NaN/Inf propagation. The odd-power GEMM schedule is unchanged
-    // (golden-pinned), so this is bit-identical there and on the elided even powers.
-    let elide_identity = p > 0 && base.iter().all(|&v| v.is_finite() && v != 0.0);
-    if elide_identity {
-        let mut exp = p.unsigned_abs();
-        let mut cur = base;
-        let mut result: Vec<f64> = Vec::new();
-        let mut result_is_identity = true;
-        while exp > 0 {
-            if exp & 1 == 1 {
-                if result_is_identity {
-                    result = cur.clone();
-                    result_is_identity = false;
-                } else {
-                    result = mat_mul_flat(&result, &cur, n);
-                }
-            }
-            exp >>= 1;
-            if exp > 0 {
-                cur = mat_mul_flat(&cur, &cur, n);
-            }
-        }
-        return Ok(result);
-    }
-
     let mut exp = p.unsigned_abs();
-    let mut result = vec![0.0; n * n];
-    for i in 0..n {
-        result[i * n + i] = 1.0; // identity
+    match exp {
+        1 => return Ok(base),
+        2 => return Ok(mat_mul_flat(&base, &base, n)),
+        // NumPy uses (A @ A) @ A for a cube. Reversing these two factors is
+        // algebraically equivalent, but changes floating-point rounding.
+        3 => return Ok(mat_mul_flat(&mat_mul_flat(&base, &base, n), &base, n)),
+        _ => {}
     }
-    let mut cur = base;
 
+    // Seed from the first selected power, as NumPy does. An extra I @ cur
+    // changes nonfinite propagation (0 * inf is NaN), including when finite
+    // inputs overflow during squaring. The same rule applies after inversion.
+    let mut result: Option<Vec<f64>> = None;
+    let mut cur = base;
     while exp > 0 {
         if exp & 1 == 1 {
-            result = mat_mul_flat(&result, &cur, n);
+            result = Some(match result {
+                Some(accumulator) => mat_mul_flat(&accumulator, &cur, n),
+                None => cur.clone(),
+            });
         }
         exp >>= 1;
         if exp > 0 {
             cur = mat_mul_flat(&cur, &cur, n);
         }
     }
-    Ok(result)
+    Ok(result.expect("a nonzero exponent selects at least one matrix power"))
 }
 
 /// Matrix exponential via scaling-and-squaring with Taylor series.
@@ -20385,98 +20360,130 @@ for n, data, values, only_values, vectors in json.loads(sys.argv[1]):
     }
 
     #[test]
-    fn matrix_power_initial_identity_elision_matches_old_schedule_sha256() {
-        fn old_schedule(a: &[f64], n: usize, p: u64) -> Vec<f64> {
-            let mut exp = p;
-            let mut result = vec![0.0; n * n];
-            for i in 0..n {
-                result[i * n + i] = 1.0;
-            }
-            let mut cur = a.to_vec();
-            while exp > 0 {
-                if exp & 1 == 1 {
-                    result = mat_mul_flat(&result, &cur, n);
-                }
-                exp >>= 1;
-                if exp > 0 {
-                    cur = mat_mul_flat(&cur, &cur, n);
-                }
-            }
-            result
-        }
-
-        let n = 32usize;
-        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        let a: Vec<f64> = (0..n * n)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                0.25 + ((state >> 33) as f64) / (u32::MAX as f64)
-            })
-            .collect();
-
-        let actual = matrix_power_nxn(&a, n, 3).expect("A^3");
-        let expected = old_schedule(&a, n, 3);
-        assert_eq!(actual.len(), expected.len());
-        for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
-            assert_eq!(
-                a.to_bits(),
-                e.to_bits(),
-                "matrix_power optimized schedule drifted at {index}"
-            );
-        }
-
-        let mut hasher = Sha256::new();
-        for v in &actual {
-            hasher.update(v.to_bits().to_le_bytes());
-        }
-        let digest = hasher.finalize();
-        let digest = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+    fn matrix_power_cube_preserves_numpy_parenthesization() {
+        // These values distinguish NumPy's (A @ A) @ A from A @ (A @ A).
+        // The old self-comparison and digest locked the latter schedule,
+        // even though it disagreed with the actual NumPy operation.
+        let a = [-2.0, -9007199254740992.0, 0.8125, 0.8125];
+        let expected_bits = [
+            0x4354_b7ff_ffff_fffe,
+            0x4689_ffff_ffff_fffd,
+            0xc335_1fff_ffff_fffd,
+            0x4323_8000_0000_0002,
+        ];
+        let actual = matrix_power_nxn(&a, 2, 3).expect("A^3");
         assert_eq!(
-            digest, "4cc72d5780b2d27b5e8e544630012f09bb268738be641b8481476fa7e15541a3",
-            "matrix_power finite-nonzero golden digest drifted"
+            actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            expected_bits
         );
     }
 
     #[test]
-    fn matrix_power_identity_elision_falls_back_for_zero_and_nan_bits() {
-        fn old_schedule(a: &[f64], n: usize, p: u64) -> Vec<f64> {
-            let mut exp = p;
-            let mut result = vec![0.0; n * n];
-            for i in 0..n {
-                result[i * n + i] = 1.0;
-            }
-            let mut cur = a.to_vec();
-            while exp > 0 {
-                if exp & 1 == 1 {
-                    result = mat_mul_flat(&result, &cur, n);
-                }
-                exp >>= 1;
-                if exp > 0 {
-                    cur = mat_mul_flat(&cur, &cur, n);
-                }
-            }
-            result
-        }
-
+    fn matrix_power_does_not_spread_nonfinite_values_through_an_identity() {
         let cases = [
-            [1.0, -0.0, 2.0, 3.0],
-            [1.0, f64::NAN, 2.0, 3.0],
-            [1.0, f64::INFINITY, 2.0, 3.0],
+            (
+                [f64::INFINITY, 0.0, 0.0, 1.0],
+                [f64::INFINITY, f64::NAN, f64::NAN, 1.0],
+            ),
+            (
+                [1.0, f64::INFINITY, 0.0, 1.0],
+                [f64::NAN, f64::INFINITY, 0.0, f64::NAN],
+            ),
+            (
+                [f64::MAX, 0.0, 0.0, 1.0],
+                [f64::INFINITY, 0.0, 0.0, 1.0],
+            ),
         ];
-        for a in cases {
-            let actual = matrix_power_nxn(&a, 2, 3).expect("fallback A^3");
-            let expected = old_schedule(&a, 2, 3);
-            for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
-                assert_eq!(
-                    a.to_bits(),
-                    e.to_bits(),
-                    "matrix_power fallback drifted at {index}"
-                );
+        for (a, expected) in cases {
+            let actual = matrix_power_nxn(&a, 2, 2).expect("A^2");
+            for (index, (&value, want)) in actual.iter().zip(expected).enumerate() {
+                if want.is_nan() {
+                    assert!(value.is_nan(), "A^2[{index}] must be NaN");
+                } else {
+                    assert_eq!(value.to_bits(), want.to_bits(), "A^2[{index}]");
+                }
             }
         }
+    }
+
+    #[test]
+    fn matrix_power_empty_shapes_and_extreme_exponents() {
+        for power in [i64::MIN, -7, -3, -2, -1, 0, 1, 2, 3, 7, i64::MAX] {
+            assert!(matrix_power_nxn(&[], 0, power).unwrap().is_empty());
+            assert_eq!(matrix_power_nxn(&[1.0], 1, power).unwrap(), [1.0]);
+        }
+        assert!(matrix_power_nxn(&[1.0], 0, 0).is_err());
+        assert!(matrix_power_nxn(&[], 1, 0).is_err());
+        assert!(matrix_power_nxn(&[], usize::MAX, 0).is_err());
+        assert!(matrix_power_nxn(&[0.0], 1, -1).is_err());
+        let signed_zero = matrix_power_nxn(&[-0.0], 1, 1).unwrap();
+        assert_eq!(signed_zero[0].to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn matrix_power_schedule_matches_live_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut cases = Vec::new();
+        let encode = |values: &[f64]| {
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut push = |a: &[f64], n: usize, power: i64| {
+            let actual = matrix_power_nxn(a, n, power).expect("matrix power must succeed");
+            cases.push(format!(
+                "[{n},{power},[{}],[{}]]",
+                encode(a),
+                encode(&actual)
+            ));
+        };
+        for power in [-7, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 8, 13] {
+            push(&[], 0, power);
+            push(&[2.0, 0.0, 0.0, 0.5], 2, power);
+            push(&[1.0, 0.5, 0.0, 1.0], 2, power);
+            push(&[0.5], 1, power);
+        }
+        for power in [0, 1, 2, 3, 4, 5, 7, 8] {
+            for a in [
+                [f64::INFINITY, 0.0, 0.0, 1.0],
+                [1.0, f64::INFINITY, 0.0, 1.0],
+                [f64::MAX, 0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, f64::NAN],
+                [-0.0, -0.0, 1.0, 0.5],
+            ] {
+                push(&a, 2, power);
+            }
+        }
+        push(&[-2.0, -9007199254740992.0, 0.8125, 0.8125], 2, 3);
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+with np.errstate(all="ignore"):
+    for n, power, source, actual in json.loads(sys.argv[1]):
+        a = np.array(source, dtype=np.float64).reshape(n, n)
+        actual = np.array(actual, dtype=np.float64).reshape(n, n)
+        expected = np.linalg.matrix_power(a, power)
+        label = f"matrix_power({a!r}, {power})"
+        np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected), err_msg=label)
+        present = ~np.isnan(expected)
+        np.testing.assert_array_equal(actual[present].view(np.uint64),
+                                      expected[present].view(np.uint64), err_msg=label)
+"#;
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", script, &format!("[{}]", cases.join(","))])
+            .output()
+            .expect("NumPy matrix-power oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy matrix-power comparison failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
