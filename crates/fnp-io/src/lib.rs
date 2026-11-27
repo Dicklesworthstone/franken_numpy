@@ -10,8 +10,11 @@
 //!
 //! # Functions
 //!
-//! - [`load_npy`] - Load a single array from .npy file
-//! - [`save_npy`] - Save a single array to .npy file
+//! - [`load`] and [`save`] read and write a single numeric array through `f64` values.
+//! - [`load_storage`] and [`save_storage`] preserve each numeric dtype, including wide
+//!   integers and complex component bits.
+//! - [`load_npz_storage`] and [`savez_storage`] read and write heterogeneous numeric
+//!   archives. Keys are literal, so `x` and `x.npy` identify distinct members.
 //! - [`load_npz`] - Load arrays from .npz archive
 //! - [`loadtxt`] - Load text data with delimiter/comment handling
 //! - [`genfromtxt`] - Load text with missing value handling
@@ -41,6 +44,7 @@ pub const IO_PACKET_ID: &str = "FNP-P2C-009";
 pub const NPY_MAGIC_PREFIX: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
 pub const NPZ_MAGIC_PREFIX: [u8; 4] = [b'P', b'K', 0x03, 0x04];
 pub const NPZ_EMPTY_PREFIX: [u8; 4] = [b'P', b'K', 0x05, 0x06];
+const ZIP_UTF8_FLAG: u16 = 1 << 11;
 
 /// Maximum NPY header size in bytes. Defends against allocation bombs from crafted
 /// `.npy` files. NumPy v1.0 uses a 2-byte header length field (max 65535); v2.0 uses 4 bytes
@@ -1695,11 +1699,8 @@ pub fn write_npz_bytes_with_compression(
                 }
             }
         };
-        let file_name = if name.ends_with(".npy") {
-            name.to_string()
-        } else {
-            format!("{name}.npy")
-        };
+        let file_name = normalized_npz_file_name(name);
+        let flags = if file_name.is_ascii() { 0 } else { ZIP_UTF8_FLAG };
         let fname_bytes = file_name.as_bytes();
         let fname_len = u16::try_from(fname_bytes.len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: member name exceeds 64KB zip limit")
@@ -1720,7 +1721,7 @@ pub fn write_npz_bytes_with_compression(
         // Local file header (30 bytes + filename)
         buf.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
         buf.extend_from_slice(&20_u16.to_le_bytes()); // version needed (2.0)
-        buf.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&flags.to_le_bytes()); // flags
         buf.extend_from_slice(&compression_method.to_le_bytes());
         buf.extend_from_slice(&0_u16.to_le_bytes()); // mod time
         buf.extend_from_slice(&0_u16.to_le_bytes()); // mod date
@@ -1736,7 +1737,7 @@ pub fn write_npz_bytes_with_compression(
         central_directory.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
         central_directory.extend_from_slice(&20_u16.to_le_bytes()); // version made by
         central_directory.extend_from_slice(&20_u16.to_le_bytes()); // version needed
-        central_directory.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        central_directory.extend_from_slice(&flags.to_le_bytes()); // flags
         central_directory.extend_from_slice(&compression_method.to_le_bytes());
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // mod time
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // mod date
@@ -1785,7 +1786,9 @@ pub fn write_npz_bytes_with_compression(
 /// Read an NPZ archive and return all named arrays (np.load for .npz files).
 ///
 /// Supports uncompressed STORE (method 0) and DEFLATE-compressed (method 8)
-/// entries. Each entry must decode to a valid `.npy` file.
+/// entries. Each entry must decode to a valid `.npy` file. For archives produced by
+/// older FrankenNumPy writers, unflagged names that form valid UTF-8 use that spelling.
+/// [`load_npz_storage`] uses the standard ZIP encoding for unflagged names (CP437).
 /// `allow_pickle` controls whether object dtype payloads are permitted.
 pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, IOError> {
     read_npz_bytes_impl(data, allow_pickle, NpzRangePolicy::Adaptive)
@@ -1812,19 +1815,24 @@ fn read_npz_bytes_impl(
     range_policy: NpzRangePolicy,
 ) -> Result<Vec<NpzEntry>, IOError> {
     let mut entries = Vec::new();
-    walk_npz_members(data, range_policy, |file_name, npy_bytes| {
-        let array = read_npy_bytes(npy_bytes, allow_pickle)?;
-        // Strip .npy suffix from name for user convenience
-        let clean_name = file_name
-            .strip_suffix(".npy")
-            .unwrap_or(&file_name)
-            .to_string();
-        entries.push(NpzEntry {
-            name: clean_name,
-            array,
-        });
-        Ok(())
-    })?;
+    walk_npz_members(
+        data,
+        range_policy,
+        NpzNameDecoding::LegacyUtf8,
+        |file_name, npy_bytes| {
+            let array = read_npy_bytes(npy_bytes, allow_pickle)?;
+            // Strip .npy suffix from name for user convenience
+            let clean_name = file_name
+                .strip_suffix(".npy")
+                .unwrap_or(&file_name)
+                .to_string();
+            entries.push(NpzEntry {
+                name: clean_name,
+                array,
+            });
+            Ok(())
+        },
+    )?;
     Ok(entries)
 }
 
@@ -1846,24 +1854,29 @@ pub struct NpzMemberFraming {
 /// as long as the header declares. Members are inflated one at a time and dropped.
 pub fn read_npz_member_framings(data: &[u8]) -> Result<Vec<NpzMemberFraming>, IOError> {
     let mut members = Vec::new();
-    walk_npz_members(data, NpzRangePolicy::Adaptive, |name, npy_bytes| {
-        let header = read_npy_header_framing(npy_bytes)?;
-        let payload_len = npy_bytes.len() - header.header_end;
-        if header
-            .expected_payload_bytes()
-            .is_some_and(|expected| payload_len < expected)
-        {
-            return Err(IOError::ReadPayloadIncomplete(
-                "npz member payload is shorter than its header declares",
-            ));
-        }
-        members.push(NpzMemberFraming {
-            name,
-            header,
-            payload_len,
-        });
-        Ok(())
-    })?;
+    walk_npz_members(
+        data,
+        NpzRangePolicy::Adaptive,
+        NpzNameDecoding::LegacyUtf8,
+        |name, npy_bytes| {
+            let header = read_npy_header_framing(npy_bytes)?;
+            let payload_len = npy_bytes.len() - header.header_end;
+            if header
+                .expected_payload_bytes()
+                .is_some_and(|expected| payload_len < expected)
+            {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "npz member payload is shorter than its header declares",
+                ));
+            }
+            members.push(NpzMemberFraming {
+                name,
+                header,
+                payload_len,
+            });
+            Ok(())
+        },
+    )?;
     Ok(members)
 }
 
@@ -1941,9 +1954,17 @@ fn npz_data_descriptor_len(
 
 /// Walk every member of an `.npz` archive, validating the ZIP structure and budgets, and hand
 /// each member's decoded `.npy` bytes to `on_member` with its ZIP file name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NpzNameDecoding {
+    // Older FrankenNumPy writers stored UTF-8 even with the ZIP UTF-8 flag clear.
+    LegacyUtf8,
+    ZipStandard,
+}
+
 fn walk_npz_members<F>(
     data: &[u8],
     range_policy: NpzRangePolicy,
+    name_decoding: NpzNameDecoding,
     mut on_member: F,
 ) -> Result<(), IOError>
 where
@@ -2148,7 +2169,8 @@ where
                 "npz: central directory entry extends beyond bounds",
             ));
         }
-        let file_name = String::from_utf8_lossy(&data[fname_start..fname_end]).into_owned();
+        let file_name =
+            decode_npz_file_name(&data[fname_start..fname_end], central_flags, name_decoding)?;
         validate_npz_file_name(&file_name)?;
 
         // Parse local file header to find data start
@@ -5734,6 +5756,44 @@ pub fn load_npz(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzLoadedEntry>, 
     Ok(results)
 }
 
+fn decode_npz_file_name(
+    bytes: &[u8],
+    flags: u16,
+    name_decoding: NpzNameDecoding,
+) -> Result<String, IOError> {
+    if flags & ZIP_UTF8_FLAG != 0 {
+        return std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| IOError::NpzArchiveContractViolation("npz: invalid UTF-8 member name"));
+    }
+    if (bytes.is_ascii() || name_decoding == NpzNameDecoding::LegacyUtf8)
+        && let Ok(name) = std::str::from_utf8(bytes)
+    {
+        return Ok(name.to_owned());
+    }
+    // ZIP's default filename encoding when the UTF-8 bit is clear is CP437.
+    const CP437_HIGH: [char; 128] = [
+        'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+        'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+        'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+        '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+        '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+        '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+        'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+        '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
+    ];
+    Ok(bytes
+        .iter()
+        .map(|&b| {
+            if b.is_ascii() {
+                char::from(b)
+            } else {
+                CP437_HIGH[usize::from(b - 128)]
+            }
+        })
+        .collect())
+}
+
 fn validate_npz_file_name(file_name: &str) -> Result<(), IOError> {
     if file_name.contains("..") || file_name.starts_with('/') {
         return Err(IOError::NpzArchiveContractViolation(
@@ -5751,8 +5811,8 @@ fn normalized_npz_file_name(name: &str) -> String {
     }
 }
 
-fn validate_public_npz_entry_names<'a>(
-    names: impl ExactSizeIterator<Item = &'a str>,
+fn validate_public_npz_entry_names(
+    names: impl ExactSizeIterator<Item = String>,
 ) -> Result<(), IOError> {
     if names.len() > MAX_ARCHIVE_MEMBERS {
         return Err(IOError::NpzArchiveContractViolation(
@@ -5760,8 +5820,7 @@ fn validate_public_npz_entry_names<'a>(
         ));
     }
     let mut seen = HashSet::with_capacity(names.len());
-    for name in names {
-        let file_name = normalized_npz_file_name(name);
+    for file_name in names {
         validate_npz_file_name(&file_name)?;
         if !seen.insert(file_name) {
             return Err(IOError::NpzArchiveContractViolation(
@@ -5776,7 +5835,7 @@ fn validate_public_npz_entry_names<'a>(
 ///
 /// Each entry is (name, shape, values, dtype).
 pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<Vec<u8>, IOError> {
-    validate_public_npz_entry_names(entries.iter().map(|entry| entry.0))?;
+    validate_public_npz_entry_names(entries.iter().map(|entry| normalized_npz_file_name(entry.0)))?;
 
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());
@@ -5806,7 +5865,7 @@ pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<V
 pub fn savez_compressed(
     entries: &[(&str, &[usize], &[f64], IOSupportedDType)],
 ) -> Result<Vec<u8>, IOError> {
-    validate_public_npz_entry_names(entries.iter().map(|entry| entry.0))?;
+    validate_public_npz_entry_names(entries.iter().map(|entry| normalized_npz_file_name(entry.0)))?;
 
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());

@@ -158,7 +158,7 @@ fn numeric_archives_preserve_member_dtypes_names_and_order() {
             load_npz_storage(&bytes).unwrap(),
             [
                 ("ids".to_owned(), vec![2], ids.clone()),
-                ("signal".to_owned(), vec![], signal.clone()),
+                ("signal.npy".to_owned(), vec![], signal.clone()),
                 ("flags".to_owned(), vec![0, 4], flags.clone()),
             ]
         );
@@ -168,8 +168,104 @@ fn numeric_archives_preserve_member_dtypes_names_and_order() {
         assert_eq!(raw[2].array.to_storage().unwrap(), flags);
         let empty = savez_storage(&[], compression).unwrap();
         assert!(load_npz_storage(&empty).unwrap().is_empty());
-        assert!(savez_storage(&[("x", &[2], &ids), ("x.npy", &[2], &ids)], compression).is_err());
+        assert!(savez_storage(&[("x", &[2], &ids), ("x", &[2], &ids)], compression).is_err());
         assert!(savez_storage(&[("../x", &[2], &ids)], compression).is_err());
         assert!(savez_storage(&[("ids", &[1], &ids)], compression).is_err());
+    }
+}
+
+#[test]
+fn zip_member_names_decode_cp437_and_require_valid_flagged_utf8() {
+    let value = ArrayStorage::U8(vec![1]);
+    let mut bytes = savez_storage(&[("caf!", &[], &value)], NpzCompression::Store).unwrap();
+    let central = u32::from_le_bytes(bytes[bytes.len() - 6..bytes.len() - 2].try_into().unwrap())
+        as usize;
+    // Replace the ASCII placeholder in both headers with CP437's e-acute.
+    bytes[30 + 3] = 0x82;
+    bytes[central + 46 + 3] = 0x82;
+    assert_eq!(load_npz_storage(&bytes).unwrap()[0].0, "café");
+    bytes[6..8].copy_from_slice(&(1_u16 << 11).to_le_bytes());
+    bytes[central + 8..central + 10].copy_from_slice(&(1_u16 << 11).to_le_bytes());
+    assert!(load_npz_storage(&bytes).is_err());
+    assert!(read_npz_bytes(&bytes, false).is_err());
+
+    // Older FrankenNumPy writers stored UTF-8 names but left both flags clear.
+    // With these bytes the two encodings are genuinely ambiguous.
+    let mut old = savez_storage(&[("café", &[], &value)], NpzCompression::Store).unwrap();
+    let central = u32::from_le_bytes(old[old.len() - 6..old.len() - 2].try_into().unwrap()) as usize;
+    old[6..8].fill(0);
+    old[central + 8..central + 10].fill(0);
+    assert_eq!(read_npz_bytes(&old, false).unwrap()[0].name, "café");
+    assert_eq!(fnp_io::load_npz(&old, false).unwrap()[0].0, "café");
+    assert_eq!(load_npz_storage(&old).unwrap()[0].0, "caf├⌐");
+}
+
+#[test]
+fn numpy_and_rust_exchange_npz_archives_with_literal_unicode_keys() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+    let script = r#"
+import io, sys, zipfile
+try:
+    import numpy as np
+except ImportError:
+    sys.exit(77)
+keys = ["x", "x.npy", "café_μ"]
+data = sys.stdin.buffer.read()
+with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
+    assert arrays.files == keys, arrays.files
+with zipfile.ZipFile(io.BytesIO(data)) as archive:
+    assert archive.namelist() == [k + ".npy" for k in keys]
+    for i, key in enumerate(keys):
+        name = key + ".npy"
+        assert bool(archive.getinfo(name).flag_bits & (1 << 11)) == (not key.isascii())
+        with archive.open(name) as f:
+            assert np.load(f, allow_pickle=False).item() == 2**63 + i
+out = io.BytesIO()
+save = np.savez if sys.argv[1] == "store" else np.savez_compressed
+save(out, **{key: np.uint64(2**63 + i) for i, key in enumerate(keys)})
+sys.stdout.buffer.write(out.getvalue())
+"#;
+    let keys = ["x", "x.npy", "café_μ"];
+    let values: Vec<_> = (0..3)
+        .map(|i| ArrayStorage::U64(vec![(1_u64 << 63) + i]))
+        .collect();
+    let entries: Vec<_> = keys
+        .iter()
+        .zip(&values)
+        .map(|(&key, value)| (key, &[][..], value))
+        .collect();
+    for (compression, argument) in [
+        (NpzCompression::Store, "store"),
+        (NpzCompression::Deflate, "deflate"),
+    ] {
+        let bytes = savez_storage(&entries, compression).unwrap();
+        let mut child = Command::new(&python)
+            .args(["-c", script, argument])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&bytes).unwrap();
+        let result = child.wait_with_output().unwrap();
+        if result.status.code() == Some(77) {
+            return;
+        }
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let loaded = load_npz_storage(&result.stdout).unwrap();
+        assert_eq!(loaded.len(), keys.len());
+        for ((name, shape, storage), (&key, expected)) in loaded.iter().zip(keys.iter().zip(&values))
+        {
+            assert_eq!(name, key);
+            assert!(shape.is_empty());
+            assert_eq!(storage, expected);
+        }
     }
 }
